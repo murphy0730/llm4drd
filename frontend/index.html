@@ -441,7 +441,7 @@ async function exportCSV(){
 // ============================================================
 const NODE_COLORS={order:'#00d2d3',task:'#2d7ff9',operation:'#0acf83',machine:'#ff8c42'};
 const NODE_SHAPES={order:'diamond',task:'round-rectangle',operation:'ellipse',machine:'hexagon'};
-const EDGE_COLORS={order_has_task:'#2d7ff9',task_predecessor:'#ff4757',task_has_operation:'#0acf83',operation_sequence:'#00d2d3',op_depends_task:'#7c5cfc',machine_eligible:'#ff8c4266'};
+const EDGE_COLORS={order_has_task:'#2d7ff9',task_predecessor:'#ff4757',task_has_operation:'#0acf83',operation_sequence:'#00d2d3',op_depends_task:'#7c5cfc',machine_eligible:'#f7c948'};
 const NODE_LABELS={order:'订单',task:'任务',operation:'工序',machine:'机器'};
 const EDGE_LABELS={order_has_task:'订单→任务',task_predecessor:'任务前置',task_has_operation:'任务→工序',operation_sequence:'工序顺序',op_depends_task:'工序依赖任务',machine_eligible:'机器兼容'};
 
@@ -688,8 +688,8 @@ async function buildCyGraph(){
         'target-arrow-color':EDGE_COLORS.op_depends_task,'line-style':'dashed',
       }},
       {selector:'edge[edge_type="machine_eligible"]',style:{
-        'line-color':'#ff8c4255','target-arrow-color':'#ff8c4255',
-        'width':0.8,'opacity':0.4,
+        'line-color':'#f7c948','target-arrow-color':'#f7c948',
+        'width':1.2,'opacity':0.75,
         'display':showMachEdge?'element':'none',
       }},
       // ── 交互高亮样式 ──
