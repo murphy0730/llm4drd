@@ -5,9 +5,8 @@
 <title>LLM4DRD 智能调度平台</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
-<script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
-<script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
-<script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 <style>
 :root{--bg:#060a14;--sf:#0d1321;--cd:#121a2e;--bd:#1a2744;--ac:#2d7ff9;--gn:#0acf83;--or:#ff8c42;--rd:#ff4757;--pr:#7c5cfc;--cy:#00d2d3;--pk:#ff6b9d;--tx:#e0e6f0;--dm:#8492a6;--mt:#4a5568}
 *{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--tx);font-family:'Noto Sans SC',system-ui;font-size:14px;line-height:1.6}
@@ -143,7 +142,7 @@ $('pages').innerHTML=`
 <!-- GRAPH -->
 <div id="p-graph" class="page">
 <div class="cd">
-<div class="ct2"><span class="dot" style="background:var(--pr)"></span>异构图 — 有向异构图建模</div>
+<div class="ct2"><span class="dot" style="background:var(--pr)"></span>异构图 — 分层有向异构图 (订单 → 任务 → 工序 → 机器)</div>
 <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
 <button class="btn b5" onclick="buildGraph()">🔗 构建异构图</button>
 <button class="btn b1" onclick="loadGraphData()">📂 加载已有图</button>
@@ -171,13 +170,34 @@ $('pages').innerHTML=`
 </div>
 </div>
 <div class="cd" id="graphVizCard" style="display:none">
-<div class="ct2"><span class="dot" style="background:var(--gn)"></span>图可视化 — 拖拽节点 | 滚轮缩放 | 点击高亮连线 | 双击聚焦</div>
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+  <div class="ct2" style="margin-bottom:0"><span class="dot" style="background:var(--gn)"></span>图可视化 — 拖拽 | 滚轮缩放 | 单击高亮 | 双击聚焦</div>
+  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <label class="f" style="flex-direction:row;align-items:center;gap:4px">布局方向
+      <select id="g_rankdir" onchange="applyLayout()" style="font-size:11px;padding:3px 6px">
+        <option value="LR">左→右</option>
+        <option value="TB">上→下</option>
+      </select>
+    </label>
+    <label class="f" style="flex-direction:row;align-items:center;gap:4px">层间距
+      <input id="g_ranksep" type="number" value="160" min="60" max="400" step="20" onchange="applyLayout()" style="width:60px;font-size:11px;padding:3px 6px">
+    </label>
+    <label class="f" style="flex-direction:row;align-items:center;gap:4px">节点间距
+      <input id="g_nodesep" type="number" value="30" min="10" max="120" step="10" onchange="applyLayout()" style="width:60px;font-size:11px;padding:3px 6px">
+    </label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
+      <input type="checkbox" id="g_show_mach" checked onchange="toggleMachineEdges()"> 显示机器兼容边
+    </label>
+    <button class="btn b6" onclick="cyInstance&&cyInstance.fit(null,40)" style="padding:4px 10px">⊡ 适应屏幕</button>
+    <button class="btn b3" onclick="applyLayout()" style="padding:4px 10px">↺ 重新布局</button>
+  </div>
+</div>
 <div class="graph-legend">
   <span><span class="ldot" style="background:#00d2d3"></span>订单</span>
   <span><span class="ldot" style="background:#2d7ff9"></span>任务</span>
   <span><span class="ldot" style="background:#0acf83"></span>工序</span>
   <span><span class="ldot" style="background:#ff8c42"></span>机器</span>
-  <span style="margin-left:12px;color:var(--dm)">| 边: 蓝=订单→任务 红=前置 绿=任务→工序 青=工序顺序 紫=依赖 橙=机器兼容</span>
+  <span style="margin-left:10px;color:var(--dm);font-size:10px">边色: <span style="color:#2d7ff9">■</span>订单→任务 <span style="color:#ff4757">■</span>任务前置 <span style="color:#0acf83">■</span>任务→工序 <span style="color:#00d2d3">■</span>工序顺序 <span style="color:#7c5cfc">■</span>工序依赖 <span style="color:#ff8c42">■</span>机器兼容</span>
 </div>
 <div id="cyGraph"></div>
 <div id="nodeInfo" class="node-info"></div>
@@ -532,87 +552,191 @@ function showNodeInfo(node){
   info.innerHTML=h;info.style.display='block';
 }
 
+// Dagre layout helper
+function getDagreLayoutConfig(){
+  const rankDir=$('g_rankdir')?$('g_rankdir').value:'LR';
+  const rankSep=parseInt($('g_ranksep')?$('g_ranksep').value:160)||160;
+  const nodeSep=parseInt($('g_nodesep')?$('g_nodesep').value:30)||30;
+  return {
+    name:'dagre',
+    rankDir:rankDir,       // 'LR'=左→右(默认), 'TB'=上→下
+    rankSep:rankSep,       // 各层之间的间距
+    nodeSep:nodeSep,       // 同层节点之间的间距
+    edgeSep:10,
+    ranker:'tight-tree',   // 使同层节点排列更紧凑: network-simplex | tight-tree | longest-path
+    animate:true,
+    animationDuration:500,
+    padding:40,
+    fit:true,
+  };
+}
+
+function applyLayout(){
+  if(!cyInstance)return;
+  cyInstance.layout(getDagreLayoutConfig()).run();
+}
+
+function toggleMachineEdges(){
+  if(!cyInstance)return;
+  const show=$('g_show_mach')&&$('g_show_mach').checked;
+  cyInstance.edges('[edge_type="machine_eligible"]').style('display',show?'element':'none');
+}
+
 async function buildCyGraph(){
-  // Fetch data for visualization
-  const nodesR=await api('/api/graph/nodes?limit=150');
-  const edgesR=await api('/api/graph/edges?limit=800');
+  // Fetch data (dagre handles up to ~300 nodes well; for larger graphs increase limits)
+  const nodesR=await api('/api/graph/nodes?limit=300');
+  const edgesR=await api('/api/graph/edges?limit=1200');
   const nodes=nodesR.nodes,edges=edgesR.edges;
 
   const elements=[];
   const nodeIds=new Set();
+
+  // 节点: 按层设置 rank 提示让 dagre 排得更整齐
+  const typeRank={order:0,task:1,operation:2,machine:3};
   nodes.forEach(n=>{
     nodeIds.add(n.node_id);
     const label=(n.attrs&&n.attrs.label)||n.entity_id||n.node_id.split(':')[1]||n.node_id;
-    elements.push({data:{id:n.node_id,label:label,node_type:n.node_type,entity_id:n.entity_id,...(n.attrs||{})}});
+    elements.push({data:{
+      id:n.node_id,label:label,
+      node_type:n.node_type,entity_id:n.entity_id,
+      rank:typeRank[n.node_type]??2,
+      ...(n.attrs||{})
+    }});
   });
+
+  // 边: 跳过两端节点不在当前集合中的
   edges.forEach(e=>{
     if(nodeIds.has(e.source)&&nodeIds.has(e.target)){
-      elements.push({data:{id:'e'+e.id,source:e.source,target:e.target,edge_type:e.edge_type}});
+      elements.push({data:{
+        id:'e'+e.id,source:e.source,target:e.target,edge_type:e.edge_type
+      }});
     }
   });
 
   if(cyInstance){cyInstance.destroy();cyInstance=null}
 
+  const showMachEdge=$('g_show_mach')?$('g_show_mach').checked:true;
+
   cyInstance=cytoscape({
     container:$('cyGraph'),
     elements:elements,
     style:[
+      // ── 基础节点样式 ──
       {selector:'node',style:{
-        'label':'data(label)','font-size':'8px','color':'#c0c8d8',
-        'text-valign':'bottom','text-margin-y':'4px',
-        'width':20,'height':20,'border-width':2,'border-color':'#333',
-        'text-max-width':'80px','text-wrap':'ellipsis',
+        'label':'data(label)',
+        'font-size':'8px','color':'#b0bcd0',
+        'text-valign':'bottom','text-halign':'center',
+        'text-margin-y':'5px',
+        'text-max-width':'90px','text-wrap':'ellipsis',
+        'width':22,'height':22,
+        'border-width':2,'border-color':'#1a2744',
       }},
-      {selector:'node[node_type="order"]',style:{'background-color':NODE_COLORS.order,'shape':'diamond','width':28,'height':28,'font-size':'9px','font-weight':'bold'}},
-      {selector:'node[node_type="task"]',style:{'background-color':NODE_COLORS.task,'shape':'round-rectangle','width':22,'height':16}},
-      {selector:'node[node_type="operation"]',style:{'background-color':NODE_COLORS.operation,'shape':'ellipse','width':14,'height':14}},
-      {selector:'node[node_type="machine"]',style:{'background-color':NODE_COLORS.machine,'shape':'hexagon','width':24,'height':24}},
+      // 订单 — 青色菱形，最大最醒目
+      {selector:'node[node_type="order"]',style:{
+        'background-color':NODE_COLORS.order,'shape':'diamond',
+        'width':34,'height':34,
+        'border-color':NODE_COLORS.order+'88',
+        'font-size':'10px','font-weight':'bold','color':NODE_COLORS.order,
+        'text-valign':'top','text-margin-y':'-6px',
+      }},
+      // 任务 — 蓝色圆角矩形
+      {selector:'node[node_type="task"]',style:{
+        'background-color':NODE_COLORS.task,'shape':'round-rectangle',
+        'width':28,'height':18,
+        'border-color':NODE_COLORS.task+'88',
+        'font-size':'9px','color':NODE_COLORS.task,
+      }},
+      // 工序 — 绿色椭圆，最小
+      {selector:'node[node_type="operation"]',style:{
+        'background-color':NODE_COLORS.operation,'shape':'ellipse',
+        'width':16,'height':16,
+        'border-color':NODE_COLORS.operation+'88',
+        'font-size':'7px','color':'#8aefc0',
+      }},
+      // 机器 — 橙色六边形
+      {selector:'node[node_type="machine"]',style:{
+        'background-color':NODE_COLORS.machine,'shape':'hexagon',
+        'width':28,'height':28,
+        'border-color':NODE_COLORS.machine+'88',
+        'font-size':'8px','color':NODE_COLORS.machine,
+      }},
+      // ── 基础边样式 ──
       {selector:'edge',style:{
-        'width':1,'line-color':'#333','target-arrow-color':'#333',
-        'target-arrow-shape':'triangle','curve-style':'bezier',
-        'arrow-scale':0.6,'opacity':0.6,
+        'width':1.2,'line-color':'#1e2e4a',
+        'target-arrow-color':'#1e2e4a','target-arrow-shape':'triangle',
+        'curve-style':'bezier','arrow-scale':0.7,'opacity':0.75,
       }},
-      {selector:'edge[edge_type="order_has_task"]',style:{'line-color':EDGE_COLORS.order_has_task,'target-arrow-color':EDGE_COLORS.order_has_task}},
-      {selector:'edge[edge_type="task_predecessor"]',style:{'line-color':EDGE_COLORS.task_predecessor,'target-arrow-color':EDGE_COLORS.task_predecessor,'line-style':'dashed','width':2}},
-      {selector:'edge[edge_type="task_has_operation"]',style:{'line-color':EDGE_COLORS.task_has_operation,'target-arrow-color':EDGE_COLORS.task_has_operation}},
-      {selector:'edge[edge_type="operation_sequence"]',style:{'line-color':EDGE_COLORS.operation_sequence,'target-arrow-color':EDGE_COLORS.operation_sequence,'width':2}},
-      {selector:'edge[edge_type="op_depends_task"]',style:{'line-color':EDGE_COLORS.op_depends_task,'target-arrow-color':EDGE_COLORS.op_depends_task,'line-style':'dashed'}},
-      {selector:'edge[edge_type="machine_eligible"]',style:{'line-color':EDGE_COLORS.machine_eligible,'target-arrow-color':EDGE_COLORS.machine_eligible,'width':0.5,'opacity':0.3}},
-      // Highlighted states
-      {selector:'.highlighted',style:{'border-width':4,'border-color':'#fff','width':36,'height':36,'z-index':999,'font-size':'11px','font-weight':'bold','color':'#fff','text-background-color':'#000a','text-background-opacity':0.8,'text-background-padding':'2px'}},
-      {selector:'.neighbor-node',style:{'border-width':3,'border-color':'#fffa','opacity':1,'z-index':99}},
-      {selector:'.neighbor-edge',style:{'width':3,'opacity':1,'z-index':99}},
-      {selector:'.dimmed',style:{'opacity':0.15}},
+      {selector:'edge[edge_type="order_has_task"]',style:{
+        'line-color':EDGE_COLORS.order_has_task,
+        'target-arrow-color':EDGE_COLORS.order_has_task,'width':1.5,
+      }},
+      {selector:'edge[edge_type="task_predecessor"]',style:{
+        'line-color':EDGE_COLORS.task_predecessor,
+        'target-arrow-color':EDGE_COLORS.task_predecessor,
+        'line-style':'dashed','width':2,
+      }},
+      {selector:'edge[edge_type="task_has_operation"]',style:{
+        'line-color':EDGE_COLORS.task_has_operation,
+        'target-arrow-color':EDGE_COLORS.task_has_operation,'width':1.2,
+      }},
+      {selector:'edge[edge_type="operation_sequence"]',style:{
+        'line-color':EDGE_COLORS.operation_sequence,
+        'target-arrow-color':EDGE_COLORS.operation_sequence,'width':2,
+      }},
+      {selector:'edge[edge_type="op_depends_task"]',style:{
+        'line-color':EDGE_COLORS.op_depends_task,
+        'target-arrow-color':EDGE_COLORS.op_depends_task,'line-style':'dashed',
+      }},
+      {selector:'edge[edge_type="machine_eligible"]',style:{
+        'line-color':'#ff8c4255','target-arrow-color':'#ff8c4255',
+        'width':0.8,'opacity':0.4,
+        'display':showMachEdge?'element':'none',
+      }},
+      // ── 交互高亮样式 ──
+      {selector:'.highlighted',style:{
+        'border-width':4,'border-color':'#ffffff',
+        'width':44,'height':44,
+        'z-index':9999,
+        'font-size':'12px','font-weight':'bold','color':'#ffffff',
+        'text-background-color':'#00000099','text-background-opacity':1,
+        'text-background-padding':'3px','text-background-shape':'roundrectangle',
+      }},
+      {selector:'.neighbor-node',style:{
+        'border-width':3,'border-color':'#ffffffaa',
+        'opacity':1,'z-index':99,
+      }},
+      {selector:'.neighbor-edge',style:{
+        'width':3,'opacity':1,'z-index':99,
+      }},
+      {selector:'.dimmed',style:{'opacity':0.12}},
     ],
-    layout:{name:'fcose',animate:false,randomize:true,nodeSeparation:120,idealEdgeLength:e=>{
-      const t=e.data('edge_type');
-      if(t==='machine_eligible')return 250;
-      if(t==='order_has_task')return 100;
-      return 150;
-    },nodeRepulsion:8000,gravity:0.15,gravityRange:3.8},
-    minZoom:0.1,maxZoom:5,wheelSensitivity:0.3,
+    layout:getDagreLayoutConfig(),
+    minZoom:0.05,maxZoom:6,wheelSensitivity:0.25,
+    boxSelectionEnabled:false,
   });
 
-  // Click node => highlight
+  // ── 单击节点 → 高亮邻居 ──
   cyInstance.on('tap','node',function(evt){
     const node=evt.target;
     cyInstance.elements().removeClass('highlighted neighbor-node neighbor-edge dimmed');
     cyInstance.elements().addClass('dimmed');
     const neighborhood=node.neighborhood();
     node.removeClass('dimmed').addClass('highlighted');
-    neighborhood.removeClass('dimmed').addClass('neighbor-node neighbor-edge');
+    neighborhood.nodes().removeClass('dimmed').addClass('neighbor-node');
+    neighborhood.edges().removeClass('dimmed').addClass('neighbor-edge');
     node.connectedEdges().removeClass('dimmed').addClass('neighbor-edge');
     showNodeInfo(node);
   });
 
-  // Double-click => focus with animation
+  // ── 双击节点 → 动画聚焦 ──
   cyInstance.on('dbltap','node',function(evt){
     const node=evt.target;
-    const neighborhood=node.neighborhood();
-    cyInstance.animate({fit:{eles:node.union(neighborhood),padding:60}},{duration:500});
+    cyInstance.animate({
+      fit:{eles:node.union(node.neighborhood()),padding:80}
+    },{duration:450,easing:'ease-in-out-cubic'});
   });
 
-  // Click background => reset
+  // ── 点击空白 → 取消高亮 ──
   cyInstance.on('tap',function(evt){
     if(evt.target===cyInstance){
       cyInstance.elements().removeClass('highlighted neighbor-node neighbor-edge dimmed');
