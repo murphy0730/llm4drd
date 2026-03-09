@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM4DRD 智能调度平台</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+<script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+<script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+<style>
+:root{--bg:#060a14;--sf:#0d1321;--cd:#121a2e;--bd:#1a2744;--ac:#2d7ff9;--gn:#0acf83;--or:#ff8c42;--rd:#ff4757;--pr:#7c5cfc;--cy:#00d2d3;--pk:#ff6b9d;--tx:#e0e6f0;--dm:#8492a6;--mt:#4a5568}
+*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--tx);font-family:'Noto Sans SC',system-ui;font-size:14px;line-height:1.6}
+::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:var(--mt);border-radius:3px}
+.hd{background:linear-gradient(135deg,#0d1321,#121a2e);border-bottom:1px solid var(--bd);padding:12px 24px;display:flex;justify-content:space-between;align-items:center}
+.hd h1{font-size:18px;font-weight:900;background:linear-gradient(90deg,var(--ac),var(--cy));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hd .tag{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--cy)}
+.tabs{display:flex;border-bottom:1px solid var(--bd);background:var(--sf);padding:0 16px;overflow-x:auto;gap:0}
+.tab{padding:9px 14px;font-size:12px;cursor:pointer;color:var(--dm);border-bottom:2px solid transparent;white-space:nowrap;font-weight:500;transition:.15s}
+.tab:hover{color:var(--tx)}.tab.on{color:var(--ac);border-color:var(--ac);font-weight:700}
+.ct{max-width:1300px;margin:0 auto;padding:16px 20px 60px}.page{display:none}.page.on{display:block}
+.cd{background:var(--cd);border:1px solid var(--bd);border-radius:8px;padding:16px 18px;margin-bottom:12px}
+.ct2{font-size:13px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.g{display:grid;gap:8px}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:1fr 1fr 1fr}.g4{grid-template-columns:repeat(4,1fr)}.g5{grid-template-columns:repeat(5,1fr)}
+label.f{display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--dm)}
+input,select{background:var(--sf);border:1px solid var(--bd);border-radius:4px;padding:5px 8px;color:var(--tx);font-size:12px;font-family:inherit}
+input:focus,select:focus{outline:none;border-color:var(--ac)}
+.btn{padding:6px 16px;border:none;border-radius:5px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;transition:.15s}
+.btn:disabled{opacity:.3;cursor:not-allowed}
+.b1{background:var(--ac)33;color:var(--ac)}.b2{background:var(--gn)33;color:var(--gn)}.b3{background:var(--or)33;color:var(--or)}
+.b4{background:var(--rd)33;color:var(--rd)}.b5{background:var(--pr)33;color:var(--pr)}.b6{background:var(--cy)33;color:var(--cy)}
+.bg{display:inline-block;padding:1px 8px;border-radius:3px;font-size:10px;font-weight:600}
+.bg-g{background:var(--gn)22;color:var(--gn)}.bg-b{background:var(--ac)22;color:var(--ac)}.bg-r{background:var(--rd)22;color:var(--rd)}.bg-o{background:var(--or)22;color:var(--or)}.bg-p{background:var(--pr)22;color:var(--pr)}
+table{width:100%;border-collapse:collapse;font-size:11px}th{padding:6px 8px;text-align:left;color:var(--dm);font-weight:600;border-bottom:2px solid var(--bd);white-space:nowrap}
+td{padding:4px 8px;border-bottom:1px solid var(--bd)44;white-space:nowrap}tr:hover td{background:var(--ac)08}
+.mono{font-family:'JetBrains Mono',monospace;font-size:11px}
+.mg{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.mt{background:var(--sf);border-radius:6px;padding:10px 14px;border-left:3px solid var(--ac)}
+.mt .lb{font-size:10px;color:var(--dm)}.mt .vl{font-size:18px;font-weight:800;margin-top:1px}
+.log{background:#050810;border:1px solid var(--bd);border-radius:6px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7;max-height:400px;overflow-y:auto;color:var(--dm);white-space:pre-wrap}
+.log .i{color:var(--cy)}.log .g{color:var(--gn)}.log .w{color:var(--or)}.log .e{color:var(--rd)}.log .p{color:var(--pr)}
+.gw{position:relative;overflow:hidden;border-radius:6px;background:var(--sf)}
+.gt{position:absolute;background:var(--cd)f0;border:1px solid var(--bd);border-radius:6px;padding:8px 12px;font-size:10px;pointer-events:none;z-index:99;min-width:180;display:none}
+.sp{display:inline-block;width:14px;height:14px;border:2px solid var(--mt);border-top-color:var(--ac);border-radius:50%;animation:sp .5s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.llm-msg{background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:10px 14px;margin-bottom:8px;font-size:11px}
+.llm-msg .role{font-weight:700;margin-bottom:4px}.llm-msg pre{white-space:pre-wrap;max-height:200px;overflow-y:auto;background:#0008;padding:6px;border-radius:4px;margin-top:4px;font-size:10px}
+td.editable{cursor:pointer;position:relative}td.editable:hover{background:var(--ac)15!important}
+td.editable input{width:100%;background:var(--bg);border:1px solid var(--ac);padding:2px 4px;color:var(--tx);font-size:11px;border-radius:2px}
+.sub-tabs{display:flex;gap:0;margin-bottom:10px;border-bottom:1px solid var(--bd)}
+.sub-tab{padding:6px 12px;font-size:11px;cursor:pointer;color:var(--dm);border-bottom:2px solid transparent;font-weight:500}
+.sub-tab:hover{color:var(--tx)}.sub-tab.on{color:var(--cy);border-color:var(--cy);font-weight:700}
+.sub-page{display:none}.sub-page.on{display:block}
+#cyGraph{width:100%;height:600px;border-radius:6px;background:#080c18}
+.graph-legend{display:flex;gap:12px;flex-wrap:wrap;padding:8px 0;font-size:10px}
+.graph-legend span{display:flex;align-items:center;gap:4px}
+.graph-legend .ldot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.node-info{background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:10px 14px;margin-top:8px;font-size:11px;display:none}
+</style>
+</head>
+<body>
+<div class="hd"><div><div class="tag">LLM4DRD · Dual-AI Scheduling Platform</div><h1>智能调度平台 v3</h1></div><div style="display:flex;gap:8px;align-items:center"><span id="stB" class="bg bg-b">未初始化</span><span id="sp" class="sp" style="display:none"></span></div></div>
+<div class="tabs" id="tabs"></div>
+<div class="ct" id="pages"></div>
+
+<script>
+const A='',OC=['#2d7ff9','#0acf83','#ff8c42','#ff4757','#7c5cfc','#ff6b9d','#00d2d3','#f97316','#14b8a6','#a855f7','#6366f1','#84cc16'];
+let shop=null,lastGantt=null,cyInstance=null;
+
+async function api(p,o={}){const r=await fetch(A+p,{headers:{'Content-Type':'application/json'},...o});if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||r.statusText)}return r.json()}
+function $(id){return document.getElementById(id)}
+function show(v){$('sp').style.display=v?'inline-block':'none'}
+
+// === TABS ===
+const TABS=[
+  {k:'inst',l:'📦 问题配置'},{k:'graph',l:'🔗 异构图'},{k:'sim',l:'⚡ 仿真排产'},{k:'cmp',l:'📊 规则对比'},
+  {k:'pareto',l:'🎯 帕累托优化'},{k:'ai',l:'🤖 AI进化训练'},{k:'cfg',l:'⚙️ 大模型配置'}
+];
+$('tabs').innerHTML=TABS.map((t,i)=>`<div class="tab${i===0?' on':''}" data-k="${t.k}">${t.l}</div>`).join('');
+$('tabs').onclick=e=>{const t=e.target.closest('.tab');if(!t)return;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));t.classList.add('on');
+  document.querySelectorAll('.page').forEach(x=>x.classList.remove('on'));$('p-'+t.dataset.k).classList.add('on')};
+
+// === PAGES ===
+$('pages').innerHTML=`
+<!-- INSTANCE -->
+<div id="p-inst" class="page on">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--cy)"></span>问题实例配置 — 订单/任务/工序/机器/班次</div>
+<div class="g g5">
+<label class="f">订单数<input id="c_ord" type="number" value="10" min="1" max="2000"></label>
+<label class="f">每单任务数(最小)<input id="c_tmin" type="number" value="2" min="1"></label>
+<label class="f">每单任务数(最大)<input id="c_tmax" type="number" value="5" min="1"></label>
+<label class="f">每任务工序(最小)<input id="c_omin" type="number" value="2" min="1"></label>
+<label class="f">每任务工序(最大)<input id="c_omax" type="number" value="5" min="1"></label>
+<label class="f">每类机器台数<input id="c_mpt" type="number" value="3" min="1" max="50"></label>
+<label class="f">交期松紧度<input id="c_due" type="number" value="1.5" step="0.1" min="0.3" max="5"></label>
+<label class="f">到达分散度<input id="c_arr" type="number" value="0" step="0.1" min="0" max="2"></label>
+<label class="f">白班小时<input id="c_ds" type="number" value="10" min="0" max="24"></label>
+<label class="f">夜班小时<input id="c_ns" type="number" value="8" min="0" max="24"></label>
+<label class="f">排程天数<input id="c_days" type="number" value="30" min="1"></label>
+<label class="f">维修概率<input id="c_mp" type="number" value="0.05" step="0.01" min="0" max="1"></label>
+<label class="f">随机种子<input id="c_seed" type="number" value="42"></label>
+</div>
+<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<button class="btn b1" onclick="genInst()">🚀 生成实例</button>
+<button class="btn b6" onclick="exportCSV()">📥 导出CSV</button>
+<button class="btn b2" onclick="loadFromDB()">📂 从数据库加载</button>
+<span style="border-left:1px solid var(--bd);height:20px;margin:0 4px"></span>
+<button class="btn b3" onclick="showImportModal()">📤 导入Excel文件</button>
+<a href="/api/instance/template" class="btn b6" style="text-decoration:none">📄 下载模板</a>
+</div>
+</div>
+<!-- Excel Import Modal -->
+<div id="csvModal" class="cd" style="display:none;border-color:var(--or)">
+<div class="ct2"><span class="dot" style="background:var(--or)"></span>导入Excel文件 — 包含5个Sheet(orders/tasks/operations/machine_types/machines)</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">模板文件在项目 docs/instance_template.xlsx, 也可点击上方"下载模板"获取</div>
+<div style="margin-bottom:10px">
+<label class="f">选择Excel文件 (.xlsx)<input type="file" id="xlsx_file" accept=".xlsx,.xls"></label>
+</div>
+<div style="display:flex;gap:8px"><button class="btn b2" onclick="doImportExcel()">确认导入</button><button class="btn b4" onclick="$('csvModal').style.display='none'">取消</button></div>
+<div id="importMsg" style="margin-top:6px;font-size:11px"></div>
+</div>
+<!-- Sub-tabs for instance data view -->
+<div class="cd" id="instViewCard" style="display:none">
+<div class="ct2"><span class="dot" style="background:var(--gn)"></span>实例数据 — 点击单元格可编辑</div>
+<div class="sub-tabs" id="instSubTabs">
+<div class="sub-tab on" data-k="overview">概览</div>
+<div class="sub-tab" data-k="orders">订单</div>
+<div class="sub-tab" data-k="tasks">任务</div>
+<div class="sub-tab" data-k="ops">工序</div>
+<div class="sub-tab" data-k="machines">机器</div>
+</div>
+<div id="instSubPages">
+<div id="isp-overview" class="sub-page on"></div>
+<div id="isp-orders" class="sub-page"></div>
+<div id="isp-tasks" class="sub-page"></div>
+<div id="isp-ops" class="sub-page"></div>
+<div id="isp-machines" class="sub-page"></div>
+</div>
+</div>
+<div id="instD"></div>
+</div>
+
+<!-- GRAPH -->
+<div id="p-graph" class="page">
+<div class="cd">
+<div class="ct2"><span class="dot" style="background:var(--pr)"></span>异构图 — 有向异构图建模</div>
+<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+<button class="btn b5" onclick="buildGraph()">🔗 构建异构图</button>
+<button class="btn b1" onclick="loadGraphData()">📂 加载已有图</button>
+</div>
+</div>
+<div id="graphStats" class="cd" style="display:none">
+<div class="ct2"><span class="dot" style="background:var(--cy)"></span>图统计信息</div>
+<div id="graphStatsContent"></div>
+</div>
+<div class="cd" id="graphSearchCard" style="display:none">
+<div class="ct2"><span class="dot" style="background:var(--ac)"></span>搜索节点和边</div>
+<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+<label class="f">搜索关键词<input id="g_search" type="text" placeholder="输入节点/边ID或关键词" onkeydown="if(event.key==='Enter')searchGraph()"></label>
+<label class="f">节点类型<select id="g_node_type"><option value="">全部</option><option value="order">订单</option><option value="task">任务</option><option value="operation">工序</option><option value="machine">机器</option></select></label>
+<label class="f">边类型<select id="g_edge_type"><option value="">全部</option><option value="order_has_task">订单→任务</option><option value="task_predecessor">任务前置</option><option value="task_has_operation">任务→工序</option><option value="operation_sequence">工序顺序</option><option value="op_depends_task">工序依赖任务</option><option value="machine_eligible">机器兼容</option></select></label>
+<button class="btn b1" onclick="searchGraph()">🔍 搜索</button>
+</div>
+<div class="sub-tabs" id="graphSubTabs">
+<div class="sub-tab on" data-k="gnodes">节点</div>
+<div class="sub-tab" data-k="gedges">边</div>
+</div>
+<div id="graphSubPages">
+<div id="gsp-gnodes" class="sub-page on"><div id="graphNodesContent"></div></div>
+<div id="gsp-gedges" class="sub-page"><div id="graphEdgesContent"></div></div>
+</div>
+</div>
+<div class="cd" id="graphVizCard" style="display:none">
+<div class="ct2"><span class="dot" style="background:var(--gn)"></span>图可视化 — 拖拽节点 | 滚轮缩放 | 点击高亮连线 | 双击聚焦</div>
+<div class="graph-legend">
+  <span><span class="ldot" style="background:#00d2d3"></span>订单</span>
+  <span><span class="ldot" style="background:#2d7ff9"></span>任务</span>
+  <span><span class="ldot" style="background:#0acf83"></span>工序</span>
+  <span><span class="ldot" style="background:#ff8c42"></span>机器</span>
+  <span style="margin-left:12px;color:var(--dm)">| 边: 蓝=订单→任务 红=前置 绿=任务→工序 青=工序顺序 紫=依赖 橙=机器兼容</span>
+</div>
+<div id="cyGraph"></div>
+<div id="nodeInfo" class="node-info"></div>
+</div>
+</div>
+
+<!-- SIMULATE -->
+<div id="p-sim" class="page">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--ac)"></span>仿真排产 — 选择规则运行</div>
+<div style="display:flex;gap:10px;align-items:flex-end">
+<label class="f">调度规则<select id="s_rule"><option>ATC</option><option>EDD</option><option>SPT</option><option>CR</option><option>FIFO</option><option>MST</option><option>LPT</option><option>PRIORITY</option><option>KIT_AWARE</option><option>BOTTLENECK</option><option>COMPOSITE</option></select></label>
+<button class="btn b2" onclick="runSim()">▶ 运行仿真</button>
+</div></div>
+<div id="simR"></div>
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--dm)"></span>运行日志</div><div id="simL" class="log">等待运行...</div></div>
+</div>
+
+<!-- COMPARE -->
+<div id="p-cmp" class="page">
+<div class="cd"><button class="btn b3" onclick="runCmp()">📊 11条规则全对比</button></div>
+<div id="cmpR"></div>
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--dm)"></span>运行日志</div><div id="cmpL" class="log">等待运行...</div></div>
+</div>
+
+<!-- PARETO -->
+<div id="p-pareto" class="page">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--pr)"></span>帕累托多目标优化</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">支持12种工业排产指标</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+<label class="f">目标1<select id="po1"><option value="total_tardiness">总延迟</option><option value="makespan">Makespan</option><option value="main_order_tardy_count">延误主订单数</option><option value="main_order_tardy_ratio">主订单延误比例</option><option value="critical_utilization">关键资源利用率</option><option value="total_wait_time">总等待时间</option><option value="avg_flowtime">平均流程时间</option></select></label>
+<label class="f">目标2<select id="po2"><option value="critical_utilization">关键资源利用率</option><option value="makespan">Makespan</option><option value="total_tardiness">总延迟</option><option value="main_order_tardy_count">延误主订单数</option><option value="total_wait_time">总等待时间</option></select></label>
+<button class="btn b5" onclick="runPareto()">🎯 计算帕累托前沿</button>
+</div></div>
+<div id="parR"></div>
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--dm)"></span>运行日志</div><div id="parL" class="log">等待运行...</div></div>
+</div>
+
+<!-- AI EVOLUTION -->
+<div id="p-ai" class="page">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--gn)"></span>🤖 双AI专家进化训练</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">LLM-A(算法专家)生成调度规则代码 + LLM-S(调度专家)评估指导改进</div>
+<div style="display:flex;gap:10px;align-items:flex-end">
+<label class="f">种群大小<input id="ai_pop" type="number" value="6" min="4" max="20"></label>
+<label class="f">进化代数<input id="ai_gen" type="number" value="5" min="1" max="50"></label>
+<label class="f">训练实例数<input id="ai_inst" type="number" value="3" min="1" max="10"></label>
+<button class="btn b2" onclick="runTrain()">🧬 启动进化训练</button>
+<button class="btn b6" onclick="loadLogs()">📋 查看LLM日志</button>
+</div></div>
+<div id="aiR"></div>
+<div id="aiLogs"></div>
+</div>
+
+<!-- CONFIG -->
+<div id="p-cfg" class="page">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--cy)"></span>大模型API配置</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">支持: OpenAI / DeepSeek / 通义千问 / 智谱GLM / Moonshot / Ollama / vLLM</div>
+<div class="g g2">
+<label class="f" style="grid-column:1/3">Base URL<input id="ll_url" type="text"></label>
+<label class="f">API Key<input id="ll_key" type="password"></label>
+<label class="f">模型名称<input id="ll_mod" type="text"></label>
+</div>
+<div style="margin-top:10px;display:flex;gap:8px">
+<button class="btn b2" onclick="saveCfg()">💾 保存</button>
+<button class="btn b1" onclick="testLLM()">🔗 测试</button>
+</div>
+<div id="cfgS" style="margin-top:8px;font-size:12px"></div>
+</div>
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>快速预设 — 点击填入</div>
+<div class="g g3" id="presets"></div></div>
+</div>
+`;
+
+// === Sub-tab switching ===
+document.querySelectorAll('.sub-tabs').forEach(container=>{
+  container.onclick=e=>{
+    const t=e.target.closest('.sub-tab');if(!t)return;
+    container.querySelectorAll('.sub-tab').forEach(x=>x.classList.remove('on'));t.classList.add('on');
+    const pages=container.nextElementSibling;
+    pages.querySelectorAll('.sub-page').forEach(x=>x.classList.remove('on'));
+    const target=pages.querySelector(`[id$="-${t.dataset.k}"]`);
+    if(target)target.classList.add('on');
+  };
+});
+
+// ============================================================
+//  INSTANCE
+// ============================================================
+let instDBData=null;
+
+async function genInst(){show(1);try{
+  const r=await api('/api/instance/generate',{method:'POST',body:JSON.stringify({
+    num_orders:+$('c_ord').value, tasks_per_order_min:+$('c_tmin').value, tasks_per_order_max:+$('c_tmax').value,
+    ops_per_task_min:+$('c_omin').value, ops_per_task_max:+$('c_omax').value,
+    machines_per_type:+$('c_mpt').value, due_date_factor:+$('c_due').value,
+    arrival_spread:+$('c_arr').value, seed:+$('c_seed').value||null,
+    day_shift_hours:+$('c_ds').value, night_shift_hours:+$('c_ns').value,
+    schedule_days:+$('c_days').value, maintenance_prob:+$('c_mp').value,
+  })});
+  shop=r;updateStatusBar(r.summary);
+  renderInst(r.details);
+  await loadFromDB();
+}catch(e){alert(e.message)}show(0)}
+
+function updateStatusBar(s){
+  $('stB').textContent=`${s.orders}单 ${s.operations}工序 ${s.machines}机器`;$('stB').className='bg bg-g';
+}
+
+function renderOverview(d){
+  let h=`<div class="mg">`;
+  [{l:'订单',v:d.summary.orders,c:'--cy'},{l:'任务',v:d.summary.tasks,c:'--ac'},{l:'工序',v:d.summary.operations,c:'--gn'},{l:'机器',v:d.summary.machines,c:'--or'}].forEach(m=>{h+=`<div class="mt" style="border-color:var(${m.c})"><div class="lb">${m.l}</div><div class="vl" style="color:var(${m.c})">${m.v}</div></div>`});
+  h+=`</div>`;
+  if(d.machine_types){
+    h+=`<div style="margin-top:12px"><div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--or)">机器类别</div><div style="overflow-x:auto"><table><thead><tr><th>类别ID</th><th>名称</th><th>台数</th><th>关键资源</th></tr></thead><tbody>`;
+    d.machine_types.forEach(mt=>{h+=`<tr><td class="mono">${mt.id}</td><td>${mt.name}</td><td>${mt.count}</td><td>${mt.is_critical?'<span class="bg bg-r">关键</span>':''}</td></tr>`});
+    h+=`</tbody></table></div></div>`;
+  }
+  $('isp-overview').innerHTML=h;
+}
+
+function renderInst(d){
+  renderOverview(d);
+  // Full order->task->op table
+  let h=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--ac)"></span>订单 → 任务 → 工序 (含前置关系)</div><div style="overflow-x:auto;max-height:500px;overflow-y:auto"><table><thead><tr>`;
+  ['订单','优先级','交期','释放','任务','主任务','前置任务','工序','工艺类型','加工时间(h)','前置工序/任务'].forEach(c=>{h+=`<th>${c}</th>`});
+  h+=`</tr></thead><tbody>`;
+  d.orders.forEach((o,oi)=>{
+    let first=true;
+    o.tasks.forEach(t=>{
+      t.ops.forEach((op,opi)=>{
+        h+=`<tr style="background:${oi%2?'#0d132188':'transparent'}">`;
+        if(first){const rspan=o.tasks.reduce((s,t2)=>s+t2.ops.length,0);h+=`<td rowspan="${rspan}" class="mono" style="font-weight:700">${o.id}</td><td rowspan="${rspan}"><span class="bg ${o.priority>=4?'bg-r':o.priority>=3?'bg-o':'bg-g'}">P${o.priority}</span></td><td rowspan="${rspan}">${o.due_date}</td><td rowspan="${rspan}">${o.release}</td>`;first=false}
+        if(opi===0){h+=`<td rowspan="${t.ops.length}" class="mono">${t.name}</td><td rowspan="${t.ops.length}">${t.is_main?'<span class="bg bg-r">主</span>':'子'}</td><td rowspan="${t.ops.length}" class="mono" style="font-size:10px">${t.predecessors.join(',')}</td>`}
+        h+=`<td class="mono">${op.name}</td><td><span class="bg bg-b">${op.type}</span></td><td>${op.time}h</td><td class="mono" style="font-size:10px">${op.predecessors.join(', ')}</td></tr>`;
+      });
+    });
+  });
+  h+=`</tbody></table></div></div>`;
+  $('instD').innerHTML=h;
+}
+
+async function loadFromDB(){
+  show(1);try{
+    const r=await api('/api/instance/db');
+    instDBData=r;
+    $('instViewCard').style.display='block';
+    // Render overview from returned details
+    if(r.details) renderOverview(r.details);
+    if(r.summary) updateStatusBar(r.summary);
+    if(r.details && !$('instD').innerHTML) renderInst(r.details);
+    renderEditableOrders(r.orders);
+    renderEditableTasks(r.tasks);
+    renderEditableOps(r.operations);
+    renderEditableMachines(r.machines, r.machine_types);
+  }catch(e){$('instViewCard').style.display='none'}show(0)
+}
+
+function makeEditable(td,value,onSave){
+  td.classList.add('editable');
+  td.textContent=value;
+  td.ondblclick=()=>{
+    if(td.querySelector('input'))return;
+    const inp=document.createElement('input');inp.value=td.textContent;
+    td.textContent='';td.appendChild(inp);inp.focus();inp.select();
+    const finish=()=>{const nv=inp.value;td.textContent=nv;if(onSave)onSave(nv)};
+    inp.onblur=finish;
+    inp.onkeydown=e=>{if(e.key==='Enter')inp.blur();if(e.key==='Escape'){td.textContent=value;}}
+  };
+}
+
+function renderEditableOrders(orders){
+  let h=`<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table><thead><tr><th>订单ID</th><th>名称</th><th>释放时间</th><th>交期</th><th>优先级</th><th>操作</th></tr></thead><tbody>`;
+  orders.forEach(o=>{h+=`<tr id="eord-${o.order_id}"><td class="mono">${o.order_id}</td><td class="editable" data-f="order_name">${o.order_name}</td><td class="editable" data-f="release_time">${o.release_time}</td><td class="editable" data-f="due_date">${o.due_date}</td><td class="editable" data-f="priority">${o.priority}</td><td><button class="btn b2" style="padding:2px 8px;font-size:10px" onclick="saveOrder('${o.order_id}')">保存</button></td></tr>`});
+  h+=`</tbody></table></div><div style="font-size:10px;color:var(--dm);margin-top:4px">双击单元格编辑, 点击保存按钮提交</div>`;
+  $('isp-orders').innerHTML=h;
+  orders.forEach(o=>{const row=$(`eord-${o.order_id}`);if(row)row.querySelectorAll('.editable').forEach(td=>{makeEditable(td,td.textContent)})});
+}
+
+function renderEditableTasks(tasks){
+  let h=`<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table><thead><tr><th>任务ID</th><th>订单ID</th><th>名称</th><th>主任务</th><th>前置任务</th><th>释放时间</th><th>交期</th><th>操作</th></tr></thead><tbody>`;
+  tasks.forEach(t=>{h+=`<tr id="etask-${t.task_id}"><td class="mono">${t.task_id}</td><td class="editable" data-f="order_id">${t.order_id}</td><td class="editable" data-f="task_name">${t.task_name}</td><td class="editable" data-f="is_main">${t.is_main?'Y':'N'}</td><td class="editable" data-f="predecessor_task_ids">${t.predecessor_task_ids||''}</td><td class="editable" data-f="release_time">${t.release_time}</td><td class="editable" data-f="due_date">${t.due_date}</td><td><button class="btn b2" style="padding:2px 8px;font-size:10px" onclick="saveTask('${t.task_id}')">保存</button></td></tr>`});
+  h+=`</tbody></table></div><div style="font-size:10px;color:var(--dm);margin-top:4px">双击单元格编辑</div>`;
+  $('isp-tasks').innerHTML=h;
+  tasks.forEach(t=>{const row=$(`etask-${t.task_id}`);if(row)row.querySelectorAll('.editable').forEach(td=>{makeEditable(td,td.textContent)})});
+}
+
+function renderEditableOps(ops){
+  let h=`<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table><thead><tr><th>工序ID</th><th>任务ID</th><th>名称</th><th>工艺</th><th>时间(h)</th><th>前置工序</th><th>前置任务</th><th>指定机器</th><th>操作</th></tr></thead><tbody>`;
+  ops.forEach(op=>{h+=`<tr id="eop-${op.op_id}"><td class="mono">${op.op_id}</td><td class="editable" data-f="task_id">${op.task_id}</td><td class="editable" data-f="op_name">${op.op_name}</td><td class="editable" data-f="process_type">${op.process_type}</td><td class="editable" data-f="processing_time">${op.processing_time}</td><td class="editable" data-f="predecessor_ops">${op.predecessor_ops||''}</td><td class="editable" data-f="predecessor_tasks">${op.predecessor_tasks||''}</td><td class="editable" data-f="eligible_machine_ids">${op.eligible_machine_ids||''}</td><td><button class="btn b2" style="padding:2px 8px;font-size:10px" onclick="saveOp('${op.op_id}')">保存</button></td></tr>`});
+  h+=`</tbody></table></div>`;
+  $('isp-ops').innerHTML=h;
+  ops.forEach(op=>{const row=$(`eop-${op.op_id}`);if(row)row.querySelectorAll('.editable').forEach(td=>{makeEditable(td,td.textContent)})});
+}
+
+function renderEditableMachines(machines,mtypes){
+  let h=`<div style="margin-bottom:8px;font-size:11px;color:var(--dm)">机器类别: ${(mtypes||[]).map(mt=>`${mt.type_name||mt.type_id}(${mt.type_id})${mt.is_critical?' 关键':''}`).join(' | ')}</div>`;
+  h+=`<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table><thead><tr><th>机器ID</th><th>名称</th><th>类别</th><th>班次</th><th>操作</th></tr></thead><tbody>`;
+  machines.forEach(m=>{h+=`<tr id="emach-${m.machine_id}"><td class="mono">${m.machine_id}</td><td class="editable" data-f="machine_name">${m.machine_name}</td><td class="editable" data-f="type_id">${m.type_id}</td><td class="editable" data-f="shifts">${m.shifts||''}</td><td><button class="btn b2" style="padding:2px 8px;font-size:10px" onclick="saveMachine('${m.machine_id}')">保存</button></td></tr>`});
+  h+=`</tbody></table></div>`;
+  $('isp-machines').innerHTML=h;
+  machines.forEach(m=>{const row=$(`emach-${m.machine_id}`);if(row)row.querySelectorAll('.editable').forEach(td=>{makeEditable(td,td.textContent)})});
+}
+
+function getRowData(rowId){
+  const row=$(rowId);if(!row)return{};
+  const d={};row.querySelectorAll('.editable').forEach(td=>{d[td.dataset.f]=td.textContent});
+  return d;
+}
+async function saveOrder(oid){show(1);try{await api(`/api/instance/order/${oid}`,{method:'PUT',body:JSON.stringify(getRowData(`eord-${oid}`))})}catch(e){alert(e.message)}show(0)}
+async function saveTask(tid){show(1);try{const d=getRowData(`etask-${tid}`);d.is_main=d.is_main&&d.is_main.toUpperCase()==='Y'?1:0;await api(`/api/instance/task/${tid}`,{method:'PUT',body:JSON.stringify(d)})}catch(e){alert(e.message)}show(0)}
+async function saveOp(oid){show(1);try{await api(`/api/instance/operation/${oid}`,{method:'PUT',body:JSON.stringify(getRowData(`eop-${oid}`))})}catch(e){alert(e.message)}show(0)}
+async function saveMachine(mid){show(1);try{await api(`/api/instance/machine/${mid}`,{method:'PUT',body:JSON.stringify(getRowData(`emach-${mid}`))})}catch(e){alert(e.message)}show(0)}
+
+function showImportModal(){$('csvModal').style.display='block';$('importMsg').textContent=''}
+
+async function doImportExcel(){
+  const file=$('xlsx_file').files[0];
+  if(!file){$('importMsg').innerHTML='<span style="color:var(--rd)">请选择一个Excel文件</span>';return}
+  show(1);$('importMsg').innerHTML='<span class="sp"></span> 导入中...';
+  try{
+    const fd=new FormData();fd.append('file',file);
+    const r=await fetch(A+'/api/instance/import-excel',{method:'POST',body:fd});
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||r.statusText)}
+    const data=await r.json();
+    shop=data;updateStatusBar(data.summary);
+    renderInst(data.details);
+    $('importMsg').innerHTML=`<span style="color:var(--gn)">导入成功! ${data.summary.orders}订单 ${data.summary.operations}工序 ${data.summary.machines}机器</span>`;
+    $('csvModal').style.display='none';
+    await loadFromDB();
+  }catch(e){$('importMsg').innerHTML=`<span style="color:var(--rd)">${e.message}</span>`}
+  show(0);
+}
+
+async function exportCSV(){
+  if(!shop){alert('请先生成实例');return}
+  const r=await fetch(A+'/api/instance/csv');const b=await r.blob();
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='instance_data.csv';a.click();
+}
+
+// ============================================================
+//  GRAPH — Cytoscape.js
+// ============================================================
+const NODE_COLORS={order:'#00d2d3',task:'#2d7ff9',operation:'#0acf83',machine:'#ff8c42'};
+const NODE_SHAPES={order:'diamond',task:'round-rectangle',operation:'ellipse',machine:'hexagon'};
+const EDGE_COLORS={order_has_task:'#2d7ff9',task_predecessor:'#ff4757',task_has_operation:'#0acf83',operation_sequence:'#00d2d3',op_depends_task:'#7c5cfc',machine_eligible:'#ff8c4266'};
+const NODE_LABELS={order:'订单',task:'任务',operation:'工序',machine:'机器'};
+const EDGE_LABELS={order_has_task:'订单→任务',task_predecessor:'任务前置',task_has_operation:'任务→工序',operation_sequence:'工序顺序',op_depends_task:'工序依赖任务',machine_eligible:'机器兼容'};
+
+async function buildGraph(){
+  show(1);try{
+    await api('/api/graph/build',{method:'POST'});
+    await loadGraphData();
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function loadGraphData(){
+  show(1);try{
+    const meta=await api('/api/graph/meta');
+    renderGraphStats(meta);
+    $('graphStats').style.display='block';
+    $('graphSearchCard').style.display='block';
+    $('graphVizCard').style.display='block';
+    await searchGraph();
+    await buildCyGraph();
+  }catch(e){
+    $('graphStats').style.display='none';
+    $('graphSearchCard').style.display='none';
+    $('graphVizCard').style.display='none';
+    alert(e.message);
+  }show(0)
+}
+
+function renderGraphStats(meta){
+  let h=`<div class="mg">`;
+  h+=`<div class="mt" style="border-color:var(--cy)"><div class="lb">总节点</div><div class="vl" style="color:var(--cy)">${meta.total_nodes}</div></div>`;
+  h+=`<div class="mt" style="border-color:var(--ac)"><div class="lb">总边</div><div class="vl" style="color:var(--ac)">${meta.total_edges}</div></div>`;
+  h+=`</div><div style="margin-top:10px;display:flex;gap:16px;flex-wrap:wrap">`;
+  for(const[k,v] of Object.entries(meta.node_type_counts)){
+    const c=NODE_COLORS[k]||'#888';
+    h+=`<span class="bg" style="background:${c}22;color:${c}">${NODE_LABELS[k]||k}: ${v}</span>`;
+  }
+  h+=`</div><div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;font-size:10px">`;
+  for(const[k,v] of Object.entries(meta.edge_type_counts)){
+    h+=`<span class="bg bg-p">${EDGE_LABELS[k]||k}: ${v}</span>`;
+  }
+  h+=`</div>`;
+  $('graphStatsContent').innerHTML=h;
+}
+
+async function searchGraph(){
+  const search=$('g_search').value||'';
+  const nodeType=$('g_node_type').value||'';
+  const edgeType=$('g_edge_type').value||'';
+  try{
+    const np=new URLSearchParams();if(nodeType)np.set('node_type',nodeType);if(search)np.set('search',search);np.set('limit','200');
+    const nodes=await api('/api/graph/nodes?'+np);
+    renderGraphNodes(nodes);
+    const ep=new URLSearchParams();if(edgeType)ep.set('edge_type',edgeType);if(search)ep.set('search',search);ep.set('limit','200');
+    const edges=await api('/api/graph/edges?'+ep);
+    renderGraphEdges(edges);
+  }catch(e){}
+}
+
+function renderGraphNodes(data){
+  let h=`<div style="font-size:10px;color:var(--dm);margin-bottom:4px">共 ${data.total} 个节点 (显示前200)</div>`;
+  h+=`<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table><thead><tr><th>节点ID</th><th>类型</th><th>实体ID</th><th>属性</th></tr></thead><tbody>`;
+  data.nodes.forEach(n=>{
+    const at=Object.entries(n.attrs||{}).map(([k,v])=>`${k}=${v}`).join(', ');
+    const c=NODE_COLORS[n.node_type]||'#888';
+    h+=`<tr style="cursor:pointer" onclick="highlightNode('${n.node_id}')"><td class="mono">${n.node_id}</td><td><span class="bg" style="background:${c}22;color:${c}">${NODE_LABELS[n.node_type]||n.node_type}</span></td><td class="mono">${n.entity_id}</td><td style="font-size:10px;max-width:400px;overflow:hidden;text-overflow:ellipsis">${escH(at)}</td></tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  $('graphNodesContent').innerHTML=h;
+}
+
+function renderGraphEdges(data){
+  let h=`<div style="font-size:10px;color:var(--dm);margin-bottom:4px">共 ${data.total} 条边 (显示前200)</div>`;
+  h+=`<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table><thead><tr><th>源节点</th><th>目标节点</th><th>边类型</th></tr></thead><tbody>`;
+  data.edges.forEach(e=>{
+    h+=`<tr><td class="mono">${e.source}</td><td class="mono">${e.target}</td><td><span class="bg bg-p">${EDGE_LABELS[e.edge_type]||e.edge_type}</span></td></tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  $('graphEdgesContent').innerHTML=h;
+}
+
+function highlightNode(nodeId){
+  if(!cyInstance)return;
+  const node=cyInstance.getElementById(nodeId);
+  if(!node.length)return;
+  // Reset all
+  cyInstance.elements().removeClass('highlighted neighbor-node neighbor-edge dimmed');
+  cyInstance.elements().addClass('dimmed');
+  // Highlight selected + neighbors
+  const neighborhood=node.neighborhood();
+  node.removeClass('dimmed').addClass('highlighted');
+  neighborhood.removeClass('dimmed').addClass('neighbor-node neighbor-edge');
+  node.connectedEdges().removeClass('dimmed').addClass('neighbor-edge');
+  // Animate focus
+  cyInstance.animate({fit:{eles:node.union(neighborhood),padding:80}},{duration:400});
+  // Show info
+  showNodeInfo(node);
+}
+
+function showNodeInfo(node){
+  const d=node.data();
+  const info=$('nodeInfo');
+  let h=`<b style="color:${NODE_COLORS[d.node_type]||'#fff'}">${d.id}</b> (${NODE_LABELS[d.node_type]||d.node_type})<br>`;
+  h+=`实体ID: ${d.entity_id||''}<br>`;
+  const skip=new Set(['id','node_type','entity_id','label']);
+  for(const[k,v] of Object.entries(d)){if(!skip.has(k))h+=`${k}: ${v}<br>`}
+  const edges=node.connectedEdges();
+  h+=`<br>连接边: ${edges.length}条`;
+  info.innerHTML=h;info.style.display='block';
+}
+
+async function buildCyGraph(){
+  // Fetch data for visualization
+  const nodesR=await api('/api/graph/nodes?limit=150');
+  const edgesR=await api('/api/graph/edges?limit=800');
+  const nodes=nodesR.nodes,edges=edgesR.edges;
+
+  const elements=[];
+  const nodeIds=new Set();
+  nodes.forEach(n=>{
+    nodeIds.add(n.node_id);
+    const label=(n.attrs&&n.attrs.label)||n.entity_id||n.node_id.split(':')[1]||n.node_id;
+    elements.push({data:{id:n.node_id,label:label,node_type:n.node_type,entity_id:n.entity_id,...(n.attrs||{})}});
+  });
+  edges.forEach(e=>{
+    if(nodeIds.has(e.source)&&nodeIds.has(e.target)){
+      elements.push({data:{id:'e'+e.id,source:e.source,target:e.target,edge_type:e.edge_type}});
+    }
+  });
+
+  if(cyInstance){cyInstance.destroy();cyInstance=null}
+
+  cyInstance=cytoscape({
+    container:$('cyGraph'),
+    elements:elements,
+    style:[
+      {selector:'node',style:{
+        'label':'data(label)','font-size':'8px','color':'#c0c8d8',
+        'text-valign':'bottom','text-margin-y':'4px',
+        'width':20,'height':20,'border-width':2,'border-color':'#333',
+        'text-max-width':'80px','text-wrap':'ellipsis',
+      }},
+      {selector:'node[node_type="order"]',style:{'background-color':NODE_COLORS.order,'shape':'diamond','width':28,'height':28,'font-size':'9px','font-weight':'bold'}},
+      {selector:'node[node_type="task"]',style:{'background-color':NODE_COLORS.task,'shape':'round-rectangle','width':22,'height':16}},
+      {selector:'node[node_type="operation"]',style:{'background-color':NODE_COLORS.operation,'shape':'ellipse','width':14,'height':14}},
+      {selector:'node[node_type="machine"]',style:{'background-color':NODE_COLORS.machine,'shape':'hexagon','width':24,'height':24}},
+      {selector:'edge',style:{
+        'width':1,'line-color':'#333','target-arrow-color':'#333',
+        'target-arrow-shape':'triangle','curve-style':'bezier',
+        'arrow-scale':0.6,'opacity':0.6,
+      }},
+      {selector:'edge[edge_type="order_has_task"]',style:{'line-color':EDGE_COLORS.order_has_task,'target-arrow-color':EDGE_COLORS.order_has_task}},
+      {selector:'edge[edge_type="task_predecessor"]',style:{'line-color':EDGE_COLORS.task_predecessor,'target-arrow-color':EDGE_COLORS.task_predecessor,'line-style':'dashed','width':2}},
+      {selector:'edge[edge_type="task_has_operation"]',style:{'line-color':EDGE_COLORS.task_has_operation,'target-arrow-color':EDGE_COLORS.task_has_operation}},
+      {selector:'edge[edge_type="operation_sequence"]',style:{'line-color':EDGE_COLORS.operation_sequence,'target-arrow-color':EDGE_COLORS.operation_sequence,'width':2}},
+      {selector:'edge[edge_type="op_depends_task"]',style:{'line-color':EDGE_COLORS.op_depends_task,'target-arrow-color':EDGE_COLORS.op_depends_task,'line-style':'dashed'}},
+      {selector:'edge[edge_type="machine_eligible"]',style:{'line-color':EDGE_COLORS.machine_eligible,'target-arrow-color':EDGE_COLORS.machine_eligible,'width':0.5,'opacity':0.3}},
+      // Highlighted states
+      {selector:'.highlighted',style:{'border-width':4,'border-color':'#fff','width':36,'height':36,'z-index':999,'font-size':'11px','font-weight':'bold','color':'#fff','text-background-color':'#000a','text-background-opacity':0.8,'text-background-padding':'2px'}},
+      {selector:'.neighbor-node',style:{'border-width':3,'border-color':'#fffa','opacity':1,'z-index':99}},
+      {selector:'.neighbor-edge',style:{'width':3,'opacity':1,'z-index':99}},
+      {selector:'.dimmed',style:{'opacity':0.15}},
+    ],
+    layout:{name:'fcose',animate:false,randomize:true,nodeSeparation:120,idealEdgeLength:e=>{
+      const t=e.data('edge_type');
+      if(t==='machine_eligible')return 250;
+      if(t==='order_has_task')return 100;
+      return 150;
+    },nodeRepulsion:8000,gravity:0.15,gravityRange:3.8},
+    minZoom:0.1,maxZoom:5,wheelSensitivity:0.3,
+  });
+
+  // Click node => highlight
+  cyInstance.on('tap','node',function(evt){
+    const node=evt.target;
+    cyInstance.elements().removeClass('highlighted neighbor-node neighbor-edge dimmed');
+    cyInstance.elements().addClass('dimmed');
+    const neighborhood=node.neighborhood();
+    node.removeClass('dimmed').addClass('highlighted');
+    neighborhood.removeClass('dimmed').addClass('neighbor-node neighbor-edge');
+    node.connectedEdges().removeClass('dimmed').addClass('neighbor-edge');
+    showNodeInfo(node);
+  });
+
+  // Double-click => focus with animation
+  cyInstance.on('dbltap','node',function(evt){
+    const node=evt.target;
+    const neighborhood=node.neighborhood();
+    cyInstance.animate({fit:{eles:node.union(neighborhood),padding:60}},{duration:500});
+  });
+
+  // Click background => reset
+  cyInstance.on('tap',function(evt){
+    if(evt.target===cyInstance){
+      cyInstance.elements().removeClass('highlighted neighbor-node neighbor-edge dimmed');
+      $('nodeInfo').style.display='none';
+    }
+  });
+}
+
+// ============================================================
+//  SIMULATE + GANTT (unchanged logic)
+// ============================================================
+async function runSim(){
+  const log=$('simL');log.textContent='';const L=(c,m)=>{log.innerHTML+=`<span class="${c}">${m}</span>\n`;log.scrollTop=9e9};
+  show(1);try{
+    const rule=$('s_rule').value;L('i',`[开始] 规则: ${rule}`);
+    const t0=performance.now();
+    const r=await api('/api/simulate',{method:'POST',body:JSON.stringify({rule_name:rule})});
+    L('g',`[完成] ${((performance.now()-t0)/1000).toFixed(2)}s, ${r.gantt.length}条排产`);
+    const m=r.metrics;
+    L('i',`  总延迟=${m.total_tardiness} Makespan=${m.makespan} 利用率=${(m.avg_utilization*100).toFixed(1)}%`);
+    L('i',`  关键资源利用率=${(m.critical_utilization*100).toFixed(1)}% 主订单延误=${m.main_order_tardy_count}/${m.total_main_orders}`);
+    L('i',`  总等待=${m.total_wait_time.toFixed(0)} 仿真=${m.wall_time_ms}ms events=${m.event_count}`);
+    lastGantt=r.gantt;
+    let h=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--gn)"></span>排产结果 — ${rule}</div><div class="mg">`;
+    [{l:'总延迟',v:m.total_tardiness,c:'--rd'},{l:'Makespan',v:m.makespan,c:'--ac'},{l:'利用率',v:(m.avg_utilization*100).toFixed(1)+'%',c:'--gn'},{l:'关键资源利用率',v:(m.critical_utilization*100).toFixed(1)+'%',c:'--cy'},{l:'主订单延误',v:m.main_order_tardy_count+'/'+m.total_main_orders,c:'--rd'},{l:'延误比例',v:(m.main_order_tardy_ratio*100).toFixed(1)+'%',c:'--or'},{l:'总等待时间',v:m.total_wait_time.toFixed(0)+'h',c:'--pk'},{l:'仿真耗时',v:m.wall_time_ms+'ms',c:'--dm'}
+    ].forEach(x=>{h+=`<div class="mt" style="border-color:var(${x.c})"><div class="lb">${x.l}</div><div class="vl" style="color:var(${x.c})">${typeof x.v==='number'?x.v.toFixed(1):x.v}</div></div>`});
+    h+=`</div></div>`;
+    h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--cy)"></span>甘特图</div><div style="font-size:10px;color:var(--dm);margin-bottom:6px">颜色=订单 · <span style="color:var(--rd)">■</span>红=延迟 · 悬停详情</div><div class="gw"><canvas id="gc"></canvas><div id="gtt" class="gt"></div></div></div>`;
+    h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>排产明细 (前200条)</div><div style="overflow-x:auto;max-height:350px;overflow-y:auto"><table><thead><tr>`;
+    ['工序','工序名','任务','机器','开始','结束','时长','订单','优先级','交期','延迟','主任务'].forEach(c=>{h+=`<th>${c}</th>`});
+    h+=`</tr></thead><tbody>`;
+    r.gantt.slice(0,200).forEach((g,i)=>{h+=`<tr style="background:${g.is_tardy?'var(--rd)11':i%2?'var(--sf)33':'transparent'}"><td class="mono">${g.op_id}</td><td>${g.op_name}</td><td class="mono">${g.task_id}</td><td>${g.machine_name}</td><td>${g.start}</td><td>${g.end}</td><td>${g.duration}</td><td class="mono">${g.order_id}</td><td>P${g.priority}</td><td>${g.due_date}</td><td>${g.is_tardy?'<span class="bg bg-r">延迟</span>':''}</td><td>${g.is_main?'<span class="bg bg-r">主</span>':''}</td></tr>`});
+    h+=`</tbody></table></div></div>`;
+    $('simR').innerHTML=h;
+    setTimeout(()=>drawGantt(r.gantt),50);
+  }catch(e){L('e','[错误] '+e.message)}show(0)}
+
+function drawGantt(data){
+  const c=$('gc');if(!c)return;const ctx=c.getContext('2d');
+  const w=c.parentElement.clientWidth,ms=[...new Set(data.map(d=>d.machine_id))].sort();
+  const rh=Math.min(28,Math.max(16,400/ms.length)),H=ms.length*rh+60;
+  const dp=devicePixelRatio||1;c.width=w*dp;c.height=H*dp;c.style.width=w+'px';c.style.height=H+'px';ctx.scale(dp,dp);
+  ctx.fillStyle='#0a0e1a';ctx.fillRect(0,0,w,H);
+  const L=90,T=25,cW=w-L-16;
+  const mn=Math.min(...data.map(d=>d.start)),mx=Math.max(...data.map(d=>d.end)),rng=mx-mn||1;
+  const x=t=>L+(t-mn)/rng*cW;
+  ctx.strokeStyle='#1a2744';ctx.lineWidth=.5;const tk=Math.min(10,Math.floor(cW/60));
+  for(let i=0;i<=tk;i++){const tx=L+i/tk*cW;ctx.beginPath();ctx.moveTo(tx,T);ctx.lineTo(tx,H-10);ctx.stroke();ctx.fillStyle='#4a5568';ctx.font='9px JetBrains Mono';ctx.fillText(Math.round(mn+i/tk*rng)+'',tx-10,T-6)}
+  ctx.font='10px sans-serif';ctx.fillStyle='#8492a6';
+  ms.forEach((m,i)=>{ctx.fillText(m,2,T+i*rh+rh/2+3);if(i>0){ctx.beginPath();ctx.moveTo(L,T+i*rh);ctx.lineTo(w-16,T+i*rh);ctx.stroke()}});
+  const ords=[...new Set(data.map(d=>d.order_id))];
+  data.forEach(d=>{const mi=ms.indexOf(d.machine_id);if(mi<0)return;const bx=x(d.start),bw=Math.max(1,x(d.end)-x(d.start)),by=T+mi*rh+2,bh=rh-4;
+    const ci=ords.indexOf(d.order_id)%OC.length;ctx.fillStyle=d.is_tardy?'#ff475777':OC[ci]+'88';ctx.fillRect(bx,by,bw,bh);
+    ctx.strokeStyle=d.is_tardy?'#ff4757':OC[ci];ctx.lineWidth=d.is_tardy?2:1;ctx.strokeRect(bx,by,bw,bh);
+    if(bw>25){ctx.fillStyle='#fffc';ctx.font='8px JetBrains Mono';ctx.fillText(d.op_name||d.op_id.slice(-6),bx+2,by+bh/2+3)}});
+  ctx.font='9px sans-serif';ords.slice(0,6).forEach((o,i)=>{ctx.fillStyle=OC[i%OC.length];ctx.fillRect(L+i*100,H-14,8,8);ctx.fillStyle='#8492a6';ctx.fillText(o,L+i*100+12,H-6)});
+  c._gd={ms,rh,T,L,mn,rng,cW,data,ords};
+  c.onmousemove=e=>{const g=c._gd;if(!g)return;const r2=c.getBoundingClientRect(),mx2=e.clientX-r2.left,my=e.clientY-r2.top;
+    const mi=Math.floor((my-g.T)/g.rh),t=g.mn+(mx2-g.L)/g.cW*g.rng;
+    const hit=g.data.find(d=>{const di=g.ms.indexOf(d.machine_id);return di===mi&&t>=d.start&&t<=d.end});
+    const tip=$('gtt');if(hit){tip.style.display='block';tip.style.left=(mx2+12)+'px';tip.style.top=(my-8)+'px';
+      tip.innerHTML=`<b>${hit.op_name}</b> (${hit.op_id})<br>任务: ${hit.task_id}<br>机器: ${hit.machine_name}<br>时间: ${hit.start}→${hit.end} (${hit.duration}h)<br>订单: ${hit.order_id} P${hit.priority}<br>交期: ${hit.due_date}${hit.is_tardy?'<br><b style="color:var(--rd)">延迟!</b>':''}${hit.is_main?'<br><b style="color:var(--or)">主任务</b>':''}`;
+    }else{tip.style.display='none'}};
+  c.onmouseleave=()=>{$('gtt').style.display='none'};
+}
+
+// === COMPARE ===
+async function runCmp(){
+  const log=$('cmpL');log.textContent='';const L=(c,m)=>{log.innerHTML+=`<span class="${c}">${m}</span>\n`;log.scrollTop=9e9};
+  show(1);try{
+    L('i','[开始] 11条规则全对比...');const t0=performance.now();
+    const r=await api('/api/simulate/compare',{method:'POST',body:JSON.stringify(null)});
+    L('g',`[完成] ${((performance.now()-t0)/1000).toFixed(2)}s`);
+    r.comparison.forEach((c2,i)=>{const m=c2.metrics;L(i===0?'g':'i',`  #${i+1} ${c2.rule}: 延迟=${m.total_tardiness} mksp=${m.makespan}`)});
+    let h=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>规则排名</div><div style="overflow-x:auto"><table><thead><tr>`;
+    ['#','规则','总延迟','Makespan','利用率','关键利用率','主订单延误','延误比例','总等待','耗时'].forEach(c2=>{h+=`<th>${c2}</th>`});
+    h+=`</tr></thead><tbody>`;
+    r.comparison.forEach((c2,i)=>{const m=c2.metrics;h+=`<tr style="background:${i===0?'var(--gn)11':i%2?'var(--sf)33':'transparent'}"><td style="font-weight:700;color:${i===0?'var(--gn)':'var(--tx)'}">${i+1}</td><td><span class="bg ${i===0?'bg-g':'bg-b'}">${c2.rule}</span></td><td class="mono" style="font-weight:700;color:${i===0?'var(--gn)':'var(--tx)'}">${m.total_tardiness}</td><td class="mono">${m.makespan}</td><td>${(m.avg_utilization*100).toFixed(1)}%</td><td style="color:var(--cy)">${(m.critical_utilization*100).toFixed(1)}%</td><td>${m.main_order_tardy_count}/${m.total_main_orders}</td><td>${(m.main_order_tardy_ratio*100).toFixed(1)}%</td><td class="mono">${m.total_wait_time.toFixed(0)}</td><td style="color:var(--dm)">${m.wall_time_ms}ms</td></tr>`});
+    h+=`</tbody></table></div></div>`;
+    h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>总延迟对比</div><canvas id="cmpC" height="220"></canvas></div>`;
+    $('cmpR').innerHTML=h;setTimeout(()=>drawBar(r.comparison),50);
+  }catch(e){L('e','[错误] '+e.message)}show(0)}
+
+function drawBar(data){
+  const c=$('cmpC');if(!c)return;const ctx=c.getContext('2d');const dp=devicePixelRatio||1;
+  const W=c.parentElement.clientWidth,H=220;c.width=W*dp;c.height=H*dp;c.style.width=W+'px';c.style.height=H+'px';ctx.scale(dp,dp);
+  ctx.fillStyle='#0a0e1a';ctx.fillRect(0,0,W,H);
+  const L2=60,T2=15,B2=35,n=data.length,bw=Math.floor((W-L2-20)/n*.7),gap=(W-L2-20)/n-bw;
+  const mx=Math.max(...data.map(d=>d.metrics.total_tardiness));
+  for(let i=0;i<=4;i++){const y=T2+(H-T2-B2)*(1-i/4);ctx.strokeStyle='#1a274444';ctx.beginPath();ctx.moveTo(L2,y);ctx.lineTo(W-10,y);ctx.stroke();ctx.fillStyle='#4a5568';ctx.font='9px JetBrains Mono';ctx.fillText(Math.round(mx*i/4)+'',2,y+3)}
+  data.forEach((d,i)=>{const bx=L2+i*(bw+gap)+gap/2,bh=d.metrics.total_tardiness/mx*(H-T2-B2),by=H-B2-bh;
+    ctx.fillStyle=i===0?'#0acf83aa':OC[i%OC.length]+'77';ctx.fillRect(bx,by,bw,bh);
+    ctx.save();ctx.translate(bx+bw/2,H-B2+10);ctx.rotate(-.4);ctx.fillStyle='#8492a6';ctx.font='9px sans-serif';ctx.fillText(d.rule,0,0);ctx.restore()});
+}
+
+// === PARETO ===
+async function runPareto(){
+  const log=$('parL');log.textContent='';const L=(c,m)=>{log.innerHTML+=`<span class="${c}">${m}</span>\n`;log.scrollTop=9e9};
+  show(1);try{
+    const o1=$('po1').value,o2=$('po2').value;L('i',`[开始] ${o1} vs ${o2}`);
+    const r=await api('/api/pareto/optimize',{method:'POST',body:JSON.stringify({objectives:[o1,o2]})});
+    L('g',`[完成] ${r.solutions.length}方案, 帕累托前沿${r.pareto_front.length}个`);
+    let h=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--pr)"></span>帕累托散点图 — ${r.labels[0]} vs ${r.labels[1]}</div><canvas id="parC" height="350"></canvas></div>`;
+    h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--pr)"></span>明细</div><div style="overflow-x:auto"><table><thead><tr><th>规则</th><th>${r.labels[0]}</th><th>${r.labels[1]}</th><th>帕累托</th><th>支配层</th></tr></thead><tbody>`;
+    r.solutions.sort((a,b)=>a.rank-b.rank).forEach(s=>{h+=`<tr style="background:${s.is_pareto?'var(--gn)11':''}"><td><span class="bg ${s.is_pareto?'bg-g':'bg-b'}">${s.rule}</span></td><td class="mono">${s[r.objectives[0]]?.toFixed?.(2)}</td><td class="mono">${s[r.objectives[1]]?.toFixed?.(2)}</td><td>${s.is_pareto?'✅':''}</td><td>${s.rank}</td></tr>`});
+    h+=`</tbody></table></div></div>`;
+    $('parR').innerHTML=h;setTimeout(()=>drawPareto(r),50);
+  }catch(e){L('e','[错误] '+e.message)}show(0)}
+
+function drawPareto(data){
+  const c=$('parC');if(!c)return;const ctx=c.getContext('2d');const dp=devicePixelRatio||1;
+  const W=c.parentElement.clientWidth,H=350;c.width=W*dp;c.height=H*dp;c.style.width=W+'px';c.style.height=H+'px';ctx.scale(dp,dp);
+  ctx.fillStyle='#0a0e1a';ctx.fillRect(0,0,W,H);
+  const o1=data.objectives[0],o2=data.objectives[1],pts=data.solutions;
+  const v1=pts.map(p=>p[o1]||0),v2=pts.map(p=>p[o2]||0);
+  const mn1=Math.min(...v1)*.95,mx1=Math.max(...v1)*1.05,mn2=Math.min(...v2)*.95,mx2=Math.max(...v2)*1.05;
+  const L2=70,R2=20,T2=20,B2=45,cW=W-L2-R2,cH=H-T2-B2;
+  const x=v=>L2+(v-mn1)/(mx1-mn1)*cW,y=v=>T2+cH-(v-mn2)/(mx2-mn2)*cH;
+  ctx.strokeStyle='#1a2744';ctx.lineWidth=.5;
+  for(let i=0;i<=5;i++){const gx=L2+i/5*cW,gy=T2+i/5*cH;ctx.beginPath();ctx.moveTo(gx,T2);ctx.lineTo(gx,H-B2);ctx.stroke();ctx.beginPath();ctx.moveTo(L2,gy);ctx.lineTo(W-R2,gy);ctx.stroke();
+    ctx.fillStyle='#4a5568';ctx.font='9px JetBrains Mono';ctx.fillText((mn1+(mx1-mn1)*i/5).toFixed(0),gx-10,H-B2+14);ctx.fillText((mn2+(mx2-mn2)*(1-i/5)).toFixed(1),2,gy+3)}
+  ctx.fillStyle='#8492a6';ctx.font='11px sans-serif';ctx.fillText(data.labels[0],W/2-20,H-6);
+  ctx.save();ctx.translate(12,H/2);ctx.rotate(-Math.PI/2);ctx.fillText(data.labels[1],0,0);ctx.restore();
+  const fr=pts.filter(p=>p.is_pareto).sort((a,b)=>(a[o1]||0)-(b[o1]||0));
+  if(fr.length>1){ctx.strokeStyle='#0acf8344';ctx.lineWidth=2;ctx.setLineDash([5,3]);ctx.beginPath();ctx.moveTo(x(fr[0][o1]),y(fr[0][o2]));fr.slice(1).forEach(p=>ctx.lineTo(x(p[o1]),y(p[o2])));ctx.stroke();ctx.setLineDash([])}
+  pts.forEach(p=>{const px=x(p[o1]||0),py=y(p[o2]||0),r2=p.is_pareto?7:4;ctx.beginPath();ctx.arc(px,py,r2,0,Math.PI*2);ctx.fillStyle=p.is_pareto?'#0acf83':'#4a5568';ctx.fill();if(p.is_pareto){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.stroke()}
+    ctx.fillStyle=p.is_pareto?'#e0e6f0':'#8492a6';ctx.font='9px sans-serif';ctx.fillText(p.rule,px+r2+3,py+3)});
+}
+
+// === AI TRAIN ===
+async function runTrain(){
+  show(1);$('aiR').innerHTML='<div class="cd"><span class="sp"></span> 训练已启动, 后台进行中...</div>';
+  try{await api('/api/train',{method:'POST',body:JSON.stringify({population_size:+$('ai_pop').value,max_generations:+$('ai_gen').value,num_train_instances:+$('ai_inst').value})})}catch(e){$('aiR').innerHTML=`<div class="cd" style="color:var(--rd)">${e.message}</div>`}show(0)}
+
+async function loadLogs(){
+  show(1);try{
+    const r=await api('/api/train/logs');let h='';
+    if(r.best){h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--gn)"></span>最优规则 (fitness=${r.best.fitness.toFixed(1)})</div><pre style="background:#050810;padding:10px;border-radius:6px;font-size:11px;max-height:200px;overflow:auto;color:var(--gn)">${r.best.code}</pre></div>`}
+    if(r.history&&r.history.length){h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--ac)"></span>进化历史</div><table><thead><tr><th>代</th><th>最优</th><th>平均</th></tr></thead><tbody>`;
+      r.history.forEach(g=>{h+=`<tr><td>${g.gen}</td><td class="mono" style="color:var(--gn)">${g.best}</td><td class="mono">${g.avg}</td></tr>`});h+=`</tbody></table></div>`}
+    if(r.logs&&r.logs.length){h+=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--pr)"></span>LLM调用日志 (${r.logs.length}条)</div>`;
+      r.logs.forEach(l=>{const rc=l.role==='LLM-A'?'var(--gn)':l.role==='LLM-S'?'var(--pr)':'var(--dm)';
+        h+=`<div class="llm-msg"><div class="role" style="color:${rc}">${l.role} · ${l.action} · Gen${l.generation} · ${l.duration_s}s</div><details><summary style="cursor:pointer;color:var(--dm);font-size:10px">Prompt</summary><pre>${escH(l.prompt)}</pre></details><details open><summary style="cursor:pointer;color:var(--dm);font-size:10px">Response</summary><pre>${escH(l.response)}</pre></details></div>`});h+=`</div>`}
+    $('aiLogs').innerHTML=h||'<div class="cd" style="color:var(--dm)">暂无训练记录</div>';
+  }catch(e){$('aiLogs').innerHTML=`<div class="cd" style="color:var(--rd)">${e.message}</div>`}show(0)}
+
+function escH(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// === CONFIG ===
+async function loadCfg(){try{const r=await api('/api/config/llm');$('ll_url').value=r.base_url||'';$('ll_mod').value=r.model||'';$('ll_key').placeholder=r.has_key?'已配置('+r.preview+')':'未配置'}catch(e){}}
+async function saveCfg(){try{const b={};const u=$('ll_url').value;if(u)b.base_url=u;const k=$('ll_key').value;if(k)b.api_key=k;const m=$('ll_mod').value;if(m)b.model=m;await api('/api/config/llm',{method:'PUT',body:JSON.stringify(b)});$('cfgS').innerHTML='<span style="color:var(--gn)">已保存</span>';loadCfg()}catch(e){$('cfgS').innerHTML='<span style="color:var(--rd)">'+e.message+'</span>'}}
+async function testLLM(){$('cfgS').innerHTML='<span class="sp"></span> 测试中...';try{const r=await api('/api/config/llm/test',{method:'POST'});$('cfgS').innerHTML=r.status==='ok'?`<span style="color:var(--gn)">${r.model}: "${r.response}"</span>`:`<span style="color:var(--rd)">${r.msg}</span>`}catch(e){$('cfgS').innerHTML='<span style="color:var(--rd)">'+e.message+'</span>'}}
+
+const PS=[{n:'OpenAI',u:'https://api.openai.com/v1',m:'gpt-4o'},{n:'DeepSeek',u:'https://api.deepseek.com/v1',m:'deepseek-chat'},{n:'通义千问',u:'https://dashscope.aliyuncs.com/compatible-mode/v1',m:'qwen-max'},{n:'智谱GLM',u:'https://open.bigmodel.cn/api/paas/v4',m:'glm-4-plus'},{n:'Moonshot',u:'https://api.moonshot.cn/v1',m:'moonshot-v1-128k'},{n:'Ollama',u:'http://localhost:11434/v1',m:'qwen2.5:72b'}];
+$('presets').innerHTML=PS.map(p=>`<div style="background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:8px 12px;cursor:pointer" onclick="$('ll_url').value='${p.u}';$('ll_mod').value='${p.m}'"><div style="font-weight:700;color:var(--or);font-size:12px">${p.n}</div><div style="font-size:10px;color:var(--dm)">${p.u}</div></div>`).join('');
+loadCfg();
+</script>
+</body>
+</html>
