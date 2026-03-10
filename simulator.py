@@ -146,8 +146,8 @@ class Simulator:
 
                 # 开始加工
                 pt = best_op.processing_time
-                start = now
-                end = now + pt
+                start = m.next_start_time(now)
+                end = m.compute_effective_end(start, pt)
                 best_op.status = OpStatus.PROCESSING
                 best_op.assigned_machine_id = mid
                 best_op.start_time = start

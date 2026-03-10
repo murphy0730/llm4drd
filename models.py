@@ -36,6 +36,15 @@ class Shift:
     hours: float           # 可用小时数, 0=不可用
 
 @dataclass
+class Downtime:
+    """机器停机时间段"""
+    id: str
+    machine_id: str
+    downtime_type: str  # "planned" | "unplanned"
+    start_time: float
+    end_time: float
+
+@dataclass
 class MachineType:
     """机器类别 — 如 车/铣/磨/钻/镗/装配/检测 等"""
     id: str
@@ -54,6 +63,55 @@ class Machine:
     current_finish_time: float = 0.0
     total_busy_time: float = 0.0
     last_op_type: Optional[str] = None
+    downtimes: list = field(default_factory=list)  # list[Downtime]
+
+    def next_start_time(self, from_time: float) -> float:
+        """Find first moment >= from_time that is not inside a downtime window."""
+        t = from_time
+        max_iter = 1000
+        for _ in range(max_iter):
+            in_downtime = False
+            for dt in self.downtimes:
+                if dt.start_time <= t < dt.end_time:
+                    t = dt.end_time
+                    in_downtime = True
+                    break
+            if not in_downtime:
+                return t
+        return t
+
+    def compute_effective_end(self, start: float, duration: float) -> float:
+        """Compute actual completion time, skipping over downtime windows."""
+        t = start
+        remaining = duration
+        max_iter = 1000
+        for _ in range(max_iter):
+            if remaining <= 0:
+                break
+            # Find next downtime that starts after t
+            next_dt_start = float('inf')
+            for dt in self.downtimes:
+                if dt.start_time > t and dt.start_time < next_dt_start:
+                    next_dt_start = dt.start_time
+            if next_dt_start == float('inf'):
+                # No more downtimes, process continuously
+                t += remaining
+                remaining = 0
+                break
+            time_until_dt = next_dt_start - t
+            if time_until_dt >= remaining:
+                t += remaining
+                remaining = 0
+                break
+            else:
+                remaining -= time_until_dt
+                t = next_dt_start
+                # Skip the downtime
+                for dt in self.downtimes:
+                    if dt.start_time <= t < dt.end_time:
+                        t = dt.end_time
+                        break
+        return t
 
     def available_hours_on_day(self, day: int) -> float:
         """获取某天的可用小时数"""

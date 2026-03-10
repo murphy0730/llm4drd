@@ -1,5 +1,5 @@
 """FastAPI 服务 v3 — 完整后端"""
-import os, csv, io, json, inspect, logging, time
+import os, csv, io, json, inspect, logging, time, uuid, threading
 from typing import Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,9 +14,11 @@ from .instance_generator import InstanceGenerator
 from .dispatching_rules import BUILTIN_RULES, get_all_rule_names
 from .simulator import Simulator
 from .llm_evolution import EvolutionEngine, EvolutionConfig, LLMInterface
-from .pareto import ParetoOptimizer, OBJECTIVES
-from .db_manager import init_db, InstanceStore, GraphStore
+from .pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
+from .db_manager import init_db, InstanceStore, GraphStore, DowntimeStore
 from .heterogeneous_graph import HeterogeneousGraph
+from .exact_solver import ExactSolver
+from .online_v3 import OnlineSchedulerV3
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="LLM4DRD智能调度平台", version="3.0")
@@ -31,6 +33,10 @@ last_result = None
 last_engine: Optional[EvolutionEngine] = None
 inst_store = InstanceStore()
 graph_store = GraphStore()
+downtime_store = DowntimeStore()
+_nsga2_tasks: dict = {}
+_exact_tasks: dict = {}
+online_scheduler_v3: Optional[OnlineSchedulerV3] = None
 
 @app.on_event("startup")
 async def startup():
@@ -64,6 +70,44 @@ class TrainReq(BaseModel):
 class LLMCfg(BaseModel):
     base_url: Optional[str] = None; api_key: Optional[str] = None
     model: Optional[str] = None
+
+class DowntimeReq(BaseModel):
+    machine_id: str
+    downtime_type: str = "planned"
+    start_time: float
+    end_time: float
+
+class NSGA2Req(BaseModel):
+    objectives: list[str] = ["total_tardiness", "makespan"]
+    pop_size: int = 20
+    generations: int = 10
+    seed: int = 42
+
+class ExactReq(BaseModel):
+    objectives: list[str] = ["makespan", "total_tardiness"]
+    time_limit_s: int = 60
+
+class OnlineStartReq(BaseModel):
+    rule_name: str = "ATC"
+
+class OnlineAdvanceReq(BaseModel):
+    delta: float = 1.0
+
+class OnlineBreakdownReq(BaseModel):
+    machine_id: str
+    repair_at: float
+
+class OnlineRepairReq(BaseModel):
+    machine_id: str
+
+class OnlineRescheduleReq(BaseModel):
+    rule_name: Optional[str] = None
+
+class ScenarioCompareReq(BaseModel):
+    rule_names: Optional[list[str]] = None
+    num_replications: int = 1
+    breakdown_prob: float = 0.0
+    pt_variance: float = 0.0
 
 # === Instance ===
 @app.post("/api/instance/generate")
@@ -357,3 +401,196 @@ async def test_llm():
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "has_instance": shop is not None, "version": "3.0"}
+
+
+# === Downtime ===
+@app.get("/api/downtime")
+async def list_downtimes():
+    return {"downtimes": downtime_store.list_all()}
+
+@app.post("/api/downtime")
+async def add_downtime(req: DowntimeReq):
+    global shop
+    if req.start_time >= req.end_time:
+        raise HTTPException(400, "start_time must be less than end_time")
+    new_id = downtime_store.save(req.machine_id, req.downtime_type, req.start_time, req.end_time)
+    # Refresh shop to pick up new downtime
+    if inst_store.has_data():
+        shop = inst_store.build_shopfloor()
+    return {"status": "ok", "id": new_id}
+
+@app.put("/api/downtime/{dt_id}")
+async def update_downtime(dt_id: int, data: dict):
+    global shop
+    downtime_store.update(dt_id, data)
+    if inst_store.has_data():
+        shop = inst_store.build_shopfloor()
+    return {"status": "ok"}
+
+@app.delete("/api/downtime/{dt_id}")
+async def delete_downtime(dt_id: int):
+    global shop
+    downtime_store.delete(dt_id)
+    if inst_store.has_data():
+        shop = inst_store.build_shopfloor()
+    return {"status": "ok"}
+
+
+# === NSGA-II ===
+@app.post("/api/pareto/nsga2")
+async def nsga2_start(req: NSGA2Req, bg: BackgroundTasks):
+    if not shop:
+        raise HTTPException(400, "请先生成实例")
+    task_id = str(uuid.uuid4())[:8]
+    _nsga2_tasks[task_id] = {"status": "running", "progress": 0, "total": 1, "gen": 0, "result": None}
+
+    def _run():
+        def cb(done, total, gen):
+            _nsga2_tasks[task_id]["progress"] = done
+            _nsga2_tasks[task_id]["total"] = total
+            _nsga2_tasks[task_id]["gen"] = gen
+        try:
+            opt = NSGA2Optimizer(shop, req.objectives, pop_size=req.pop_size,
+                                  generations=req.generations, seed=req.seed)
+            sols = opt.run(callback=cb)
+            # Convert to frontend format
+            obj_keys = req.objectives
+            pts = []
+            for s in sols:
+                pt = {"rule": s.rule_name, "rank": s.rank, "crowding": round(s.crowding, 3),
+                      "is_pareto": s.rank == 0}
+                for k in obj_keys:
+                    pt[k] = round(s.objectives.get(k, 0), 4)
+                if hasattr(s, 'weights'):
+                    pt["weights"] = [round(w, 3) for w in s.weights]
+                pts.append(pt)
+            _nsga2_tasks[task_id]["result"] = {
+                "objectives": obj_keys,
+                "solutions": pts,
+                "pareto_front": [p for p in pts if p["is_pareto"]],
+            }
+            _nsga2_tasks[task_id]["status"] = "done"
+        except Exception as e:
+            _nsga2_tasks[task_id]["status"] = "error"
+            _nsga2_tasks[task_id]["error"] = str(e)
+
+    bg.add_task(_run)
+    return {"task_id": task_id, "status": "started"}
+
+@app.get("/api/pareto/nsga2/status/{task_id}")
+async def nsga2_status(task_id: str):
+    t = _nsga2_tasks.get(task_id)
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    return t
+
+
+# === Exact Solver ===
+@app.post("/api/exact/solve")
+async def exact_solve(req: ExactReq, bg: BackgroundTasks):
+    if not shop:
+        raise HTTPException(400, "请先生成实例")
+    task_id = str(uuid.uuid4())[:8]
+    _exact_tasks[task_id] = {"status": "running", "result": None}
+
+    def _run():
+        try:
+            solver = ExactSolver(shop, req.objectives, req.time_limit_s)
+            result = solver.solve()
+            _exact_tasks[task_id]["result"] = result.to_dict()
+            _exact_tasks[task_id]["result"]["schedule"] = result.schedule[:100]
+            _exact_tasks[task_id]["status"] = "done"
+        except Exception as e:
+            _exact_tasks[task_id]["status"] = "error"
+            _exact_tasks[task_id]["error"] = str(e)
+
+    bg.add_task(_run)
+    return {"task_id": task_id, "status": "started"}
+
+@app.get("/api/exact/status/{task_id}")
+async def exact_status(task_id: str):
+    t = _exact_tasks.get(task_id)
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    return t
+
+
+# === Online Scheduling ===
+@app.post("/api/online/start")
+async def online_start(req: OnlineStartReq):
+    global online_scheduler_v3, shop
+    if not shop and inst_store.has_data():
+        shop = inst_store.build_shopfloor()
+    if not shop:
+        raise HTTPException(400, "请先生成实例")
+    online_scheduler_v3 = OnlineSchedulerV3(shop, req.rule_name)
+    return {"status": "ok", **online_scheduler_v3.get_status()}
+
+@app.post("/api/online/advance")
+async def online_advance(req: OnlineAdvanceReq):
+    if not online_scheduler_v3:
+        raise HTTPException(400, "请先启动在线调度")
+    return online_scheduler_v3.advance(req.delta)
+
+@app.post("/api/online/breakdown")
+async def online_breakdown(req: OnlineBreakdownReq):
+    if not online_scheduler_v3:
+        raise HTTPException(400, "请先启动在线调度")
+    return online_scheduler_v3.on_breakdown(req.machine_id, req.repair_at)
+
+@app.post("/api/online/repair")
+async def online_repair(req: OnlineRepairReq):
+    if not online_scheduler_v3:
+        raise HTTPException(400, "请先启动在线调度")
+    return online_scheduler_v3.on_repair(req.machine_id)
+
+@app.post("/api/online/reschedule")
+async def online_reschedule(req: OnlineRescheduleReq):
+    if not online_scheduler_v3:
+        raise HTTPException(400, "请先启动在线调度")
+    return online_scheduler_v3.reschedule(req.rule_name)
+
+@app.get("/api/online/status")
+async def online_status():
+    if not online_scheduler_v3:
+        return {"status": "not_started"}
+    return online_scheduler_v3.get_status()
+
+
+# === Scenario Analysis ===
+@app.post("/api/scenario/compare")
+async def scenario_compare(req: ScenarioCompareReq):
+    if not shop:
+        raise HTTPException(400, "请先生成实例")
+    rule_names = req.rule_names or list(BUILTIN_RULES.keys())
+    results = []
+    import copy, random as _rand
+    for rule_name in rule_names:
+        if rule_name not in BUILTIN_RULES:
+            continue
+        rule_fn = BUILTIN_RULES[rule_name]
+        rep_results = []
+        for rep in range(max(1, req.num_replications)):
+            sim_shop = copy.deepcopy(shop)
+            # Apply pt_variance if specified
+            if req.pt_variance > 0:
+                rng = _rand.Random(rep * 7919 + hash(rule_name) % 1000)
+                for op in sim_shop.operations.values():
+                    factor = 1.0 + rng.gauss(0, req.pt_variance)
+                    op.processing_time = max(0.1, op.processing_time * factor)
+            sim = Simulator(sim_shop, rule_fn)
+            r = sim.run()
+            rep_results.append(r.to_dict())
+        # Aggregate
+        keys = ["total_tardiness", "makespan", "avg_utilization", "critical_utilization",
+                "main_order_tardy_count", "main_order_tardy_ratio"]
+        agg = {}
+        for k in keys:
+            vals = [rr[k] for rr in rep_results if k in rr]
+            if vals:
+                agg[k + "_mean"] = round(sum(vals)/len(vals), 3)
+                agg[k + "_min"] = round(min(vals), 3)
+                agg[k + "_max"] = round(max(vals), 3)
+        results.append({"rule": rule_name, "replications": len(rep_results), **agg})
+    results.sort(key=lambda x: x.get("total_tardiness_mean", 9e9))
+    return {"comparison": results, "num_replications": req.num_replications}

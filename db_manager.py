@@ -191,8 +191,71 @@ def init_db(db_path: str = DB_PATH):
         CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type);
         CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(source);
         CREATE INDEX IF NOT EXISTS idx_graph_edges_tgt ON graph_edges(target);
+
+        CREATE TABLE IF NOT EXISTS machine_downtime (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            machine_id TEXT NOT NULL,
+            downtime_type TEXT NOT NULL,
+            start_time REAL NOT NULL,
+            end_time REAL NOT NULL
+        );
         """)
     logger.info(f"Database initialized: {db_path}")
+
+
+class DowntimeStore:
+    """机器停机时间管理"""
+
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+
+    def save(self, machine_id: str, downtime_type: str, start_time: float, end_time: float) -> int:
+        with get_db(self.db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO machine_downtime (machine_id, downtime_type, start_time, end_time) VALUES (?,?,?,?)",
+                (machine_id, downtime_type, start_time, end_time)
+            )
+            return cur.lastrowid
+
+    def list_all(self) -> list:
+        with get_db(self.db_path) as conn:
+            rows = conn.execute("SELECT * FROM machine_downtime ORDER BY machine_id, start_time").fetchall()
+            return [dict(r) for r in rows]
+
+    def delete(self, id: int):
+        with get_db(self.db_path) as conn:
+            conn.execute("DELETE FROM machine_downtime WHERE id=?", (id,))
+
+    def update(self, id: int, data: dict):
+        with get_db(self.db_path) as conn:
+            conn.execute(
+                "UPDATE machine_downtime SET machine_id=?, downtime_type=?, start_time=?, end_time=? WHERE id=?",
+                (data["machine_id"], data["downtime_type"], float(data["start_time"]), float(data["end_time"]), id)
+            )
+
+    def load_for_machine(self, machine_id: str) -> list:
+        with get_db(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM machine_downtime WHERE machine_id=? ORDER BY start_time",
+                (machine_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def load_all_as_downtimes(self) -> dict:
+        """Returns dict[machine_id -> list[Downtime]]"""
+        from .models import Downtime
+        result = {}
+        for row in self.list_all():
+            mid = row["machine_id"]
+            dt = Downtime(
+                id=str(row["id"]),
+                machine_id=mid,
+                downtime_type=row["downtime_type"],
+                start_time=row["start_time"],
+                end_time=row["end_time"]
+            )
+            result.setdefault(mid, []).append(dt)
+        return result
 
 
 class RuleStore:
@@ -558,7 +621,15 @@ class InstanceStore:
                 shop.tasks[op["task_id"]].operations.append(operation)
 
         shop.build_indexes()
+        self._load_downtimes_into_shop(shop)
         return shop
+
+    def _load_downtimes_into_shop(self, shop):
+        """Load downtimes from DB and attach to machines."""
+        dt_store = DowntimeStore(self.db_path)
+        downtimes_by_machine = dt_store.load_all_as_downtimes()
+        for mid, m in shop.machines.items():
+            m.downtimes = downtimes_by_machine.get(mid, [])
 
 
 class GraphStore:

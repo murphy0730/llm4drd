@@ -73,7 +73,8 @@ function show(v){$('sp').style.display=v?'inline-block':'none'}
 // === TABS ===
 const TABS=[
   {k:'inst',l:'📦 问题配置'},{k:'graph',l:'🔗 异构图'},{k:'sim',l:'⚡ 仿真排产'},{k:'cmp',l:'📊 规则对比'},
-  {k:'pareto',l:'🎯 帕累托优化'},{k:'ai',l:'🤖 AI进化训练'},{k:'cfg',l:'⚙️ 大模型配置'}
+  {k:'pareto',l:'🎯 帕累托优化'},{k:'ai',l:'🤖 AI进化训练'},{k:'cfg',l:'⚙️ 大模型配置'},
+  {k:'online',l:'🌐 在线调度'},{k:'scenario',l:'🔬 场景分析'}
 ];
 $('tabs').innerHTML=TABS.map((t,i)=>`<div class="tab${i===0?' on':''}" data-k="${t.k}">${t.l}</div>`).join('');
 $('tabs').onclick=e=>{const t=e.target.closest('.tab');if(!t)return;document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));t.classList.add('on');
@@ -137,6 +138,22 @@ $('pages').innerHTML=`
 </div>
 </div>
 <div id="instD"></div>
+
+<!-- Downtime Management -->
+<div class="cd" id="downtimeCard">
+<div class="ct2"><span class="dot" style="background:var(--rd)"></span>机器停机管理 — 计划/非计划停机时间段</div>
+<div class="g g4" style="margin-bottom:10px">
+<label class="f">机器ID<input id="dt_mid" type="text" placeholder="如 M-001"></label>
+<label class="f">类型<select id="dt_type"><option value="planned">计划停机</option><option value="unplanned">非计划故障</option></select></label>
+<label class="f">开始时间(h)<input id="dt_start" type="number" value="0" step="0.5" min="0"></label>
+<label class="f">结束时间(h)<input id="dt_end" type="number" value="8" step="0.5" min="0"></label>
+</div>
+<div style="display:flex;gap:8px;margin-bottom:10px">
+<button class="btn b4" onclick="addDowntime()">+ 添加停机</button>
+<button class="btn b1" onclick="loadDowntimes()">🔄 刷新列表</button>
+</div>
+<div id="downtimeList" style="overflow-x:auto;max-height:280px;overflow-y:auto"></div>
+</div>
 </div>
 
 <!-- GRAPH -->
@@ -224,15 +241,79 @@ $('pages').innerHTML=`
 
 <!-- PARETO -->
 <div id="p-pareto" class="page">
-<div class="cd"><div class="ct2"><span class="dot" style="background:var(--pr)"></span>帕累托多目标优化</div>
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--pr)"></span>帕累托多目标优化 — 内置规则</div>
 <div style="font-size:11px;color:var(--dm);margin-bottom:8px">支持12种工业排产指标</div>
 <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
 <label class="f">目标1<select id="po1"><option value="total_tardiness">总延迟</option><option value="makespan">Makespan</option><option value="main_order_tardy_count">延误主订单数</option><option value="main_order_tardy_ratio">主订单延误比例</option><option value="critical_utilization">关键资源利用率</option><option value="total_wait_time">总等待时间</option><option value="avg_flowtime">平均流程时间</option></select></label>
 <label class="f">目标2<select id="po2"><option value="critical_utilization">关键资源利用率</option><option value="makespan">Makespan</option><option value="total_tardiness">总延迟</option><option value="main_order_tardy_count">延误主订单数</option><option value="total_wait_time">总等待时间</option></select></label>
 <button class="btn b5" onclick="runPareto()">🎯 计算帕累托前沿</button>
 </div></div>
+
+<!-- NSGA-II -->
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--cy)"></span>NSGA-II 真实帕累托前沿 — 进化多目标优化</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">通过进化算法探索权重空间, 发现真实帕累托前沿</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+<label class="f">种群大小<input id="ns_pop" type="number" value="20" min="4" max="100"></label>
+<label class="f">进化代数<input id="ns_gen" type="number" value="10" min="1" max="100"></label>
+<button class="btn b6" onclick="runNSGA2()">🧬 NSGA-II 优化</button>
+<span id="nsga2Progress" style="font-size:11px;color:var(--dm)"></span>
+</div></div>
+
+<!-- Exact Solver -->
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>精确求解器 — OR-Tools CP-SAT</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">整数规划精确求解, 适合小规模实例 (需安装 ortools)</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+<label class="f">主目标<select id="ex_obj"><option value="makespan">Makespan</option><option value="total_tardiness">总延迟</option></select></label>
+<label class="f">时间限制(秒)<input id="ex_tlim" type="number" value="60" min="5" max="600"></label>
+<button class="btn b3" onclick="runExact()">🔬 精确求解</button>
+<span id="exactProgress" style="font-size:11px;color:var(--dm)"></span>
+</div>
+<div id="exactResult" style="margin-top:8px"></div>
+</div>
+
 <div id="parR"></div>
 <div class="cd"><div class="ct2"><span class="dot" style="background:var(--dm)"></span>运行日志</div><div id="parL" class="log">等待运行...</div></div>
+</div>
+
+<!-- ONLINE SCHEDULING -->
+<div id="p-online" class="page">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--cy)"></span>在线调度 — 实时派工与动态重排</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+<label class="f">调度规则<select id="ol_rule"><option>ATC</option><option>EDD</option><option>SPT</option><option>CR</option><option>FIFO</option><option>MST</option><option>LPT</option><option>PRIORITY</option><option>KIT_AWARE</option><option>BOTTLENECK</option><option>COMPOSITE</option></select></label>
+<button class="btn b2" onclick="onlineStart()">▶ 启动在线调度</button>
+<button class="btn b1" onclick="onlineStatus()">📊 刷新状态</button>
+</div></div>
+<div class="cd" id="onlineCtrlCard" style="display:none">
+<div class="ct2"><span class="dot" style="background:var(--gn)"></span>控制面板</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+<label class="f">推进时间(h)<input id="ol_delta" type="number" value="1" step="0.5" min="0.1"></label>
+<button class="btn b2" onclick="onlineAdvance()">⏩ 推进时间</button>
+</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+<label class="f">机器ID<input id="ol_mach" type="text" placeholder="机器ID"></label>
+<label class="f">修复时间(h)<input id="ol_repair_at" type="number" value="10" step="0.5"></label>
+<button class="btn b4" onclick="onlineBreakdown()">⚠️ 故障</button>
+<button class="btn b2" onclick="onlineRepair()">🔧 修复</button>
+</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+<label class="f">重排规则<select id="ol_new_rule"><option>ATC</option><option>EDD</option><option>SPT</option><option>CR</option><option>FIFO</option><option>MST</option><option>LPT</option><option>PRIORITY</option></select></label>
+<button class="btn b5" onclick="onlineReschedule()">🔄 动态重排</button>
+</div>
+</div>
+<div id="onlineStatus"></div>
+</div>
+
+<!-- SCENARIO ANALYSIS -->
+<div id="p-scenario" class="page">
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>场景分析 — 多规则多场景对比</div>
+<div style="font-size:11px;color:var(--dm);margin-bottom:8px">在不同扰动场景下对比多条规则的鲁棒性</div>
+<div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+<label class="f">重复次数<input id="sc_reps" type="number" value="3" min="1" max="20"></label>
+<label class="f">加工时间方差<input id="sc_ptv" type="number" value="0.1" step="0.05" min="0" max="1"></label>
+<button class="btn b3" onclick="runScenario()">🔬 运行场景分析</button>
+</div></div>
+<div id="scenarioR"></div>
+<div class="cd"><div class="ct2"><span class="dot" style="background:var(--dm)"></span>运行日志</div><div id="scenarioL" class="log">等待运行...</div></div>
 </div>
 
 <!-- AI EVOLUTION -->
@@ -884,6 +965,286 @@ async function loadLogs(){
   }catch(e){$('aiLogs').innerHTML=`<div class="cd" style="color:var(--rd)">${e.message}</div>`}show(0)}
 
 function escH(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// ============================================================
+//  DOWNTIME MANAGEMENT
+// ============================================================
+async function addDowntime(){
+  const mid=$('dt_mid').value.trim();
+  if(!mid){alert('请输入机器ID');return}
+  const start=parseFloat($('dt_start').value);
+  const end=parseFloat($('dt_end').value);
+  if(start>=end){alert('开始时间必须小于结束时间');return}
+  show(1);try{
+    await api('/api/downtime',{method:'POST',body:JSON.stringify({
+      machine_id:mid,downtime_type:$('dt_type').value,start_time:start,end_time:end
+    })});
+    await loadDowntimes();
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function loadDowntimes(){
+  try{
+    const r=await api('/api/downtime');
+    renderDowntimes(r.downtimes);
+  }catch(e){}
+}
+
+function renderDowntimes(dts){
+  if(!dts||!dts.length){$('downtimeList').innerHTML='<div style="color:var(--dm);font-size:11px">暂无停机记录</div>';return}
+  let h=`<table><thead><tr><th>ID</th><th>机器</th><th>类型</th><th>开始(h)</th><th>结束(h)</th><th>时长</th><th>操作</th></tr></thead><tbody>`;
+  dts.forEach(d=>{
+    const dur=(d.end_time-d.start_time).toFixed(1);
+    const tc=d.downtime_type==='planned'?'bg-b':'bg-r';
+    const tl=d.downtime_type==='planned'?'计划':'故障';
+    h+=`<tr><td class="mono">${d.id}</td><td class="mono">${d.machine_id}</td><td><span class="bg ${tc}">${tl}</span></td><td>${d.start_time}</td><td>${d.end_time}</td><td>${dur}h</td><td><button class="btn b4" style="padding:2px 8px;font-size:10px" onclick="deleteDowntime(${d.id})">删除</button></td></tr>`;
+  });
+  h+=`</tbody></table>`;
+  $('downtimeList').innerHTML=h;
+}
+
+async function deleteDowntime(id){
+  show(1);try{await api('/api/downtime/'+id,{method:'DELETE'});await loadDowntimes()}catch(e){alert(e.message)}show(0)
+}
+
+// Load downtimes on page init
+setTimeout(loadDowntimes,500);
+
+// ============================================================
+//  NSGA-II
+// ============================================================
+let nsga2TaskId=null;
+
+async function runNSGA2(){
+  const log=$('parL');log.textContent='';const L=(c,m)=>{log.innerHTML+=`<span class="${c}">${m}</span>\n`;log.scrollTop=9e9};
+  const prog=$('nsga2Progress');prog.textContent='启动中...';
+  show(1);try{
+    const o1=$('po1').value,o2=$('po2').value;
+    const pop=+$('ns_pop').value,gen=+$('ns_gen').value;
+    L('i',`[NSGA-II] 种群=${pop}, 代数=${gen}, 目标: ${o1} vs ${o2}`);
+    const r=await api('/api/pareto/nsga2',{method:'POST',body:JSON.stringify({
+      objectives:[o1,o2],pop_size:pop,generations:gen
+    })});
+    nsga2TaskId=r.task_id;
+    prog.textContent=`任务${r.task_id} 运行中...`;
+    L('i',`[NSGA-II] 任务ID: ${r.task_id}, 轮询中...`);
+    // Poll for result
+    const poll=setInterval(async()=>{
+      try{
+        const st=await api('/api/pareto/nsga2/status/'+nsga2TaskId);
+        const pct=st.total>0?Math.round(st.progress/st.total*100):0;
+        prog.textContent=`Gen ${st.gen} — ${pct}%`;
+        if(st.status==='done'){
+          clearInterval(poll);
+          prog.textContent=`完成! ${st.result.solutions.length}方案, 前沿${st.result.pareto_front.length}个`;
+          L('g',`[NSGA-II] 完成! ${st.result.solutions.length}方案`);
+          renderNSGA2Result(st.result,o1,o2);
+          show(0);
+        }else if(st.status==='error'){
+          clearInterval(poll);prog.textContent='错误: '+st.error;
+          L('e','[NSGA-II] '+st.error);show(0);
+        }
+      }catch(e){clearInterval(poll);show(0)}
+    },2000);
+  }catch(e){L('e','[错误] '+e.message);prog.textContent='';show(0)}
+}
+
+function renderNSGA2Result(data,o1,o2){
+  const labels={total_tardiness:'总延迟',makespan:'Makespan',critical_utilization:'关键资源利用率',
+    main_order_tardy_count:'延误主订单数',total_wait_time:'总等待时间',avg_flowtime:'平均流程时间',
+    main_order_tardy_ratio:'主订单延误比例'};
+  let h=`<div class="cd" style="border-color:var(--cy)"><div class="ct2"><span class="dot" style="background:var(--cy)"></span>NSGA-II 帕累托前沿</div>`;
+  h+=`<canvas id="nsga2C" height="350"></canvas>`;
+  h+=`<div style="margin-top:8px;overflow-x:auto"><table><thead><tr><th>方案</th><th>${labels[o1]||o1}</th><th>${labels[o2]||o2}</th><th>帕累托</th><th>层</th></tr></thead><tbody>`;
+  data.solutions.filter(s=>s.is_pareto).sort((a,b)=>(a[o1]||0)-(b[o1]||0)).forEach(s=>{
+    h+=`<tr style="background:var(--gn)11"><td><span class="bg bg-g">${s.rule}</span></td><td class="mono">${(s[o1]||0).toFixed(2)}</td><td class="mono">${(s[o2]||0).toFixed(2)}</td><td>✅</td><td>${s.rank}</td></tr>`;
+  });
+  h+=`</tbody></table></div></div>`;
+  const existing=$('parR').querySelector('.nsga2-result');
+  if(existing)existing.remove();
+  const div=document.createElement('div');div.className='nsga2-result';div.innerHTML=h;
+  $('parR').appendChild(div);
+  setTimeout(()=>drawNSGA2Chart(data,o1,o2),50);
+}
+
+function drawNSGA2Chart(data,o1,o2){
+  const c=$('nsga2C');if(!c)return;const ctx=c.getContext('2d');const dp=devicePixelRatio||1;
+  const W=c.parentElement.clientWidth,H=350;c.width=W*dp;c.height=H*dp;c.style.width=W+'px';c.style.height=H+'px';ctx.scale(dp,dp);
+  ctx.fillStyle='#0a0e1a';ctx.fillRect(0,0,W,H);
+  const pts=data.solutions;
+  const v1=pts.map(p=>p[o1]||0),v2=pts.map(p=>p[o2]||0);
+  const mn1=Math.min(...v1)*.95,mx1=Math.max(...v1)*1.05||1,mn2=Math.min(...v2)*.95,mx2=Math.max(...v2)*1.05||1;
+  const L2=70,R2=20,T2=20,B2=30,cW=W-L2-R2,cH=H-T2-B2;
+  const x=v=>L2+(v-mn1)/(mx1-mn1||1)*cW,y=v=>T2+cH-(v-mn2)/(mx2-mn2||1)*cH;
+  ctx.strokeStyle='#1a2744';ctx.lineWidth=.5;
+  for(let i=0;i<=5;i++){const gx=L2+i/5*cW,gy=T2+i/5*cH;ctx.beginPath();ctx.moveTo(gx,T2);ctx.lineTo(gx,H-B2);ctx.stroke();ctx.beginPath();ctx.moveTo(L2,gy);ctx.lineTo(W-R2,gy);ctx.stroke();}
+  // Non-pareto points
+  pts.filter(p=>!p.is_pareto).forEach(p=>{ctx.beginPath();ctx.arc(x(p[o1]||0),y(p[o2]||0),3,0,Math.PI*2);ctx.fillStyle='#2d4a6a';ctx.fill();});
+  // Pareto front line
+  const fr=pts.filter(p=>p.is_pareto).sort((a,b)=>(a[o1]||0)-(b[o1]||0));
+  if(fr.length>1){ctx.strokeStyle='#00d2d366';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(x(fr[0][o1]),y(fr[0][o2]));fr.slice(1).forEach(p=>ctx.lineTo(x(p[o1]),y(p[o2])));ctx.stroke();ctx.setLineDash([]);}
+  // Pareto points
+  pts.filter(p=>p.is_pareto).forEach(p=>{ctx.beginPath();ctx.arc(x(p[o1]||0),y(p[o2]||0),6,0,Math.PI*2);ctx.fillStyle='#00d2d3';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();});
+}
+
+// ============================================================
+//  EXACT SOLVER
+// ============================================================
+let exactTaskId=null;
+
+async function runExact(){
+  const prog=$('exactProgress');prog.textContent='启动中...';
+  const resDiv=$('exactResult');resDiv.innerHTML='';
+  show(1);try{
+    const obj=$('ex_obj').value;
+    const tlim=+$('ex_tlim').value;
+    const r=await api('/api/exact/solve',{method:'POST',body:JSON.stringify({
+      objectives:[obj],time_limit_s:tlim
+    })});
+    exactTaskId=r.task_id;
+    prog.textContent=`任务${r.task_id} 求解中... (最多${tlim}s)`;
+    const poll=setInterval(async()=>{
+      try{
+        const st=await api('/api/exact/status/'+exactTaskId);
+        if(st.status==='done'){
+          clearInterval(poll);
+          prog.textContent=`完成! 状态: ${st.result.status}`;
+          renderExactResult(st.result);show(0);
+        }else if(st.status==='error'){
+          clearInterval(poll);prog.textContent='错误: '+st.error;show(0);
+        }
+      }catch(e){clearInterval(poll);show(0)}
+    },3000);
+  }catch(e){prog.textContent='错误: '+e.message;show(0)}
+}
+
+function renderExactResult(r){
+  const stc={'OPTIMAL':'bg-g','FEASIBLE':'bg-b','INFEASIBLE':'bg-r','UNKNOWN':'bg-o','ERROR':'bg-r'};
+  let h=`<div style="margin-top:6px"><span class="bg ${stc[r.status]||'bg-o'}">${r.status}</span> `;
+  h+=`<span style="font-size:11px;color:var(--dm)">求解耗时 ${r.solve_time_s}s, ${r.num_schedule_entries}条排产</span></div>`;
+  if(r.objectives&&Object.keys(r.objectives).length){
+    h+=`<div style="margin-top:6px;display:flex;gap:16px">`;
+    for(const[k,v] of Object.entries(r.objectives)){h+=`<div><span style="color:var(--dm);font-size:10px">${k}</span><div style="font-size:16px;font-weight:700;color:var(--gn)">${v}</div></div>`;}
+    h+=`</div>`;
+  }
+  if(r.bounds&&Object.keys(r.bounds).length){
+    h+=`<div style="font-size:10px;color:var(--dm);margin-top:4px">下界: ${JSON.stringify(r.bounds)}</div>`;
+  }
+  $('exactResult').innerHTML=h;
+}
+
+// ============================================================
+//  ONLINE SCHEDULING
+// ============================================================
+async function onlineStart(){
+  show(1);try{
+    const r=await api('/api/online/start',{method:'POST',body:JSON.stringify({rule_name:$('ol_rule').value})});
+    $('onlineCtrlCard').style.display='block';
+    renderOnlineStatus(r);
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function onlineAdvance(){
+  show(1);try{
+    const r=await api('/api/online/advance',{method:'POST',body:JSON.stringify({delta:+$('ol_delta').value})});
+    renderOnlineStatus(r);
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function onlineBreakdown(){
+  const mid=$('ol_mach').value.trim();
+  if(!mid){alert('请输入机器ID');return}
+  show(1);try{
+    const r=await api('/api/online/breakdown',{method:'POST',body:JSON.stringify({machine_id:mid,repair_at:+$('ol_repair_at').value})});
+    renderOnlineStatus(r);
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function onlineRepair(){
+  const mid=$('ol_mach').value.trim();
+  if(!mid){alert('请输入机器ID');return}
+  show(1);try{
+    const r=await api('/api/online/repair',{method:'POST',body:JSON.stringify({machine_id:mid})});
+    renderOnlineStatus(r);
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function onlineReschedule(){
+  show(1);try{
+    const r=await api('/api/online/reschedule',{method:'POST',body:JSON.stringify({rule_name:$('ol_new_rule').value})});
+    let h=`<div class="cd" style="border-color:var(--gn)"><div class="ct2"><span class="dot" style="background:var(--gn)"></span>重排结果</div>`;
+    h+=`<div style="display:flex;gap:16px;margin-top:6px">`;
+    h+=`<div><span style="color:var(--dm);font-size:10px">旧规则</span><div style="font-size:14px;font-weight:700;color:var(--or)">${r.old_rule}</div></div>`;
+    h+=`<div><span style="color:var(--dm);font-size:10px">新规则</span><div style="font-size:14px;font-weight:700;color:var(--gn)">${r.new_rule}</div></div>`;
+    h+=`<div><span style="color:var(--dm);font-size:10px">改善</span><div style="font-size:16px;font-weight:700;color:${r.improvement_pct>=0?'var(--gn)':'var(--rd)'}">${r.improvement_pct}%</div></div>`;
+    h+=`</div></div>`;
+    $('onlineStatus').innerHTML=h+$('onlineStatus').innerHTML;
+  }catch(e){alert(e.message)}show(0)
+}
+
+async function onlineStatus(){
+  show(1);try{
+    const r=await api('/api/online/status');
+    if(r.status==='not_started'){$('onlineStatus').innerHTML='<div style="color:var(--dm)">在线调度未启动</div>';}
+    else{$('onlineCtrlCard').style.display='block';renderOnlineStatus(r);}
+  }catch(e){}show(0)
+}
+
+function renderOnlineStatus(r){
+  const stc={IDLE:'bg-g',BUSY:'bg-b',MAINTENANCE:'bg-r',OFF:'bg-o'};
+  let h=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--ac)"></span>当前状态 — T=${r.current_time}h &nbsp; 规则: ${r.rule}</div>`;
+  h+=`<div class="mg" style="margin-bottom:10px">`;
+  [{l:'总工序',v:r.ops_total,c:'--dm'},{l:'已完成',v:r.ops_completed,c:'--gn'},{l:'进行中',v:r.ops_in_progress,c:'--ac'},{l:'就绪',v:r.ops_ready,c:'--cy'}]
+    .forEach(x=>{h+=`<div class="mt" style="border-color:var(${x.c})"><div class="lb">${x.l}</div><div class="vl" style="color:var(${x.c})">${x.v}</div></div>`});
+  h+=`</div>`;
+  h+=`<div style="overflow-x:auto;margin-bottom:8px"><table><thead><tr><th>机器</th><th>名称</th><th>状态</th><th>当前工序</th><th>完成时间</th></tr></thead><tbody>`;
+  (r.machines||[]).forEach(m=>{
+    const sc=stc[m.state]||'bg-o';
+    h+=`<tr><td class="mono">${m.id}</td><td>${m.name}</td><td><span class="bg ${sc}">${m.state}</span></td><td class="mono">${m.current_op||'-'}</td><td>${m.finish_at>0?m.finish_at.toFixed(1)+'h':'-'}</td></tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  if(r.gantt&&r.gantt.length){
+    h+=`<div style="font-size:11px;font-weight:600;margin-bottom:4px;color:var(--dm)">最近派工 (${r.gantt.length}条)</div>`;
+    h+=`<div style="overflow-x:auto;max-height:200px;overflow-y:auto"><table><thead><tr><th>工序</th><th>机器</th><th>开始</th><th>结束</th><th>订单</th></tr></thead><tbody>`;
+    r.gantt.slice(-20).reverse().forEach(g=>{h+=`<tr><td class="mono">${g.op_name||g.op_id}</td><td>${g.machine_name}</td><td>${g.start}</td><td>${g.end}</td><td class="mono">${g.order_id||''}</td></tr>`});
+    h+=`</tbody></table></div>`;
+  }
+  h+=`</div>`;
+  $('onlineStatus').innerHTML=h;
+}
+
+// ============================================================
+//  SCENARIO ANALYSIS
+// ============================================================
+async function runScenario(){
+  const log=$('scenarioL');log.textContent='';const L=(c,m)=>{log.innerHTML+=`<span class="${c}">${m}</span>\n`;log.scrollTop=9e9};
+  show(1);try{
+    const reps=+$('sc_reps').value;
+    const ptv=+$('sc_ptv').value;
+    L('i',`[开始] 重复次数=${reps}, 加工时间方差=${ptv}`);
+    const t0=performance.now();
+    const r=await api('/api/scenario/compare',{method:'POST',body:JSON.stringify({
+      num_replications:reps,pt_variance:ptv
+    })});
+    L('g',`[完成] ${((performance.now()-t0)/1000).toFixed(2)}s, ${r.comparison.length}条规则`);
+    let h=`<div class="cd"><div class="ct2"><span class="dot" style="background:var(--or)"></span>场景分析结果 — 重复${r.num_replications}次, PT方差=${ptv}</div>`;
+    h+=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>规则</th><th>平均总延迟</th><th>最小</th><th>最大</th><th>平均Makespan</th><th>平均利用率</th><th>主订单延误</th></tr></thead><tbody>`;
+    r.comparison.forEach((c2,i)=>{
+      const td=c2.total_tardiness_mean||0;
+      h+=`<tr style="background:${i===0?'var(--gn)11':i%2?'var(--sf)33':'transparent'}">`;
+      h+=`<td style="font-weight:700;color:${i===0?'var(--gn)':'var(--tx)'}">${i+1}</td>`;
+      h+=`<td><span class="bg ${i===0?'bg-g':'bg-b'}">${c2.rule}</span></td>`;
+      h+=`<td class="mono" style="font-weight:700;color:${i===0?'var(--gn)':'var(--tx)'}">${td.toFixed(1)}</td>`;
+      h+=`<td class="mono">${(c2.total_tardiness_min||0).toFixed(1)}</td>`;
+      h+=`<td class="mono">${(c2.total_tardiness_max||0).toFixed(1)}</td>`;
+      h+=`<td class="mono">${(c2.makespan_mean||0).toFixed(1)}</td>`;
+      h+=`<td>${((c2.avg_utilization_mean||0)*100).toFixed(1)}%</td>`;
+      h+=`<td>${(c2.main_order_tardy_count_mean||0).toFixed(1)}</td></tr>`;
+    });
+    h+=`</tbody></table></div></div>`;
+    $('scenarioR').innerHTML=h;
+  }catch(e){L('e','[错误] '+e.message)}show(0)
+}
 
 // === CONFIG ===
 async function loadCfg(){try{const r=await api('/api/config/llm');$('ll_url').value=r.base_url||'';$('ll_mod').value=r.model||'';$('ll_key').placeholder=r.has_key?'已配置('+r.preview+')':'未配置'}catch(e){}}
