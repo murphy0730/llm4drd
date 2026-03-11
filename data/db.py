@@ -243,7 +243,7 @@ class DowntimeStore:
 
     def load_all_as_downtimes(self) -> dict:
         """Returns dict[machine_id -> list[Downtime]]"""
-        from .models import Downtime
+        from ..core.models import Downtime
         result = {}
         for row in self.list_all():
             mid = row["machine_id"]
@@ -276,9 +276,9 @@ class RuleStore:
         """保存规则到库"""
         with get_db(self.db_path) as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO rules 
-                (id, name, code, problem_type, objective, fitness, 
-                 hybrid_score, llm_score, generation, is_builtin, 
+                INSERT OR REPLACE INTO rules
+                (id, name, code, problem_type, objective, fitness,
+                 hybrid_score, llm_score, generation, is_builtin,
                  updated_at, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -303,7 +303,7 @@ class RuleStore:
         """获取某类问题的最优规则"""
         with get_db(self.db_path) as conn:
             rows = conn.execute("""
-                SELECT * FROM rules 
+                SELECT * FROM rules
                 WHERE problem_type = ? AND objective = ? AND is_active = 1
                 ORDER BY COALESCE(hybrid_score, fitness, 999999) ASC
                 LIMIT ?
@@ -338,7 +338,7 @@ class RuleStore:
         """保存进化运行记录"""
         with get_db(self.db_path) as conn:
             cursor = conn.execute("""
-                INSERT INTO evolution_runs 
+                INSERT INTO evolution_runs
                 (problem_type, objective, config, best_rule_id, best_fitness,
                  total_generations, generation_history, started_at, completed_at, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -356,7 +356,7 @@ class RuleStore:
         """保存调度结果"""
         with get_db(self.db_path) as conn:
             conn.execute("""
-                INSERT INTO schedule_results 
+                INSERT INTO schedule_results
                 (rule_id, instance_id, total_tardiness, makespan,
                  avg_utilization, avg_flowtime, tardy_count, total_jobs)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -558,7 +558,7 @@ class InstanceStore:
 
     def build_shopfloor(self) -> 'ShopFloor':
         """从数据库数据重建 ShopFloor 对象"""
-        from .models import ShopFloor, MachineType, Machine, Shift, Order, Task, Operation
+        from ..core.models import ShopFloor, MachineType, Machine, Shift, Order, Task, Operation
         data = self.load_all()
         shop = ShopFloor()
 

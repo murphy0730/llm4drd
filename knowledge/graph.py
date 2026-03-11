@@ -8,7 +8,7 @@
 """
 import networkx as nx
 from typing import Optional
-from .models import ShopFloor
+from ..core.models import ShopFloor
 
 
 class HeterogeneousGraph:

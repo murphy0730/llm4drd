@@ -7,9 +7,9 @@ import logging
 from typing import Optional, Callable
 from dataclasses import dataclass, field
 
-from .models import ShopFloor, Operation, Task, Order, Machine, MachineState, OpStatus
-from .simulator import Simulator, SimResult
-from .dispatching_rules import BUILTIN_RULES
+from ..core.models import ShopFloor, Operation, Task, Order, Machine, MachineState, OpStatus
+from ..core.simulator import Simulator, SimResult
+from ..core.rules import BUILTIN_RULES
 
 logger = logging.getLogger(__name__)
 

@@ -9,9 +9,9 @@ LLM 双专家进化引擎 v3
 import json, random, time, copy, logging, inspect, math
 from dataclasses import dataclass, field
 from typing import Optional, Callable
-from .models import ShopFloor
-from .simulator import Simulator
-from .dispatching_rules import BUILTIN_RULES, compile_rule_from_code
+from ..core.models import ShopFloor
+from ..core.simulator import Simulator
+from ..core.rules import BUILTIN_RULES, compile_rule_from_code
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class LLMInterface:
     """支持任意 OpenAI 兼容 API, 所有调用记录到 call_logs"""
 
     def __init__(self, api_key=None, base_url=None, model=None):
-        from .config import get_config
+        from ..config import get_config
         cfg = get_config().llm
         self.api_key = api_key or cfg.api_key
         self.base_url = base_url or cfg.base_url

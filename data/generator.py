@@ -5,7 +5,7 @@
 机器按工艺分类: 车/铣/磨/钻/镗/装配/检测 等
 """
 import random
-from .models import (
+from ..core.models import (
     ShopFloor, MachineType, Machine, Shift, Order, Task, Operation,
     OpStatus, uid
 )

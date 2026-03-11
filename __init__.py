@@ -1,19 +1,22 @@
 """
-LLM4DRD 智能调度平台 - 基于论文核心框架的完整实现
-=================================================
-论文: LLM-Assisted Automatic Dispatching Rule Design for 
-      Dynamic Flexible Assembly Flow Shop Scheduling
+LLM4DRD 智能调度平台 v3
+=======================
+基于大语言模型驱动的动态柔性装配流水车间智能调度系统。
 
-核心架构:
-  1. 异构图建模层 (heterogeneous_graph.py)
-  2. 离散事件仿真引擎 (simulator.py)
-  3. 特征工程模块 (feature_encoder.py)
-  4. LLM 双专家进化引擎 (llm_evolution.py)
-  5. 在线调度引擎 (online_scheduler.py)
-  6. 动态重排机制 (rescheduler.py)
-  7. 方案模拟与对比 (scenario_manager.py)
-  8. Web API 服务 (api_server.py)
-  9. 数据库管理 (db_manager.py)
+包结构:
+  core/          数据模型 (Order/Task/Operation/Machine) + 仿真引擎 + 调度规则库
+  knowledge/     异构图建模 (订单→任务→工序→机器 四层有向图)
+  scheduling/    在线调度引擎 (事件驱动 + 动态重排)
+  optimization/  多目标优化 (NSGA-II 帕累托 + OR-Tools CP-SAT 精确求解)
+  ai/            LLM 双专家进化引擎 (LLM-A 算法专家 + LLM-S 评分专家)
+  data/          数据层 (SQLite 规则库 + 问题实例生成器)
+  api/           FastAPI REST 服务
 
-技术栈: Python + NetworkX + SQLite + APScheduler + FastAPI
+快速开始:
+  from llm4drd_platform.data.generator import InstanceGenerator
+  from llm4drd_platform.core.simulator import Simulator
+  from llm4drd_platform.core.rules import BUILTIN_RULES
+  shop = InstanceGenerator().generate(num_orders=5)
+  result = Simulator(shop, BUILTIN_RULES["ATC"]).run()
+  print(result.to_dict())
 """

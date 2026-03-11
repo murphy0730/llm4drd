@@ -8,23 +8,23 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 import openpyxl
 
-from .config import get_config, reload_config
-from .models import ShopFloor
-from .instance_generator import InstanceGenerator
-from .dispatching_rules import BUILTIN_RULES, get_all_rule_names
-from .simulator import Simulator
-from .llm_evolution import EvolutionEngine, EvolutionConfig, LLMInterface
-from .pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
-from .db_manager import init_db, InstanceStore, GraphStore, DowntimeStore
-from .heterogeneous_graph import HeterogeneousGraph
-from .exact_solver import ExactSolver
-from .online_v3 import OnlineSchedulerV3
+from ..config import get_config, reload_config
+from ..core.models import ShopFloor
+from ..data.generator import InstanceGenerator
+from ..core.rules import BUILTIN_RULES, get_all_rule_names
+from ..core.simulator import Simulator
+from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
+from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
+from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore
+from ..knowledge.graph import HeterogeneousGraph
+from ..optimization.exact import ExactSolver
+from ..scheduling.online import OnlineSchedulerV3
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="LLM4DRD智能调度平台", version="3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-FRONT = os.path.join(os.path.dirname(__file__), "frontend")
+FRONT = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(FRONT):
     app.mount("/static", StaticFiles(directory=FRONT), name="static")
 
@@ -224,7 +224,7 @@ async def import_excel(file: UploadFile = File(...)):
 @app.get("/api/instance/template")
 async def download_template():
     """下载Excel模板文件"""
-    tpl = os.path.join(os.path.dirname(__file__), "docs", "instance_template.xlsx")
+    tpl = os.path.join(os.path.dirname(__file__), "..", "docs", "instance_template.xlsx")
     if not os.path.exists(tpl):
         raise HTTPException(404, "模板文件不存在")
     return FileResponse(tpl, filename="instance_template.xlsx",
@@ -375,7 +375,7 @@ async def get_llm_cfg():
 
 @app.put("/api/config/llm")
 async def set_llm_cfg(req: LLMCfg):
-    cp = os.path.join(os.path.dirname(__file__), "config.json")
+    cp = os.path.join(os.path.dirname(__file__), "..", "config.json")
     try:
         with open(cp) as f: raw = json.load(f)
     except: raw = {"llm": {}}

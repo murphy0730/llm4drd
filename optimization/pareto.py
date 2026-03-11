@@ -11,9 +11,9 @@ import random as _random
 import math
 from dataclasses import dataclass, field
 from typing import Optional, Callable
-from .models import ShopFloor
-from .simulator import Simulator, SimResult
-from .dispatching_rules import BUILTIN_RULES, compile_rule_from_code
+from ..core.models import ShopFloor
+from ..core.simulator import Simulator, SimResult
+from ..core.rules import BUILTIN_RULES, compile_rule_from_code
 
 
 @dataclass
@@ -124,7 +124,8 @@ class ParetoOptimizer:
         obj_dirs = [o.direction for o in self.objs]
         pts = []
         for s in sols:
-            pt = {"rule": s.rule_name, "rank": s.rank, "crowding": round(s.crowding, 3), "is_pareto": s.rank == 0}
+            crowding = s.crowding if s.crowding != float('inf') else 9999.0
+            pt = {"rule": s.rule_name, "rank": s.rank, "crowding": round(crowding, 3), "is_pareto": s.rank == 0}
             for k in obj_keys:
                 pt[k] = round(s.objectives.get(k, 0), 4)
             pts.append(pt)
@@ -155,7 +156,7 @@ class NSGA2Optimizer:
         self.objs = [OBJECTIVES[k] for k in objective_keys if k in OBJECTIVES]
         if not self.objs:
             self.objs = [OBJECTIVES["total_tardiness"], OBJECTIVES["makespan"]]
-        from .dispatching_rules import BUILTIN_RULES
+        from ..core.rules import BUILTIN_RULES
         self.rule_fns = rule_fns or list(BUILTIN_RULES.values())
         self.K = len(self.rule_fns)
         self.pop_size = pop_size
