@@ -22,7 +22,7 @@ class ExactResult:
             "status": self.status,
             "objectives": {k: round(v, 3) for k, v in self.objectives.items()},
             "solve_time_s": round(self.solve_time_s, 2),
-            "bounds": {k: round(v, 3) for k, v in self.bounds.items()},
+            "bounds": {k: round(v, 3) if isinstance(v, (int, float)) else v for k, v in self.bounds.items()},
             "num_schedule_entries": len(self.schedule),
         }
 
