@@ -55,6 +55,37 @@ td.editable input{width:100%;background:var(--bg);border:1px solid var(--ac);pad
 .graph-legend span{display:flex;align-items:center;gap:4px}
 .graph-legend .ldot{width:10px;height:10px;border-radius:50%;display:inline-block}
 .node-info{background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:10px 14px;margin-top:8px;font-size:11px;display:none}
+.nl-input{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.nl-input textarea{background:var(--sf);border:1px solid var(--bd);border-radius:6px;padding:8px 12px;color:var(--tx);font-size:12px;font-family:inherit;flex:1;min-height:50px;resize:vertical;line-height:1.5}
+.nl-input textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 2px var(--ac)22}
+.nl-input textarea::placeholder{color:var(--mt)}
+.ai-card{background:linear-gradient(135deg,#0d1321,#121a30);border:1px solid var(--pr)44;border-radius:8px;padding:16px 18px;margin-bottom:12px}
+.ai-card .ai-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.ai-card .ai-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--pr),var(--ac));display:flex;align-items:center;justify-content:center;font-size:16px}
+.ai-card .ai-title{font-size:13px;font-weight:700;color:var(--pr)}
+.ai-card .ai-subtitle{font-size:10px;color:var(--dm)}
+.ai-section{margin-bottom:12px;padding:10px 14px;background:var(--sf)88;border-radius:6px;border-left:3px solid var(--pr)}
+.ai-section .ai-sec-title{font-size:11px;font-weight:700;color:var(--cy);margin-bottom:4px}
+.ai-section .ai-sec-body{font-size:12px;color:var(--tx);line-height:1.7}
+.ai-section .ai-sec-body ul{margin:4px 0;padding-left:16px}
+.ai-section .ai-sec-body li{margin:2px 0}
+.ai-thinking{background:var(--bg);border:1px dashed var(--pr)44;border-radius:6px;padding:10px 14px;font-size:11px;color:var(--dm);line-height:1.7;margin-bottom:8px}
+.ai-thinking::before{content:"🧠 推理过程";display:block;font-weight:700;color:var(--pr);margin-bottom:4px;font-size:10px;letter-spacing:1px}
+.ai-rule-tag{display:inline-block;padding:3px 12px;border-radius:4px;font-size:12px;font-weight:700;background:var(--gn)22;color:var(--gn);border:1px solid var(--gn)44}
+.ai-tradeoff{padding:8px 12px;background:var(--or)11;border-radius:4px;border-left:3px solid var(--or);font-size:11px;color:var(--or);margin-top:8px}
+.ai-answer{font-size:12px;color:var(--tx);line-height:1.8;padding:12px 16px;background:var(--sf);border-radius:6px;border:1px solid var(--bd)}
+.ai-answer h1,.ai-answer h2,.ai-answer h3{color:var(--cy);margin:10px 0 6px;font-size:13px}
+.ai-answer h1{font-size:15px}.ai-answer h2{font-size:14px}
+.ai-answer strong{color:var(--gn)}
+.ai-answer code{background:var(--bg);padding:1px 4px;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px}
+.ai-answer ul,.ai-answer ol{padding-left:18px;margin:4px 0}
+.ai-answer li{margin:3px 0}
+.ai-answer table{border-collapse:collapse;margin:6px 0;font-size:11px}
+.ai-answer table th,.ai-answer table td{padding:3px 8px;border:1px solid var(--bd);text-align:left}
+.ai-answer table th{background:var(--cd);color:var(--cy);font-weight:600}
+.nl-examples{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px}
+.nl-examples .nl-ex{padding:3px 10px;border-radius:12px;font-size:10px;background:var(--ac)15;color:var(--ac);border:1px solid var(--ac)33;cursor:pointer;transition:.15s}
+.nl-examples .nl-ex:hover{background:var(--ac)33;border-color:var(--ac)}
 </style>
 </head>
 <body>
@@ -228,7 +259,49 @@ $('pages').innerHTML=`
 <label class="f">调度规则<select id="s_rule"><option>ATC</option><option>EDD</option><option>SPT</option><option>CR</option><option>FIFO</option><option>MST</option><option>LPT</option><option>PRIORITY</option><option>KIT_AWARE</option><option>BOTTLENECK</option><option>COMPOSITE</option></select></label>
 <button class="btn b2" onclick="runSim()">▶ 运行仿真</button>
 </div></div>
+
+<!-- AI 自然语言排产目标调整 -->
+<div class="ai-card">
+<div class="ai-head">
+  <div class="ai-icon">🤖</div>
+  <div><div class="ai-title">AI 智能排产目标调整</div><div class="ai-subtitle">用自然语言描述你的排产目标, AI 自动选择最优规则并生成排产方案</div></div>
+</div>
+<div class="nl-input">
+  <textarea id="nl_adjust_input" placeholder="示例: 请在确保A订单提前产出的情况下, 给出整体资源利用率最高的方案&#10;或: 目前资源有限, 可以接受A订单延误牺牲的情况下, 确保其他订单准时产出" rows="2"></textarea>
+  <button class="btn b5" onclick="runNLAdjust()" style="white-space:nowrap;min-width:100px">🧠 AI排产</button>
+</div>
+<div class="nl-examples">
+  <span class="nl-ex" onclick="setNLAdjust('请在确保所有订单准时交付的情况下, 给出整体资源利用率最高的方案')">确保准时+最高利用率</span>
+  <span class="nl-ex" onclick="setNLAdjust('优先保证高优先级订单(P4, P5)准时交付, 低优先级订单可以适当延迟')">高优先级优先</span>
+  <span class="nl-ex" onclick="setNLAdjust('资源有限, 可以接受部分订单延误, 但要确保主要装配任务的前置零件尽早完成')">配套优先策略</span>
+  <span class="nl-ex" onclick="setNLAdjust('尽量减少总的加工等待时间, 让每台机器的空闲时间最少')">最小化等待时间</span>
+  <span class="nl-ex" onclick="setNLAdjust('交期最紧的订单优先处理, 同时兼顾瓶颈设备的负载均衡')">交期紧迫+负载均衡</span>
+</div>
+<div id="nlAdjustResult" style="margin-top:12px"></div>
+</div>
+
 <div id="simR"></div>
+
+<!-- AI 自然语言排产结果分析 -->
+<div class="ai-card" id="nlAnalysisCard">
+<div class="ai-head">
+  <div class="ai-icon">🔍</div>
+  <div><div class="ai-title">AI 排产结果智能分析</div><div class="ai-subtitle">对排产结果提问, AI 解读排产逻辑、工件顺序原因、规则映射过程</div></div>
+</div>
+<div class="nl-input">
+  <textarea id="nl_analysis_input" placeholder="示例: 请告诉我整个A订单的排产计划&#10;或: 为什么机器M在8点先加工A订单再加工B订单?" rows="2"></textarea>
+  <button class="btn b5" onclick="runNLAnalysis()" style="white-space:nowrap;min-width:100px">🔍 AI分析</button>
+</div>
+<div class="nl-examples">
+  <span class="nl-ex" onclick="setNLAnalysis('请分析整体排产方案的优缺点, 有哪些订单可能延迟?')">整体分析</span>
+  <span class="nl-ex" onclick="setNLAnalysis('哪些机器是瓶颈资源? 它们的利用率如何?')">瓶颈分析</span>
+  <span class="nl-ex" onclick="setNLAnalysis('请解释当前排产规则是如何将调度目标转化为具体的工件排序决策的')">规则逻辑解读</span>
+  <span class="nl-ex" onclick="setNLAnalysis('哪些订单延迟了? 延迟的根本原因是什么?')">延迟原因分析</span>
+  <span class="nl-ex" onclick="setNLAnalysis('请对比分析不同规则对当前实例的排产效果差异')">规则对比</span>
+</div>
+<div id="nlAnalysisResult" style="margin-top:12px"></div>
+</div>
+
 <div class="cd"><div class="ct2"><span class="dot" style="background:var(--dm)"></span>运行日志</div><div id="simL" class="log">等待运行...</div></div>
 </div>
 
@@ -965,6 +1038,195 @@ async function loadLogs(){
   }catch(e){$('aiLogs').innerHTML=`<div class="cd" style="color:var(--rd)">${e.message}</div>`}show(0)}
 
 function escH(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// ============================================================
+//  AI 自然语言排产调整 + 排产结果分析
+// ============================================================
+function setNLAdjust(text){$('nl_adjust_input').value=text;$('nl_adjust_input').focus()}
+function setNLAnalysis(text){$('nl_analysis_input').value=text;$('nl_analysis_input').focus()}
+
+// 简易Markdown→HTML转换
+function md2html(md){
+  if(!md)return '';
+  let h=escH(md);
+  // code blocks
+  h=h.replace(/```(\w*)\n([\s\S]*?)```/g,(_,lang,code)=>`<pre style="background:#050810;padding:8px;border-radius:4px;overflow-x:auto"><code>${code}</code></pre>`);
+  // inline code
+  h=h.replace(/`([^`]+)`/g,'<code>$1</code>');
+  // headers
+  h=h.replace(/^### (.+)$/gm,'<h3>$1</h3>');
+  h=h.replace(/^## (.+)$/gm,'<h2>$1</h2>');
+  h=h.replace(/^# (.+)$/gm,'<h1>$1</h1>');
+  // bold
+  h=h.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  // italic
+  h=h.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+  // tables
+  h=h.replace(/^\|(.+)\|$/gm,(_,row)=>{
+    const cells=row.split('|').map(c=>c.trim());
+    return '<tr>'+cells.map(c=>`<td>${c}</td>`).join('')+'</tr>';
+  });
+  h=h.replace(/(<tr>[\s\S]*?<\/tr>(\s*<tr>[\s\S]*?<\/tr>)*)/g,'<table>$1</table>');
+  // separator rows in tables
+  h=h.replace(/<td>\s*[-:]+\s*<\/td>/g,'');
+  h=h.replace(/<tr>\s*<\/tr>/g,'');
+  // unordered list
+  h=h.replace(/^- (.+)$/gm,'<li>$1</li>');
+  h=h.replace(/(<li>[\s\S]*?<\/li>(\s*<li>[\s\S]*?<\/li>)*)/g,'<ul>$1</ul>');
+  // ordered list
+  h=h.replace(/^\d+\. (.+)$/gm,'<li>$1</li>');
+  // paragraphs: double newline
+  h=h.replace(/\n\n/g,'</p><p>');
+  // single newline → br
+  h=h.replace(/\n/g,'<br>');
+  return '<p>'+h+'</p>';
+}
+
+async function runNLAdjust(){
+  const prompt=$('nl_adjust_input').value.trim();
+  if(!prompt){alert('请输入排产目标描述');return}
+  const div=$('nlAdjustResult');
+  div.innerHTML=`<div style="display:flex;align-items:center;gap:8px;padding:12px"><span class="sp"></span><span style="color:var(--dm)">AI 正在分析您的需求并选择最优排产策略...</span></div>`;
+  show(1);
+  try{
+    const r=await api('/api/ai/adjust-schedule',{method:'POST',body:JSON.stringify({
+      prompt:prompt,current_rule:$('s_rule').value
+    })});
+    const ai=r.ai_analysis||{};
+    let h='';
+
+    // 需求分析
+    h+=`<div class="ai-section"><div class="ai-sec-title">📋 需求分析</div><div class="ai-sec-body">${escH(ai.analysis||'')}</div></div>`;
+
+    // 推理过程 — 核心展示: LLM如何将自然语言转化为规则
+    h+=`<div class="ai-thinking">${escH(ai.thinking_process||'')}</div>`;
+
+    // 选择的规则
+    h+=`<div class="ai-section" style="border-color:var(--gn)"><div class="ai-sec-title">🎯 选择的调度规则</div><div class="ai-sec-body">`;
+    h+=`<span class="ai-rule-tag">${escH(r.selected_rule)}</span>`;
+    h+=`<div style="margin-top:6px;color:var(--dm);font-size:11px">${escH(r.rule_description||'')}</div>`;
+    h+=`<div style="margin-top:6px">${escH(ai.rule_reason||'')}</div>`;
+    h+=`</div></div>`;
+
+    // 自定义规则代码(如有)
+    if(ai.custom_code){
+      h+=`<div class="ai-section" style="border-color:var(--or)"><div class="ai-sec-title">💻 AI 生成的自定义规则代码</div><pre style="background:#050810;padding:10px;border-radius:6px;font-size:11px;max-height:200px;overflow:auto;color:var(--gn);margin-top:4px">${escH(ai.custom_code)}</pre>`;
+      if(ai.custom_description)h+=`<div style="margin-top:4px;font-size:11px;color:var(--dm)">${escH(ai.custom_description)}</div>`;
+      h+=`</div>`;
+    }
+
+    // 权衡说明
+    if(ai.tradeoffs){
+      h+=`<div class="ai-tradeoff">⚖️ 权衡: ${escH(ai.tradeoffs)}</div>`;
+    }
+
+    // 排产结果KPI
+    const m=r.metrics;
+    h+=`<div style="margin-top:12px"><div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--cy)">📊 排产结果指标</div>`;
+    h+=`<div class="mg">`;
+    [{l:'总延迟',v:m.total_tardiness,c:'--rd'},{l:'Makespan',v:m.makespan,c:'--ac'},{l:'利用率',v:(m.avg_utilization*100).toFixed(1)+'%',c:'--gn'},{l:'关键利用率',v:(m.critical_utilization*100).toFixed(1)+'%',c:'--cy'},{l:'主订单延误',v:m.main_order_tardy_count+'/'+m.total_main_orders,c:'--rd'},{l:'延误比例',v:(m.main_order_tardy_ratio*100).toFixed(1)+'%',c:'--or'},{l:'总等待时间',v:m.total_wait_time.toFixed(0)+'h',c:'--pk'},{l:'仿真耗时',v:m.wall_time_ms+'ms',c:'--dm'}
+    ].forEach(x=>{h+=`<div class="mt" style="border-color:var(${x.c})"><div class="lb">${x.l}</div><div class="vl" style="color:var(${x.c})">${typeof x.v==='number'?x.v.toFixed(1):x.v}</div></div>`});
+    h+=`</div></div>`;
+
+    // 规则对比表 — 展示为什么AI选择的规则更优
+    if(r.rule_comparison&&r.rule_comparison.length){
+      h+=`<div style="margin-top:12px"><div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--or)">📋 规则对比 — AI 为什么选择了 ${escH(r.selected_rule)}</div>`;
+      h+=`<div style="overflow-x:auto;max-height:300px;overflow-y:auto"><table><thead><tr><th>#</th><th>规则</th><th>总延迟</th><th>Makespan</th><th>利用率</th><th>主订单延误</th></tr></thead><tbody>`;
+      r.rule_comparison.forEach((c,i)=>{
+        const isSel=c.rule===r.selected_rule;
+        h+=`<tr style="background:${isSel?'var(--pr)22':i%2?'var(--sf)33':'transparent'}">`;
+        h+=`<td style="font-weight:700;color:${i===0?'var(--gn)':'var(--tx)'}">${i+1}</td>`;
+        h+=`<td><span class="bg ${isSel?'bg-p':i===0?'bg-g':'bg-b'}">${c.rule}${isSel?' ← AI选择':''}</span></td>`;
+        h+=`<td class="mono">${c.total_tardiness}</td><td class="mono">${c.makespan}</td>`;
+        h+=`<td>${(c.avg_utilization*100).toFixed(1)}%</td><td>${c.main_order_tardy_count}</td></tr>`;
+      });
+      h+=`</tbody></table></div></div>`;
+    }
+
+    // 甘特图
+    h+=`<div style="margin-top:12px"><div style="font-size:12px;font-weight:700;margin-bottom:6px;color:var(--cy)">📊 甘特图</div><div class="gw"><canvas id="gc_ai"></canvas><div id="gtt_ai" class="gt"></div></div></div>`;
+
+    div.innerHTML=h;
+    lastGantt=r.gantt;
+
+    // 绘制甘特图
+    setTimeout(()=>{
+      const c=$('gc_ai');if(!c)return;const ctx=c.getContext('2d');
+      const w=c.parentElement.clientWidth,ms=[...new Set(r.gantt.map(d=>d.machine_id))].sort();
+      const rh=Math.min(28,Math.max(16,400/ms.length)),H=ms.length*rh+60;
+      const dp=devicePixelRatio||1;c.width=w*dp;c.height=H*dp;c.style.width=w+'px';c.style.height=H+'px';ctx.scale(dp,dp);
+      ctx.fillStyle='#0a0e1a';ctx.fillRect(0,0,w,H);
+      const L2=90,T2=25,cW2=w-L2-16;
+      const mn2=Math.min(...r.gantt.map(d=>d.start)),mx2=Math.max(...r.gantt.map(d=>d.end)),rng2=mx2-mn2||1;
+      const x2=t=>L2+(t-mn2)/rng2*cW2;
+      ctx.strokeStyle='#1a2744';ctx.lineWidth=.5;const tk=Math.min(10,Math.floor(cW2/60));
+      for(let i=0;i<=tk;i++){const tx=L2+i/tk*cW2;ctx.beginPath();ctx.moveTo(tx,T2);ctx.lineTo(tx,H-10);ctx.stroke();ctx.fillStyle='#4a5568';ctx.font='9px JetBrains Mono';ctx.fillText(Math.round(mn2+i/tk*rng2)+'',tx-10,T2-6)}
+      ctx.font='10px sans-serif';ctx.fillStyle='#8492a6';
+      ms.forEach((m2,i)=>{ctx.fillText(m2,2,T2+i*rh+rh/2+3);if(i>0){ctx.beginPath();ctx.moveTo(L2,T2+i*rh);ctx.lineTo(w-16,T2+i*rh);ctx.stroke()}});
+      const ords2=[...new Set(r.gantt.map(d=>d.order_id))];
+      r.gantt.forEach(d=>{const mi=ms.indexOf(d.machine_id);if(mi<0)return;const bx=x2(d.start),bw=Math.max(1,x2(d.end)-x2(d.start)),by=T2+mi*rh+2,bh=rh-4;
+        const ci=ords2.indexOf(d.order_id)%OC.length;ctx.fillStyle=d.is_tardy?'#ff475777':OC[ci]+'88';ctx.fillRect(bx,by,bw,bh);
+        ctx.strokeStyle=d.is_tardy?'#ff4757':OC[ci];ctx.lineWidth=d.is_tardy?2:1;ctx.strokeRect(bx,by,bw,bh);
+        if(bw>25){ctx.fillStyle='#fffc';ctx.font='8px JetBrains Mono';ctx.fillText(d.op_name||d.op_id.slice(-6),bx+2,by+bh/2+3)}});
+      c._gd={ms,rh,T:T2,L:L2,mn:mn2,rng:rng2,cW:cW2,data:r.gantt,ords:ords2};
+      c.onmousemove=e=>{const g=c._gd;if(!g)return;const r2=c.getBoundingClientRect(),mx3=e.clientX-r2.left,my=e.clientY-r2.top;
+        const mi=Math.floor((my-g.T)/g.rh),t=g.mn+(mx3-g.L)/g.cW*g.rng;
+        const hit=g.data.find(d=>{const di=g.ms.indexOf(d.machine_id);return di===mi&&t>=d.start&&t<=d.end});
+        const tip=$('gtt_ai');if(hit){tip.style.display='block';tip.style.left=(mx3+12)+'px';tip.style.top=(my-8)+'px';
+          tip.innerHTML=`<b>${hit.op_name}</b> (${hit.op_id})<br>任务: ${hit.task_id}<br>机器: ${hit.machine_name}<br>时间: ${hit.start}→${hit.end} (${hit.duration}h)<br>订单: ${hit.order_id} P${hit.priority}<br>交期: ${hit.due_date}${hit.is_tardy?'<br><b style="color:var(--rd)">延迟!</b>':''}${hit.is_main?'<br><b style="color:var(--or)">主任务</b>':''}`;
+        }else{tip.style.display='none'}};
+      c.onmouseleave=()=>{$('gtt_ai').style.display='none'};
+    },100);
+
+  }catch(e){
+    div.innerHTML=`<div style="padding:10px;color:var(--rd)">${escH(e.message)}</div>`;
+  }show(0);
+}
+
+async function runNLAnalysis(){
+  const question=$('nl_analysis_input').value.trim();
+  if(!question){alert('请输入您的问题');return}
+  const div=$('nlAnalysisResult');
+  div.innerHTML=`<div style="display:flex;align-items:center;gap:8px;padding:12px"><span class="sp"></span><span style="color:var(--dm)">AI 正在分析排产结果...</span></div>`;
+  show(1);
+  try{
+    const r=await api('/api/ai/analyze-schedule',{method:'POST',body:JSON.stringify({question:question})});
+    const ai=r.analysis||{};
+    let h='';
+
+    // 使用的规则说明
+    h+=`<div style="margin-bottom:8px"><span class="bg bg-b" style="font-size:10px">当前规则: ${escH(r.rule_used)}</span> <span style="font-size:10px;color:var(--dm)">${escH(r.rule_description||'')}</span></div>`;
+
+    // 主要回答
+    h+=`<div class="ai-answer">${md2html(ai.answer||'')}</div>`;
+
+    // 规则逻辑解释
+    if(ai.rule_logic_explanation){
+      h+=`<div class="ai-section" style="margin-top:10px;border-color:var(--cy)"><div class="ai-sec-title">🔧 调度规则 → 排产决策的映射逻辑</div><div class="ai-sec-body">${md2html(ai.rule_logic_explanation)}</div></div>`;
+    }
+
+    // 关键发现
+    if(ai.key_insights&&ai.key_insights.length){
+      h+=`<div class="ai-section" style="border-color:var(--gn)"><div class="ai-sec-title">💡 关键发现</div><div class="ai-sec-body"><ul>`;
+      ai.key_insights.forEach(ins=>{h+=`<li>${escH(ins)}</li>`});
+      h+=`</ul></div></div>`;
+    }
+
+    // 优化建议
+    if(ai.suggestions&&ai.suggestions.length){
+      h+=`<div class="ai-section" style="border-color:var(--or)"><div class="ai-sec-title">📌 优化建议</div><div class="ai-sec-body"><ul>`;
+      ai.suggestions.forEach(s=>{h+=`<li>${escH(s)}</li>`});
+      h+=`</ul></div></div>`;
+    }
+
+    // 原始LLM回复(可折叠)
+    h+=`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:10px;color:var(--dm)">查看LLM原始回复</summary><pre style="background:#050810;padding:8px;border-radius:4px;font-size:10px;max-height:300px;overflow:auto;color:var(--dm);margin-top:4px">${escH(r.llm_raw||'')}</pre></details>`;
+
+    div.innerHTML=h;
+  }catch(e){
+    div.innerHTML=`<div style="padding:10px;color:var(--rd)">${escH(e.message)}</div>`;
+  }show(0);
+}
 
 // ============================================================
 //  DOWNTIME MANAGEMENT

@@ -109,6 +109,13 @@ class ScenarioCompareReq(BaseModel):
     breakdown_prob: float = 0.0
     pt_variance: float = 0.0
 
+class NLScheduleReq(BaseModel):
+    prompt: str
+    current_rule: Optional[str] = "ATC"
+
+class NLAnalysisReq(BaseModel):
+    question: str
+
 # === Instance ===
 @app.post("/api/instance/generate")
 async def gen_instance(req: GenReq):
@@ -302,6 +309,7 @@ async def simulate(req: SimReq):
     func = BUILTIN_RULES.get(req.rule_name, BUILTIN_RULES["ATC"])
     sim = Simulator(shop, func)
     r = sim.run()
+    r._rule_name = req.rule_name
     last_result = r
     # Enrich gantt with order info
     gantt = []
@@ -594,3 +602,324 @@ async def scenario_compare(req: ScenarioCompareReq):
         results.append({"rule": rule_name, "replications": len(rep_results), **agg})
     results.sort(key=lambda x: x.get("total_tardiness_mean", 9e9))
     return {"comparison": results, "num_replications": req.num_replications}
+
+
+# ============================================================
+#  AI 自然语言排产调整 + 排产结果分析
+# ============================================================
+
+# 规则描述映射, 用于让LLM理解每条规则的含义
+RULE_DESCRIPTIONS = {
+    "EDD": "最早交期优先 — 优先调度交期最紧迫的工件, 减少延迟数量",
+    "SPT": "最短加工时间 — 优先调度加工时间最短的工件, 减少平均等待时间",
+    "LPT": "最长加工时间 — 优先调度加工时间最长的工件, 平衡机器负载",
+    "CR": "关键比率 — 综合考虑交期松紧和剩余加工时间, 紧急度高的优先",
+    "ATC": "表观延迟成本 — 综合加工时间和松弛度, 平衡延迟和效率",
+    "FIFO": "先到先服务 — 按到达顺序处理, 公平但不考虑紧急度",
+    "MST": "最小松弛时间 — 优先调度松弛时间最少的工件, 减少延迟风险",
+    "PRIORITY": "订单优先级 — 优先调度高优先级订单, 兼顾紧急度",
+    "KIT_AWARE": "配套感知 — 前置任务完成度高的优先, 减少装配等待",
+    "BOTTLENECK": "瓶颈感知 — 主任务和紧急工件优先, 面向瓶颈资源优化",
+    "COMPOSITE": "综合规则 — 加权组合紧急度、优先级、配套比、主任务等多因素",
+}
+
+NL_RULE_SELECT_PROMPT = """你是一个工业排产调度专家。用户用自然语言描述了排产目标, 你需要:
+
+1. 分析用户的排产需求和目标
+2. 从可用的11条调度规则中, 选择最合适的规则或组合策略
+3. 如果需要自定义规则, 生成规则代码
+
+## 可用规则库:
+{rules_desc}
+
+## 当前实例概况:
+{instance_summary}
+
+## 用户的排产需求:
+{user_prompt}
+
+请用以下JSON格式回复:
+{{
+  "analysis": "对用户需求的分析(中文, 150字内)",
+  "thinking_process": "你的推理过程: 为什么选择这个规则, 你是如何将用户的自然语言需求映射到调度规则的(中文, 200字内)",
+  "selected_rule": "选择的规则名(如EDD, ATC等, 如果需要自定义则填CUSTOM)",
+  "rule_reason": "选择该规则的原因(中文, 100字内)",
+  "custom_code": "仅当selected_rule=CUSTOM时填写自定义规则代码, 否则为空",
+  "custom_description": "仅当selected_rule=CUSTOM时填写自定义规则的中文描述",
+  "parameter_adjustments": "建议的参数调整说明(如有)",
+  "tradeoffs": "该方案的权衡说明(中文, 100字内) — 选择此方案会牺牲什么, 获得什么"
+}}"""
+
+NL_ANALYSIS_PROMPT = """你是一个工业排产调度分析专家。用户询问了排产结果的问题, 请基于以下数据进行深入分析。
+
+## 当前排产使用的规则:
+名称: {rule_name}
+描述: {rule_desc}
+
+## 排产KPI汇总:
+{kpi_summary}
+
+## 排产明细数据 (按时间排序, 前100条):
+{schedule_detail}
+
+## 当前实例订单信息:
+{order_info}
+
+## 用户问题:
+{user_question}
+
+请进行深入分析并回答用户问题。回复要求:
+1. 用中文回答
+2. 结构化回答, 使用 Markdown 格式
+3. 如果用户问的是某个订单的排产计划, 列出该订单所有工序的排产详情
+4. 如果用户问的是为什么某个机器先加工A再加工B, 请从规则逻辑角度解释:
+   - 该规则的优先级计算公式是什么
+   - 在那个时间点, A和B各自的特征值(交期、优先级、松弛时间等)是什么
+   - 根据规则公式, A的得分为什么比B高
+5. 如果用户问整体排产情况, 请从多个维度分析
+6. 一定要解释清楚大模型是怎么将调度规则转化为具体的排产决策的
+
+请用以下JSON格式回复:
+{{
+  "answer": "对用户问题的完整回答(Markdown格式, 中文)",
+  "rule_logic_explanation": "调度规则如何影响排产决策的解释(中文)",
+  "key_insights": ["关键发现1", "关键发现2", "..."],
+  "suggestions": ["优化建议1", "优化建议2", "..."]
+}}"""
+
+
+def _get_instance_summary():
+    """获取当前实例的概要信息"""
+    if not shop:
+        return "无实例"
+    s = shop.summary()
+    order_details = []
+    for oid, o in list(shop.orders.items())[:20]:
+        order_details.append(f"  {oid}: {o.name}, 优先级P{o.priority}, 交期{o.due_date:.1f}h, 释放{o.release_time:.1f}h, 任务数{len(o.task_ids)}")
+    return f"""订单数: {s.get('orders',0)}, 任务数: {s.get('tasks',0)}, 工序数: {s.get('operations',0)}, 机器数: {s.get('machines',0)}
+订单详情(前20):
+""" + "\n".join(order_details)
+
+
+def _get_order_info():
+    """获取订单详细信息"""
+    if not shop:
+        return "无实例"
+    lines = []
+    for oid, o in shop.orders.items():
+        tasks_info = []
+        for tid in o.task_ids:
+            t = shop.tasks.get(tid)
+            if t:
+                ops_str = ", ".join(f"{op.name}({op.process_type},{op.processing_time:.1f}h)" for op in t.operations)
+                tasks_info.append(f"    任务{t.name}({'主' if t.is_main else '子'}): [{ops_str}]")
+        lines.append(f"  {o.name}(ID:{oid}): P{o.priority}, 交期{o.due_date:.1f}h, 释放{o.release_time:.1f}h")
+        lines.extend(tasks_info[:5])
+    return "\n".join(lines[:60])
+
+
+def _get_schedule_detail():
+    """获取排产明细文本"""
+    if not last_result or not last_result.schedule:
+        return "暂无排产数据"
+    lines = []
+    for e in last_result.schedule[:100]:
+        task = shop.tasks.get(e["task_id"]) if shop else None
+        order = shop.orders.get(task.order_id) if task and shop else None
+        lines.append(
+            f"  {e['op_name']} | 机器:{e['machine_name']} | "
+            f"时间:{e['start']:.1f}→{e['end']:.1f}h({e['duration']:.1f}h) | "
+            f"任务:{e.get('task_id','')} | "
+            f"订单:{order.name if order else ''}(P{order.priority if order else '?'}, 交期{order.due_date:.1f}h)"
+            if order else
+            f"  {e['op_name']} | 机器:{e['machine_name']} | 时间:{e['start']:.1f}→{e['end']:.1f}h"
+        )
+    return "\n".join(lines)
+
+
+def _get_kpi_summary():
+    """获取KPI汇总"""
+    if not last_result:
+        return "暂无KPI数据"
+    d = last_result.to_dict()
+    return f"""总延迟: {d.get('total_tardiness', 0)}
+Makespan: {d.get('makespan', 0)}
+平均延迟: {d.get('avg_tardiness', 0)}
+最大延迟: {d.get('max_tardiness', 0)}
+延迟工序数: {d.get('tardy_job_count', 0)} / {d.get('total_jobs', 0)}
+平均流程时间: {d.get('avg_flowtime', 0)}
+主订单延误数: {d.get('main_order_tardy_count', 0)} / {d.get('total_main_orders', 0)}
+主订单延误比例: {d.get('main_order_tardy_ratio', 0):.1%}
+平均利用率: {d.get('avg_utilization', 0):.1%}
+关键资源利用率: {d.get('critical_utilization', 0):.1%}
+总等待时间: {d.get('total_wait_time', 0)}
+仿真事件数: {d.get('event_count', 0)}"""
+
+
+@app.post("/api/ai/adjust-schedule")
+async def ai_adjust_schedule(req: NLScheduleReq):
+    """AI自然语言排产目标调整: 用户用自然语言描述目标, AI选择/生成最优规则并执行排产"""
+    global last_result
+    if not shop:
+        raise HTTPException(400, "请先生成实例")
+
+    c = get_config().llm
+    if not c.api_key:
+        raise HTTPException(400, "请先配置大模型API Key (⚙️ 大模型配置)")
+
+    llm = LLMInterface(c.api_key, c.base_url, c.model)
+
+    # 构建规则描述
+    rules_desc = "\n".join(f"- {k}: {v}" for k, v in RULE_DESCRIPTIONS.items())
+    instance_summary = _get_instance_summary()
+
+    prompt = NL_RULE_SELECT_PROMPT.format(
+        rules_desc=rules_desc,
+        instance_summary=instance_summary,
+        user_prompt=req.prompt,
+    )
+
+    # 调用LLM进行规则选择
+    raw_resp = llm.call(prompt, "AI-Scheduler", "rule_select", temp=0.3)
+
+    # 解析LLM回复
+    try:
+        # 尝试从回复中提取JSON
+        resp_text = raw_resp
+        if "```json" in resp_text:
+            resp_text = resp_text[resp_text.index("```json") + 7:]
+            resp_text = resp_text[:resp_text.index("```")]
+        elif "```" in resp_text:
+            resp_text = resp_text[resp_text.index("```") + 3:]
+            resp_text = resp_text[:resp_text.index("```")]
+        ai_result = json.loads(resp_text.strip())
+    except (json.JSONDecodeError, ValueError):
+        ai_result = {
+            "analysis": raw_resp[:300],
+            "thinking_process": "LLM返回非标准格式, 使用默认规则ATC",
+            "selected_rule": "ATC",
+            "rule_reason": "默认选择ATC规则",
+            "custom_code": "",
+            "custom_description": "",
+            "parameter_adjustments": "",
+            "tradeoffs": "",
+        }
+
+    selected_rule = ai_result.get("selected_rule", "ATC")
+
+    # 执行排产
+    if selected_rule == "CUSTOM" and ai_result.get("custom_code"):
+        try:
+            from ..core.rules import compile_rule_from_code
+            func = compile_rule_from_code(ai_result["custom_code"])
+            rule_display_name = "AI自定义规则"
+        except Exception as e:
+            # 自定义规则编译失败, 回退到ATC
+            selected_rule = "ATC"
+            func = BUILTIN_RULES["ATC"]
+            rule_display_name = "ATC (自定义规则编译失败)"
+            ai_result["tradeoffs"] = f"自定义规则编译失败({e}), 回退到ATC"
+    else:
+        if selected_rule not in BUILTIN_RULES:
+            selected_rule = "ATC"
+        func = BUILTIN_RULES[selected_rule]
+        rule_display_name = selected_rule
+
+    sim = Simulator(shop, func)
+    r = sim.run()
+    r._rule_name = selected_rule
+    last_result = r
+
+    # 构建甘特图数据
+    gantt = []
+    for e in r.schedule:
+        task = shop.tasks.get(e["task_id"])
+        order = shop.orders.get(task.order_id) if task else None
+        gantt.append({**e,
+            "order_id": order.id if order else "",
+            "order_name": order.name if order else "",
+            "priority": order.priority if order else 1,
+            "due_date": round(order.due_date, 1) if order else 0,
+            "is_tardy": (e["end"] > order.due_date) if order else False,
+            "is_main": task.is_main if task else False,
+        })
+
+    # 同时运行所有规则做对比, 展示为什么选这个规则更好
+    compare_results = []
+    for rn, rfn in BUILTIN_RULES.items():
+        cr = Simulator(shop, rfn).run()
+        compare_results.append({"rule": rn, "total_tardiness": round(cr.total_tardiness, 2),
+                                 "makespan": round(cr.makespan, 2),
+                                 "avg_utilization": round(cr.avg_utilization, 4),
+                                 "main_order_tardy_count": cr.main_order_tardy_count})
+
+    return {
+        "status": "ok",
+        "ai_analysis": ai_result,
+        "selected_rule": rule_display_name,
+        "rule_description": RULE_DESCRIPTIONS.get(selected_rule, ai_result.get("custom_description", "")),
+        "metrics": r.to_dict(),
+        "gantt": gantt,
+        "rule_comparison": sorted(compare_results, key=lambda x: x["total_tardiness"]),
+        "llm_raw": raw_resp[:2000],
+    }
+
+
+@app.post("/api/ai/analyze-schedule")
+async def ai_analyze_schedule(req: NLAnalysisReq):
+    """AI自然语言排产分析: 用户提问, AI解读排产结果和工件顺序逻辑"""
+    if not shop:
+        raise HTTPException(400, "请先生成实例")
+    if not last_result:
+        raise HTTPException(400, "请先运行仿真排产")
+
+    c = get_config().llm
+    if not c.api_key:
+        raise HTTPException(400, "请先配置大模型API Key (⚙️ 大模型配置)")
+
+    llm = LLMInterface(c.api_key, c.base_url, c.model)
+
+    # 确定当前使用的规则名
+    rule_name = "ATC"  # default
+    # 从最近的排产结果猜测规则(如果有的话)
+    if hasattr(last_result, '_rule_name'):
+        rule_name = last_result._rule_name
+
+    rule_desc = RULE_DESCRIPTIONS.get(rule_name, "综合调度规则")
+
+    prompt = NL_ANALYSIS_PROMPT.format(
+        rule_name=rule_name,
+        rule_desc=rule_desc,
+        kpi_summary=_get_kpi_summary(),
+        schedule_detail=_get_schedule_detail(),
+        order_info=_get_order_info(),
+        user_question=req.question,
+    )
+
+    raw_resp = llm.call(prompt, "AI-Analyst", "analyze", temp=0.3)
+
+    # 解析LLM回复
+    try:
+        resp_text = raw_resp
+        if "```json" in resp_text:
+            resp_text = resp_text[resp_text.index("```json") + 7:]
+            resp_text = resp_text[:resp_text.index("```")]
+        elif "```" in resp_text:
+            resp_text = resp_text[resp_text.index("```") + 3:]
+            resp_text = resp_text[:resp_text.index("```")]
+        ai_result = json.loads(resp_text.strip())
+    except (json.JSONDecodeError, ValueError):
+        ai_result = {
+            "answer": raw_resp,
+            "rule_logic_explanation": "",
+            "key_insights": [],
+            "suggestions": [],
+        }
+
+    return {
+        "status": "ok",
+        "analysis": ai_result,
+        "rule_used": rule_name,
+        "rule_description": rule_desc,
+        "llm_raw": raw_resp[:3000],
+    }
