@@ -1,0 +1,12 @@
+{
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-4e53882c780f43cea4983cdd8c09bda1",
+    "model": "deepseek-chat",
+    "max_tokens": 2048,
+    "timeout": 60
+  },
+  "database": {
+    "path": "llm4drd.db"
+  }
+}

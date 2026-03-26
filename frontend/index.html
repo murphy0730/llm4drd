@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>LLM4DRD 智能调度平台</title>
+  <link rel="stylesheet" href="/static/app.css?v=20260326-4">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <div class="pill">离散制造 · 装配约束 · 多资源调度</div>
+        <h1>LLM4DRD 智能调度平台 v3</h1>
+        <p>这一版前台回到真实业务流程：先在问题配置里生成或导入实例，补齐订单任务时间、工序、设备班次与停机维护，再基于异构图做结构洞察，最后进入仿真与 NSGA-III/ALNS 混合优化。</p>
+      </div>
+      <div class="hero-kpis">
+        <div class="hero-kpi"><span class="label">当前实例</span><div class="value" id="hero-instance-status">未加载</div><div class="hint" id="hero-instance-hint">先生成实例或导入 Excel</div></div>
+        <div class="hero-kpi"><span class="label">异构图</span><div class="value" id="hero-graph-status">未构建</div><div class="hint" id="hero-graph-hint">订单-任务-工序-机器-工装-人员</div></div>
+        <div class="hero-kpi"><span class="label">优化任务</span><div class="value" id="hero-opt-status">待启动</div><div class="hint" id="hero-opt-hint">支持选择 1-5 个业务指标</div></div>
+        <div class="hero-kpi"><span class="label">大模型配置</span><div class="value" id="hero-llm-status">待加载</div><div class="hint" id="hero-llm-hint">含快捷预设与连通性测试</div></div>
+      </div>
+    </header>
+
+    <div class="tab-bar-shell">
+      <div class="btn-row">
+        <button class="btn-lite" type="button" data-action="prev-tab">← 上一页</button>
+        <button class="btn-lite" type="button" data-action="next-tab">下一页 →</button>
+      </div>
+      <nav class="tab-bar" id="tab-bar">
+        <button class="tab-btn active" type="button" data-tab="config">问题配置</button>
+        <button class="tab-btn" type="button" data-tab="graph">异构图</button>
+        <button class="tab-btn" type="button" data-tab="simulate">仿真排产</button>
+        <button class="tab-btn" type="button" data-tab="optimize">混合优化</button>
+        <button class="tab-btn" type="button" data-tab="llm">大模型配置</button>
+      </nav>
+    </div>
+
+    <main>
+      <section class="tab-pane active section-stack" id="tab-config">
+        <div class="split-panel">
+          <div class="card">
+            <div class="card-header">
+              <div><h2>实例生成与导入</h2><div class="subtle">支持生成、Excel 导入、模板导出与 CSV 导出。</div></div>
+              <div class="btn-row"><button class="btn" data-action="generate-instance" id="btn-generate-instance">生成实例</button><button class="btn-ghost" data-action="reload-instance">刷新当前实例</button></div>
+            </div>
+            <div class="card-body section-stack">
+              <div class="form-grid" id="generate-form">
+                <div class="field"><label for="cfg-plan-start">计划起点时间</label><input id="cfg-plan-start" type="datetime-local"></div>
+                <div class="field"><label for="cfg-num-orders">订单数量</label><input id="cfg-num-orders" type="number" min="1" value="10"></div>
+                <div class="field"><label for="cfg-machines-per-type">每类机器台数</label><input id="cfg-machines-per-type" type="number" min="1" value="3"></div>
+                <div class="field"><label for="cfg-due-factor">交期系数</label><input id="cfg-due-factor" type="number" step="0.1" min="0.2" value="1.5"></div>
+                <div class="field"><label for="cfg-task-min">每订单任务数最小值</label><input id="cfg-task-min" type="number" min="1" value="2"></div>
+                <div class="field"><label for="cfg-task-max">每订单任务数最大值</label><input id="cfg-task-max" type="number" min="1" value="5"></div>
+                <div class="field"><label for="cfg-op-min">每任务工序数最小值</label><input id="cfg-op-min" type="number" min="1" value="2"></div>
+                <div class="field"><label for="cfg-op-max">每任务工序数最大值</label><input id="cfg-op-max" type="number" min="1" value="5"></div>
+                <div class="field"><label for="cfg-toolings-per-type">每类工装数量</label><input id="cfg-toolings-per-type" type="number" min="0" value="1"></div>
+                <div class="field"><label for="cfg-personnel-per-skill">每类人员数量</label><input id="cfg-personnel-per-skill" type="number" min="0" value="1"></div>
+                <div class="field"><label for="cfg-arrival-spread">订单到达离散度</label><input id="cfg-arrival-spread" type="number" step="0.1" min="0" value="0"></div>
+                <div class="field"><label for="cfg-seed">随机种子</label><input id="cfg-seed" type="number" value="42"></div>
+                <div class="field"><label for="cfg-day-shift-hours">白班时长</label><input id="cfg-day-shift-hours" type="number" step="0.5" min="0" value="10"></div>
+                <div class="field"><label for="cfg-night-shift-hours">夜班时长</label><input id="cfg-night-shift-hours" type="number" step="0.5" min="0" value="8"></div>
+                <div class="field"><label for="cfg-schedule-days">排程跨度天数(0=自动)</label><input id="cfg-schedule-days" type="number" min="0" value="0"></div>
+                <div class="field"><label for="cfg-maintenance-prob">计划维护概率</label><input id="cfg-maintenance-prob" type="number" step="0.01" min="0" max="1" value="0.05"></div>
+              </div>
+              <div class="btn-row">
+                <button class="btn-lite" data-action="open-import">导入 Excel</button>
+                <button class="btn-lite" data-action="download-template">模板导出</button>
+                <button class="btn-lite" data-action="export-csv">导出 CSV</button>
+                <span class="muted" id="instance-action-status">支持 Excel 导入、模板导出和当前实例 CSV 导出。</span>
+              </div>
+              <input id="excel-file" class="hidden" type="file" accept=".xlsx,.xls,.xlsm">
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><div><h2>实例总览</h2><div class="subtle">汇总当前问题实例的规模、资源和计划起点。</div></div><div id="summary-pill-holder"></div></div>
+            <div class="card-body"><div class="metrics-grid" id="instance-summary-cards"><div class="empty-state">当前还没有加载实例。</div></div></div>
+          </div>
+        </div>
+
+        <div class="grid-3">
+          <div class="card"><div class="card-header"><h3>机器类型与台数</h3><div class="subtle">关键设备会做重点标记</div></div><div class="card-body" id="machine-type-list"><div class="empty-state">暂无机器信息</div></div></div>
+          <div class="card"><div class="card-header"><h3>工装类型与数量</h3><div class="subtle">用于约束辅助资源可用性</div></div><div class="card-body" id="tooling-type-list"><div class="empty-state">暂无工装信息</div></div></div>
+          <div class="card"><div class="card-header"><h3>人员技能概览</h3><div class="subtle">显示人员与可执行技能</div></div><div class="card-body" id="personnel-list"><div class="empty-state">暂无人员信息</div></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><div><h2>停机维护</h2><div class="subtle">支持计划停机与非计划停机的新增、更新与删除。</div></div><div class="btn-row"><button class="btn-lite" data-action="refresh-downtime">刷新停机列表</button></div></div>
+          <div class="card-body section-stack">
+            <div class="form-grid compact">
+              <div class="field"><label for="downtime-machine">设备</label><select id="downtime-machine"></select></div>
+              <div class="field"><label for="downtime-type">停机类型</label><select id="downtime-type"><option value="planned">计划停机</option><option value="unplanned">非计划停机</option></select></div>
+              <div class="field"><label for="downtime-start">开始时间</label><input id="downtime-start" type="datetime-local"></div>
+              <div class="field"><label for="downtime-end">结束时间</label><input id="downtime-end" type="datetime-local"></div>
+            </div>
+            <div class="btn-row"><button class="btn" data-action="add-downtime">新增停机</button><span class="muted" id="downtime-status">停机段会作为机器硬约束进入仿真与排程。</span></div>
+            <div class="table-wrap" id="downtime-table-wrap"><div class="empty-state">暂无停机记录</div></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card"><div class="card-header"><div><h2>订单维护</h2><div class="subtle">支持前台直接修改订单名称、释放时间、交付时间和优先级。</div></div></div><div class="card-body"><div class="table-wrap" id="orders-table-wrap"><div class="empty-state">暂无订单数据</div></div></div></div>
+          <div class="card"><div class="card-header"><div><h2>任务维护</h2><div class="subtle">支持主任务标识、前置任务和时间约束的前台修改。</div></div></div><div class="card-body"><div class="table-wrap" id="tasks-table-wrap"><div class="empty-state">暂无任务数据</div></div></div></div>
+        </div>
+
+        <div class="grid-2">
+          <div class="card"><div class="card-header"><div><h2>工序维护</h2><div class="subtle">支持修改工序时长、前置工序、可选机器、工装类型和人员技能要求。</div></div></div><div class="card-body"><div class="table-wrap" id="operations-table-wrap"><div class="empty-state">暂无工序数据</div></div></div></div>
+          <div class="card"><div class="card-header"><div><h2>设备班次维护</h2><div class="subtle">班次字符串格式为 <span class="mono">day/start_hour/hours;day/start_hour/hours</span>。</div></div></div><div class="card-body"><div class="table-wrap" id="machines-table-wrap"><div class="empty-state">暂无设备数据</div></div></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><div><h2>初始在制状态</h2><div class="subtle">维护计划起点时已经完成、正在加工或已就绪的工序，以及当前占用的机器、工装、人员和预计占用到的时间。</div></div></div>
+          <div class="card-body"><div class="table-wrap" id="initial-state-table-wrap"><div class="empty-state">暂无初始状态数据</div></div></div>
+        </div>
+      </section>
+
+      <section class="tab-pane section-stack" id="tab-graph">
+        <div class="card">
+          <div class="card-header"><div><h2>异构图构建与筛选</h2><div class="subtle">保留图形化展示，并支持节点类型、边类型和关键字筛选。</div></div><div class="btn-row"><button class="btn" data-action="build-graph">构建异构图</button><button class="btn-ghost" data-action="reload-graph">刷新图数据</button></div></div>
+          <div class="card-body section-stack">
+            <div class="form-grid compact">
+              <div class="field"><label for="graph-node-type">节点类型筛选</label><select id="graph-node-type"><option value="">全部节点</option></select></div>
+              <div class="field"><label for="graph-edge-type">边类型筛选</label><select id="graph-edge-type"><option value="">全部边</option></select></div>
+              <div class="field"><label for="graph-search">关键字搜索</label><input id="graph-search" type="text" placeholder="节点ID、实体ID、标签"></div>
+            </div>
+            <div class="btn-row"><button class="btn-lite" data-action="apply-graph-filter">应用筛选</button><span class="muted" id="graph-status-line">先构建异构图，再查看图形化结构与节点关系。</span></div>
+          </div>
+        </div>
+        <div class="metrics-grid" id="graph-meta-cards"><div class="empty-state">暂无图统计信息</div></div>
+        <div class="graph-shell">
+          <div class="card"><div class="card-header"><div><h2>图形化异构图</h2><div class="subtle">按订单、任务、工序、机器、工装、人员的层级布局展示。</div></div><div class="legend-row" id="graph-legend"></div></div><div class="card-body"><div class="graph-stage"><svg id="graph-svg" viewBox="0 0 1200 500"></svg></div></div></div>
+          <div class="detail-panel">
+            <div class="card"><div class="card-header"><h3>节点详情</h3><div class="subtle">点击图中的节点查看属性与邻接关系</div></div><div class="card-body" id="graph-node-detail"><div class="empty-state">请选择一个节点</div></div></div>
+            <div class="card"><div class="card-header"><h3>边类型概览</h3><div class="subtle">帮助识别约束关系分布</div></div><div class="card-body" id="graph-edge-summary"><div class="empty-state">暂无边分布信息</div></div></div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card"><div class="card-header"><h3>节点表</h3><div class="subtle">用于精确核对图中的实体</div></div><div class="card-body"><div class="table-wrap" id="graph-nodes-table-wrap"><div class="empty-state">暂无节点数据</div></div></div></div>
+          <div class="card"><div class="card-header"><h3>边表</h3><div class="subtle">用于核对依赖与资源可行边</div></div><div class="card-body"><div class="table-wrap" id="graph-edges-table-wrap"><div class="empty-state">暂无边数据</div></div></div></div>
+        </div>
+      </section>
+
+      <section class="tab-pane section-stack" id="tab-simulate">
+        <div class="card"><div class="card-header"><div><h2>仿真排产</h2><div class="subtle">先用规则仿真快速检查实例和约束，再决定是否进入混合优化。</div></div><div class="btn-row"><select id="simulate-rule"></select><button class="btn" data-action="run-simulate">运行仿真</button></div></div><div class="card-body"><div class="metrics-grid" id="simulate-metrics"><div class="empty-state">请先运行一次仿真。</div></div></div></div>
+        <div class="card"><div class="card-header"><div><h2>甘特图</h2><div class="subtle">时间轴会显示真实日期时间，并反映停机、工装和人员占用。</div></div></div><div class="card-body"><div class="gantt-stage"><svg id="simulate-gantt" viewBox="0 0 1200 420"></svg></div></div></div>
+        <div class="card"><div class="card-header"><h2>排产明细</h2><div class="subtle">包含订单、工序、设备、工装、人员和实际开始结束时间。</div></div><div class="card-body"><div class="table-wrap" id="simulate-table-wrap"><div class="empty-state">暂无仿真明细</div></div></div></div>
+      </section>
+
+      <section class="tab-pane section-stack" id="tab-optimize">
+        <div class="split-panel">
+          <div class="card"><div class="card-header"><div><h2>业务目标选择</h2><div class="subtle">支持选择 1-5 个常用业务指标，作为 NSGA-III/ALNS 的优化目标。</div></div><div class="btn-row"><button class="btn-lite" data-action="refresh-objectives">刷新指标</button></div></div><div class="card-body"><div id="objective-selection-summary" class="footer-note">正在加载指标定义...</div><div class="objective-grid" id="objective-grid"><div class="empty-state">正在加载指标定义...</div></div></div></div>
+          <div class="card"><div class="card-header"><div><h2>混合优化参数</h2><div class="subtle">先设定目标方案数与时间预算，再启动组合优化。</div></div><div class="btn-row"><button class="btn" data-action="start-optimization" id="btn-start-opt">启动优化</button></div></div><div class="card-body section-stack"><div class="form-grid compact"><div class="field"><label for="opt-target-count">目标方案数</label><input id="opt-target-count" type="number" min="1" value="12"></div><div class="field"><label for="opt-time-limit">时间预算(秒)</label><input id="opt-time-limit" type="number" min="1" value="90"></div><div class="field"><label for="opt-population">种群规模</label><input id="opt-population" type="number" min="4" value="24"></div><div class="field"><label for="opt-generations">演化代数</label><input id="opt-generations" type="number" min="1" value="12"></div><div class="field"><label for="opt-alns">每候选 ALNS 迭代数</label><input id="opt-alns" type="number" min="1" value="6"></div><div class="field"><label for="opt-seed">随机种子</label><input id="opt-seed" type="number" value="42"></div><div class="field"><label for="opt-baseline-rule">基线规则</label><select id="opt-baseline-rule"></select></div></div><div class="footer-note" id="opt-config-note">如果给定预算内找不到足够多的唯一非支配可行解，系统会如实返回较少的方案数量，而不会伪造结果。</div></div></div>
+        </div>
+        <div class="card"><div class="card-header"><div><h2>优化进度</h2><div class="subtle">实时查看代数、归档规模、可行率、超体积和瓶颈设备。</div></div><div class="btn-row"><span class="pill" id="opt-status-pill">待启动</span></div></div><div class="card-body section-stack"><div class="status-grid" id="opt-status-cards"><div class="status-card"><div class="label">状态</div><div class="value">待启动</div></div></div><div class="table-wrap" id="opt-history-table-wrap"><div class="empty-state">暂无优化历史</div></div><pre class="status-log" id="opt-log">等待优化任务启动...</pre></div></div>
+        <div class="grid-2">
+          <div class="card"><div class="card-header"><div><h2>基线方案</h2><div class="subtle">用于和 Pareto 方案做差异比较。</div></div></div><div class="card-body" id="opt-baseline-wrap"><div class="empty-state">暂无基线方案</div></div></div>
+          <div class="card"><div class="card-header"><div><h2>方案库</h2><div class="subtle">勾选 1-4 个方案后，可在下方进行对比。</div></div></div><div class="card-body"><div class="table-wrap" id="opt-solutions-table-wrap"><div class="empty-state">暂无优化结果</div></div></div></div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div><h2>启发式参考规则</h2><div class="subtle">把常见调度启发式规则作为对照组，一起和帕累托解进行比较与 AI 问答。</div></div>
+          </div>
+          <div class="card-body section-stack">
+            <div class="tag-row" id="opt-reference-rules"></div>
+            <div class="footer-note" id="opt-reference-status">尚未选择启发式参考规则，当前对比只显示基线和帕累托解。</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div><h2>精确冠军参考方案</h2><div class="subtle">生成单目标精确解或加权单目标精确解，作为业务偏好下的高置信冠军方案参与比较、导出和 AI 问答。</div></div>
+          </div>
+          <div class="card-body section-stack">
+            <div class="form-grid compact">
+              <div class="field">
+                <label for="opt-exact-mode">求解模式</label>
+                <select id="opt-exact-mode">
+                  <option value="single">单目标精确解</option>
+                  <option value="weighted">加权单目标精确解</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="opt-exact-single-objective">单目标</label>
+                <select id="opt-exact-single-objective"><option value="makespan">Makespan</option></select>
+              </div>
+              <div class="field">
+                <label for="opt-exact-time-limit">精确求解时间预算(s)</label>
+                <input id="opt-exact-time-limit" type="number" min="5" step="5" value="60">
+              </div>
+            </div>
+            <div class="section-stack">
+              <div class="subtle">加权目标设置</div>
+              <div class="form-grid compact" id="opt-exact-weighted-grid"><div class="empty-state">正在加载精确目标目录…</div></div>
+              <div class="btn-row">
+                <button class="btn-lite" type="button" data-action="fill-exact-weighted-from-selected">按当前优化目标等权填充</button>
+                <span class="muted" id="opt-exact-status">可把精确参考方案加入最终方案比较和 AI 决策。</span>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button class="btn" type="button" data-action="generate-exact-reference">生成精确冠军参考方案</button>
+            </div>
+            <div class="section-stack">
+              <div class="subtle">已生成的精确参考方案</div>
+              <div class="table-wrap" id="opt-exact-reference-wrap"><div class="empty-state">尚未生成精确参考方案。</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="card"><div class="card-header"><div><h2>方案对比</h2><div class="subtle">对比目标指标、关键摘要和排产甘特图，并显示班次外、计划停机、非计划停机的占用块。</div></div><div class="btn-row"><button class="btn-lite" data-action="refresh-compare">刷新对比</button><button class="btn-lite" data-action="export-selected-solution">导出当前方案</button></div></div><div class="card-body section-stack" id="opt-compare-wrap"><div class="empty-state">先勾选至少一个优化方案。</div></div></div>
+        <div class="card">
+          <div class="card-header">
+            <div><h2>AI 方案协同助手</h2><div class="subtle">像聊天一样围绕帕累托前沿方案做比较、推荐和追问。</div></div>
+            <div class="btn-row"><button class="btn-lite" data-action="clear-pareto-chat">清空对话</button></div>
+          </div>
+          <div class="card-body section-stack">
+            <div id="pareto-ai-meta" class="tag-row"><span class="tag">等待方案结果</span></div>
+            <div class="chat-shell">
+              <div id="pareto-chat-history" class="chat-history"><div class="empty-state">请先完成一次混合优化，然后勾选方案或输入业务诉求开始交流。</div></div>
+            </div>
+            <div class="form-grid compact">
+              <div class="field">
+                <label for="pareto-solution-select">追问方案</label>
+                <select id="pareto-solution-select"><option value="">请先完成优化</option></select>
+              </div>
+              <div class="field">
+                <label for="pareto-selected-hint">当前已勾选方案</label>
+                <input id="pareto-selected-hint" type="text" value="尚未勾选方案" readonly>
+              </div>
+              <div class="field">
+                <label for="pareto-ai-status">助手状态</label>
+                <input id="pareto-ai-status" type="text" value="支持比较多个方案、按需求推荐一个方案、围绕单方案继续问答。" readonly>
+              </div>
+            </div>
+            <div class="field">
+              <label for="pareto-message">输入消息</label>
+              <textarea id="pareto-message" placeholder="例如：帮我比较当前勾选的 3 个方案；或者：我更关注交期稳定性，其次是装配同步；或者：解释这个方案为什么这样排。"></textarea>
+            </div>
+            <div class="btn-row">
+              <button class="btn" data-action="pareto-compare">比较已勾选方案</button>
+              <button class="btn-ghost" data-action="pareto-recommend">按诉求推荐方案</button>
+              <button class="btn-lite" data-action="pareto-ask">追问当前方案</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-pane section-stack" id="tab-llm">
+        <div class="card"><div class="card-header"><div><h2>快捷预设</h2><div class="subtle">保留原有的常用大模型快捷配置，并支持一键套用。</div></div></div><div class="card-body"><div class="preset-grid" id="llm-presets"></div></div></div>
+        <div class="split-panel">
+          <div class="card"><div class="card-header"><div><h2>模型连接配置</h2><div class="subtle">支持 OpenAI 兼容接口，也支持多供应商 API 配置。</div></div><div class="btn-row"><button class="btn-lite" data-action="load-llm" id="btn-load-llm">读取当前配置</button></div></div><div class="card-body section-stack"><div class="form-grid compact"><div class="field"><label for="llm-base-url">Base URL</label><input id="llm-base-url" type="text" placeholder="https://api.deepseek.com/v1"></div><div class="field"><label for="llm-model">模型名</label><input id="llm-model" type="text" placeholder="deepseek-chat"></div><div class="field"><label for="llm-api-key">API Key</label><input id="llm-api-key" type="password" placeholder="留空则保留当前 Key"></div></div><div class="btn-row"><button class="btn" data-action="save-llm" id="btn-save-llm">保存配置</button><button class="btn-ghost" data-action="test-llm" id="btn-test-llm">测试连通性</button></div><div class="footer-note" id="llm-config-status">尚未读取当前大模型配置。</div></div></div>
+          <div class="card"><div class="card-header"><div><h2>当前状态</h2><div class="subtle">展示当前已加载的模型、Base URL 和 Key 状态。</div></div></div><div class="card-body section-stack"><div id="llm-current-cards" class="metrics-grid"><div class="empty-state">请先读取当前配置。</div></div><pre class="status-log" id="llm-test-log">等待模型测试...</pre></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-wrap" id="toast-wrap"></div>
+
+  <script>
+    (() => {
+      const tabs = ["config", "graph", "simulate", "optimize", "llm"];
+      function activateTab(name, updateHash = true) {
+        if (!tabs.includes(name)) return;
+        document.querySelectorAll(".tab-btn").forEach((button) => {
+          button.classList.toggle("active", button.dataset.tab === name);
+        });
+        document.querySelectorAll(".tab-pane").forEach((pane) => {
+          pane.classList.toggle("active", pane.id === `tab-${name}`);
+        });
+        if (updateHash) {
+          window.history.replaceState(null, "", `#${name}`);
+        }
+      }
+      function currentTab() {
+        return document.querySelector(".tab-btn.active")?.dataset.tab || "config";
+      }
+      function relativeTab(step) {
+        const index = Math.max(0, tabs.indexOf(currentTab()));
+        const next = Math.min(tabs.length - 1, Math.max(0, index + step));
+        activateTab(tabs[next]);
+      }
+      window.addEventListener("DOMContentLoaded", () => {
+        document.getElementById("tab-bar")?.addEventListener("click", (event) => {
+          const button = event.target.closest(".tab-btn");
+          if (button) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            activateTab(button.dataset.tab);
+          }
+        });
+        document.querySelector('[data-action="prev-tab"]')?.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          relativeTab(-1);
+        });
+        document.querySelector('[data-action="next-tab"]')?.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          relativeTab(1);
+        });
+        window.addEventListener("hashchange", () => activateTab((window.location.hash || "#config").slice(1), false));
+        activateTab((window.location.hash || "#config").slice(1), false);
+      });
+    })();
+  </script>
+  <script src="/static/app.js?v=20260326-7"></script>
+</body>
+</html>

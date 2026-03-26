@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.db
+*.log
+*.sqlite
+.DS_Store
+.vscode/
+run.stdout.log
+run.stderr.log
+server.log
