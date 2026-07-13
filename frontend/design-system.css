@@ -335,6 +335,29 @@ body {
 .readiness-item.passed > span { color: var(--success); }
 .readiness-item.blocked > span { color: var(--warning); }
 
+.graph-build-status {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 5%, var(--surface));
+}
+.graph-build-status.warning { border-color: color-mix(in srgb, var(--warning) 34%, var(--line)); background: color-mix(in srgb, var(--warning) 5%, var(--surface)); }
+.graph-build-status.danger { border-color: color-mix(in srgb, var(--danger) 34%, var(--line)); background: color-mix(in srgb, var(--danger) 5%, var(--surface)); }
+.graph-build-status.success { border-color: color-mix(in srgb, var(--success) 30%, var(--line)); background: color-mix(in srgb, var(--success) 5%, var(--surface)); }
+.graph-build-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.graph-build-head h3 { margin: 0; font-family: var(--font-display); font-size: 15px; }
+.graph-build-status p { margin: 10px 0 0; color: var(--text-soft); font-size: 12px; }
+.graph-build-progress { height: 5px; margin-top: 14px; overflow: hidden; border-radius: 999px; background: var(--inset); }
+.graph-build-progress i { display: block; height: 100%; border-radius: inherit; background: var(--primary); transition: width 0.35s var(--ease); }
+.graph-build-status.warning .graph-build-progress i { background: var(--warning); }
+.graph-build-status.danger .graph-build-progress i { background: var(--danger); }
+.graph-build-status.success .graph-build-progress i { background: var(--success); }
+.graph-build-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; color: var(--text-faint); font-family: var(--font-mono); font-size: 10.5px; }
+.graph-build-warning,
+.graph-build-long-hint { margin-top: 12px; padding: 9px 10px; border-radius: 6px; color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, transparent); font-size: 11.5px; }
+.graph-build-status.danger .graph-build-warning { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); }
+
 .kpi-card {
   min-height: 108px;
   border-radius: 8px;

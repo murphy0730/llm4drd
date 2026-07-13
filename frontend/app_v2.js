@@ -107,6 +107,10 @@ const app = {
   graphMeta: null,
   graphNodes: [],
   graphEdges: [],
+  graphBuildTaskId: null,
+  graphBuildStatus: null,
+  graphBuildPollTimer: null,
+  graphBuildPollFailures: 0,
   selectedGraphNodeId: null,
   graphView: defaultGraphView(),
   simResult: null,
@@ -233,6 +237,7 @@ const api = {
   updateDowntime(id, payload) { return this.json(`/downtime/${id}`, "PUT", payload); },
   deleteDowntime(id) { return this.request(`/downtime/${id}`, { method: "DELETE" }); },
   buildGraph() { return this.json("/graph/build", "POST"); },
+  getGraphBuildStatus(taskId) { return this.json(`/graph/status/${taskId}`); },
   getGraphMeta() { return this.json("/graph/meta"); },
   getGraphNodes(limit = 60, offset = 0) { return this.json(`/graph/nodes?limit=${limit}&offset=${offset}`); },
   getGraphEdges(limit = 80, offset = 0) { return this.json(`/graph/edges?limit=${limit}&offset=${offset}`); },
@@ -398,6 +403,57 @@ function isCountMetric(key) {
 
 function statusChip(label, tone = "info") {
   return `<span class="status-chip ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function graphBuildIsRunning() {
+  return ["queued", "running"].includes(String(app.graphBuildStatus?.status || "").toLowerCase());
+}
+
+function renderGraphBuildStatus() {
+  const status = app.graphBuildStatus;
+  if (!status) return "";
+  const state = String(status.status || "queued").toLowerCase();
+  const elapsed = Number(status.elapsed_s || 0);
+  const estimate = status.estimate || {};
+  const tone = state === "error" ? "danger" : state === "done" ? "success" : elapsed >= 30 ? "warning" : "info";
+  const label = state === "error" ? "构建失败" : state === "done" ? "构建完成" : state === "queued" ? "等待执行" : "正在构建";
+  const longHint = state === "running" && elapsed >= 10
+    ? `<div class="graph-build-long-hint">${elapsed >= 60 ? "构建已持续超过 1 分钟。系统仍在处理，请勿重复点击或关闭服务。" : "数据量较大，构建需要一些时间；页面会持续更新进度。"}</div>`
+    : "";
+  return `
+    <article class="graph-build-status ${tone}" id="graph-build-status-panel" role="status" aria-live="polite">
+      <div class="graph-build-head">
+        <div>
+          <span class="eyebrow">Graph build</span>
+          <h3>${escapeHtml(label)}</h3>
+        </div>
+        ${statusChip(`${formatInt(status.progress || 0)}%`, tone)}
+      </div>
+      <div class="graph-build-progress"><i style="width:${Math.max(0, Math.min(100, Number(status.progress || 0)))}%"></i></div>
+      <p>${escapeHtml(status.error || status.message || "正在准备图谱构建任务")}</p>
+      <div class="graph-build-meta">
+        <span>阶段：${escapeHtml(humanizeCodeLabel(status.stage || "queued"))}</span>
+        <span>已耗时：${formatDurationSeconds(elapsed)}</span>
+        <span>超时限制：${formatDurationSeconds(status.timeout_s || 180)}</span>
+        ${estimate.estimated_nodes !== undefined ? `<span>预计节点：${formatInt(estimate.estimated_nodes)}</span>` : ""}
+        ${estimate.estimated_edges !== undefined ? `<span>预计边：${formatInt(estimate.estimated_edges)}</span>` : ""}
+        ${estimate.machine_edges !== undefined ? `<span>机器关系：${formatInt(estimate.machine_edges)}</span>` : ""}
+        ${estimate.tooling_edges !== undefined ? `<span>工装关系：${formatInt(estimate.tooling_edges)}</span>` : ""}
+        ${estimate.personnel_edges !== undefined ? `<span>人员关系：${formatInt(estimate.personnel_edges)}</span>` : ""}
+      </div>
+      ${status.warning ? `<div class="graph-build-warning">${escapeHtml(status.warning)}</div>` : ""}
+      ${longHint}
+    </article>
+  `;
+}
+
+function syncGraphBuildControls() {
+  const running = graphBuildIsRunning();
+  document.querySelectorAll('[data-action="build-graph"]').forEach((button) => {
+    button.disabled = running;
+    button.setAttribute("aria-busy", running ? "true" : "false");
+    button.textContent = running ? `正在构建 ${formatInt(app.graphBuildStatus?.progress || 0)}%` : "构建图谱";
+  });
 }
 
 function toast(message, type = "info") {
@@ -3048,7 +3104,7 @@ function renderInsights() {
   const summary = getSceneSummary();
 
   if (!app.graphMeta) {
-    container.innerHTML = renderEmptyState(
+    container.innerHTML = renderGraphBuildStatus() + renderEmptyState(
       "尚未构建图谱",
       "先构建异构图后，这里会显示结构、资源和瓶颈洞察。",
       '<button class="btn btn-primary" type="button" data-action="build-graph">立即构建图谱</button>',
@@ -3058,6 +3114,7 @@ function renderInsights() {
 
   if (app.insightTab === "structure") {
     container.innerHTML = `
+      ${renderGraphBuildStatus()}
       ${renderKpiCards([
         { label: "节点总数", value: formatInt(app.graphMeta.total_nodes), hint: "订单 / 任务 / 工序 / 机器 / 工装 / 人员" },
         { label: "边总数", value: formatInt(app.graphMeta.total_edges), hint: "前驱、资源可行、装配依赖等关系" },
@@ -3102,6 +3159,7 @@ function renderInsights() {
     const toolings = asArray(app.instanceDetails?.toolings);
     const personnel = asArray(app.instanceDetails?.personnel);
     container.innerHTML = `
+      ${renderGraphBuildStatus()}
       ${renderKpiCards([
         { label: "机器", value: formatInt(machines.length), hint: "可执行加工主资源" },
         { label: "工装", value: formatInt(toolings.length), hint: "辅助资源与夹具能力" },
@@ -3139,6 +3197,7 @@ function renderInsights() {
 
   const insight = buildBottleneckInsight();
   container.innerHTML = `
+    ${renderGraphBuildStatus()}
     ${renderKpiCards([
       { label: "关键任务(<=0h)", value: formatInt(insight.tightTaskCount), hint: "任务关键余量已耗尽，最容易直接传导为订单风险" },
       { label: "紧绷工序(<=4h)", value: formatInt(insight.warningOpCount), hint: "工序层关键余量紧张，建议尽快核查前驱与资源释放" },
@@ -3344,6 +3403,7 @@ function renderWorkflowStep3() {
   const graphPanel = `
     <article class="surface-card">
       <div class="card-head"><h3>图谱构建</h3><p>构建订单 - 任务 - 工序 - 机器 - 工装 - 人员异构图，并作为后续结构洞察与优化引导基础。</p></div>
+      ${renderGraphBuildStatus()}
       ${app.graphMeta ? renderKeyValueGrid([
         { label: "节点", value: formatInt(app.graphMeta.total_nodes) },
         { label: "边", value: formatInt(app.graphMeta.total_edges) },
@@ -4933,6 +4993,7 @@ async function renderCurrentPage() {
   if (app.currentPage === "review") renderReview();
   if (app.currentPage === "config") renderConfig();
   if (app.currentPage === "system") renderSystem();
+  syncGraphBuildControls();
 }
 
 async function loadCatalogs() {
@@ -5059,6 +5120,9 @@ async function handleGenerateInstance() {
     app.graphMeta = null;
     app.graphNodes = [];
     app.graphEdges = [];
+    stopGraphBuildPolling();
+    app.graphBuildTaskId = null;
+    app.graphBuildStatus = null;
     resetGraphView({ preserveFilters: false });
     app.simResult = null;
     app.optimizeResult = null;
@@ -5081,6 +5145,9 @@ async function handleImportFile(file) {
     app.graphMeta = null;
     app.graphNodes = [];
     app.graphEdges = [];
+    stopGraphBuildPolling();
+    app.graphBuildTaskId = null;
+    app.graphBuildStatus = null;
     resetGraphView({ preserveFilters: false });
     app.simResult = null;
     app.optimizeResult = null;
@@ -5120,23 +5187,112 @@ async function fetchGraphDataset(meta) {
   };
 }
 
-async function handleBuildGraph() {
+function stopGraphBuildPolling() {
+  if (app.graphBuildPollTimer) window.clearTimeout(app.graphBuildPollTimer);
+  app.graphBuildPollTimer = null;
+}
+
+async function refreshGraphBuildFeedback() {
+  const panel = el("graph-build-status-panel");
+  if (panel) panel.outerHTML = renderGraphBuildStatus();
+  else if (["workflow", "insights"].includes(app.currentPage)) await renderCurrentPage();
+  syncGraphBuildControls();
+}
+
+async function finishGraphBuild(status) {
+  app.graphBuildStatus = {
+    ...status,
+    status: "running",
+    stage: "loading",
+    progress: 98,
+    message: "后端构建成功，正在加载可视化样本",
+  };
+  await refreshGraphBuildFeedback();
+  const meta = await api.getGraphMeta();
+  const { nodes, edges } = await fetchGraphDataset(meta);
+  app.graphMeta = {
+    ...meta,
+    created_at: tryParseDate(meta?.created_at) ? meta.created_at : new Date().toISOString(),
+  };
+  app.graphNodes = asArray(nodes?.items || nodes?.nodes || nodes);
+  app.graphEdges = asArray(edges?.items || edges?.edges || edges);
+  app.selectedGraphNodeId = app.graphNodes[0]?.node_id || app.graphNodes[0]?.id || null;
+  resetGraphView({ preserveFilters: true });
+  app.graphBuildStatus = { ...status, status: "done", stage: "done", progress: 100, message: "图谱构建并加载成功" };
+  toast(`图谱构建完成：${formatInt(meta.total_nodes)} 个节点、${formatInt(meta.total_edges)} 条边。`, "success");
+  await renderCurrentPage();
+}
+
+async function pollGraphBuildStatus() {
+  if (!app.graphBuildTaskId) return;
   try {
-    await api.buildGraph();
-    const meta = await api.getGraphMeta();
-    const { nodes, edges } = await fetchGraphDataset(meta);
-    app.graphMeta = {
-      ...meta,
-      created_at: tryParseDate(meta?.created_at) ? meta.created_at : new Date().toISOString(),
-    };
-    app.graphNodes = asArray(nodes?.items || nodes?.nodes || nodes);
-    app.graphEdges = asArray(edges?.items || edges?.edges || edges);
-    app.selectedGraphNodeId = app.graphNodes[0]?.node_id || app.graphNodes[0]?.id || null;
-    resetGraphView({ preserveFilters: true });
-    toast("异构图已重新构建。", "success");
-    await renderCurrentPage();
+    const status = await api.getGraphBuildStatus(app.graphBuildTaskId);
+    app.graphBuildStatus = status;
+    app.graphBuildPollFailures = 0;
+    await refreshGraphBuildFeedback();
+    if (status.status === "done") {
+      stopGraphBuildPolling();
+      try {
+        await finishGraphBuild(status);
+      } catch (error) {
+        app.graphBuildStatus = { ...status, status: "error", stage: "loading", error: `图谱已构建，但加载可视化样本失败：${error.message}` };
+        toast(app.graphBuildStatus.error, "warning");
+        await renderCurrentPage();
+      }
+      return;
+    }
+    if (status.status === "error") {
+      stopGraphBuildPolling();
+      toast(`构建图谱失败：${status.error || status.message || "未知错误"}`, "warning");
+      await renderCurrentPage();
+      return;
+    }
+    const clientLimit = Number(status.timeout_s || 180) + 30;
+    if (Number(status.elapsed_s || 0) > clientLimit) {
+      stopGraphBuildPolling();
+      app.graphBuildStatus = { ...status, status: "error", stage: "timeout", error: `超过 ${clientLimit} 秒仍未收到完成结果，请检查服务日志后重试` };
+      toast(app.graphBuildStatus.error, "warning");
+      await renderCurrentPage();
+      return;
+    }
   } catch (error) {
-    toast(`构建图谱失败：${error.message}`, "warning");
+    app.graphBuildPollFailures += 1;
+    if (app.graphBuildPollFailures >= 3) {
+      stopGraphBuildPolling();
+      app.graphBuildStatus = { ...(app.graphBuildStatus || {}), status: "error", stage: "connection", error: `连续 3 次无法获取构建进度：${error.message}` };
+      toast(app.graphBuildStatus.error, "warning");
+      await renderCurrentPage();
+      return;
+    }
+  }
+  app.graphBuildPollTimer = window.setTimeout(pollGraphBuildStatus, 1000);
+}
+
+async function handleBuildGraph() {
+  if (graphBuildIsRunning()) {
+    toast("图谱正在构建，请等待当前任务完成。", "warning");
+    return;
+  }
+  try {
+    const result = await api.buildGraph();
+    app.graphBuildTaskId = result.task_id;
+    app.graphBuildStatus = {
+      status: result.status || "queued",
+      stage: "queued",
+      progress: 0,
+      message: result.message || "图谱构建任务已提交",
+      elapsed_s: 0,
+      timeout_s: result.timeout_s || 180,
+    };
+    app.graphBuildPollFailures = 0;
+    toast("图谱构建任务已提交，页面将持续显示详细进度。", "info");
+    await renderCurrentPage();
+    stopGraphBuildPolling();
+    await pollGraphBuildStatus();
+  } catch (error) {
+    app.graphBuildStatus = { status: "error", stage: "submit", progress: 0, error: `无法启动图谱构建：${error.message}` };
+    toast(app.graphBuildStatus.error, "warning");
+    await renderCurrentPage();
   }
 }
 

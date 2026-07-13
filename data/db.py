@@ -813,52 +813,96 @@ class GraphStore:
             conn.execute("DELETE FROM graph_edges")
             conn.execute("DELETE FROM graph_meta")
 
-    def save_graph(self, graph_wrapper):
-        self.clear_all()
+    def save_graph(self, graph_wrapper, progress_callback=None, deadline: float | None = None, batch_size: int = 1000):
         graph = graph_wrapper.graph
+        total_nodes = graph.number_of_nodes()
+        total_edges = graph.number_of_edges()
+        total_rows = max(1, total_nodes + total_edges)
+        written = 0
+
+        def ensure_time():
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("图谱数据库保存超过时间限制")
+
         with get_db(self.db_path) as conn:
+            conn.execute("DELETE FROM graph_nodes")
+            conn.execute("DELETE FROM graph_edges")
+            conn.execute("DELETE FROM graph_meta")
+
+            node_batch = []
             for node_id, attrs in graph.nodes(data=True):
-                conn.execute("INSERT INTO graph_nodes VALUES (?,?,?,?)", (node_id, attrs.get("node_type", ""), attrs.get("entity_id", ""), json.dumps({key: value for key, value in attrs.items() if key not in {"node_type", "entity_id"}}, ensure_ascii=False)))
+                node_batch.append((node_id, attrs.get("node_type", ""), attrs.get("entity_id", ""), json.dumps({key: value for key, value in attrs.items() if key not in {"node_type", "entity_id"}}, ensure_ascii=False)))
+                if len(node_batch) >= batch_size:
+                    ensure_time()
+                    conn.executemany("INSERT INTO graph_nodes VALUES (?,?,?,?)", node_batch)
+                    written += len(node_batch)
+                    node_batch.clear()
+                    if progress_callback:
+                        progress_callback(written, total_rows)
+            if node_batch:
+                ensure_time()
+                conn.executemany("INSERT INTO graph_nodes VALUES (?,?,?,?)", node_batch)
+                written += len(node_batch)
+                if progress_callback:
+                    progress_callback(written, total_rows)
+
+            edge_batch = []
             for source, target, attrs in graph.edges(data=True):
-                conn.execute("INSERT INTO graph_edges (source, target, edge_type, attrs) VALUES (?,?,?,?)", (source, target, attrs.get("edge_type", ""), json.dumps({key: value for key, value in attrs.items() if key != "edge_type"}, ensure_ascii=False)))
+                edge_batch.append((source, target, attrs.get("edge_type", ""), json.dumps({key: value for key, value in attrs.items() if key != "edge_type"}, ensure_ascii=False)))
+                if len(edge_batch) >= batch_size:
+                    ensure_time()
+                    conn.executemany("INSERT INTO graph_edges (source, target, edge_type, attrs) VALUES (?,?,?,?)", edge_batch)
+                    written += len(edge_batch)
+                    edge_batch.clear()
+                    if progress_callback:
+                        progress_callback(written, total_rows)
+            if edge_batch:
+                ensure_time()
+                conn.executemany("INSERT INTO graph_edges (source, target, edge_type, attrs) VALUES (?,?,?,?)", edge_batch)
+                written += len(edge_batch)
+                if progress_callback:
+                    progress_callback(written, total_rows)
+
             stats = graph_wrapper.get_graph_stats()
             conn.execute("INSERT OR REPLACE INTO graph_meta VALUES (1,?,?,?,?,?)", (stats["total_nodes"], stats["total_edges"], json.dumps(stats["node_types"]), json.dumps(stats["edge_types"]), time.time()))
 
-    def load_nodes(self, node_type: str = None, search: str = None) -> list[dict]:
+    def load_nodes(self, node_type: str = None, search: str = None, limit: int = 200, offset: int = 0) -> tuple[int, list[dict]]:
         with get_db(self.db_path) as conn:
-            sql = "SELECT * FROM graph_nodes WHERE 1=1"
+            where = " WHERE 1=1"
             params = []
             if node_type:
-                sql += " AND node_type=?"
+                where += " AND node_type=?"
                 params.append(node_type)
             if search:
-                sql += " AND (node_id LIKE ? OR entity_id LIKE ?)"
+                where += " AND (node_id LIKE ? OR entity_id LIKE ?)"
                 params.extend([f"%{search}%", f"%{search}%"])
-            rows = conn.execute(sql, params).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM graph_nodes" + where, params).fetchone()[0]
+            rows = conn.execute("SELECT * FROM graph_nodes" + where + " ORDER BY rowid LIMIT ? OFFSET ?", [*params, max(1, limit), max(0, offset)]).fetchall()
             result = []
             for row in rows:
                 item = dict(row)
                 item["attrs"] = json.loads(item["attrs"]) if item["attrs"] else {}
                 result.append(item)
-            return result
+            return total, result
 
-    def load_edges(self, edge_type: str = None, search: str = None) -> list[dict]:
+    def load_edges(self, edge_type: str = None, search: str = None, limit: int = 200, offset: int = 0) -> tuple[int, list[dict]]:
         with get_db(self.db_path) as conn:
-            sql = "SELECT * FROM graph_edges WHERE 1=1"
+            where = " WHERE 1=1"
             params = []
             if edge_type:
-                sql += " AND edge_type=?"
+                where += " AND edge_type=?"
                 params.append(edge_type)
             if search:
-                sql += " AND (source LIKE ? OR target LIKE ?)"
+                where += " AND (source LIKE ? OR target LIKE ?)"
                 params.extend([f"%{search}%", f"%{search}%"])
-            rows = conn.execute(sql, params).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM graph_edges" + where, params).fetchone()[0]
+            rows = conn.execute("SELECT * FROM graph_edges" + where + " ORDER BY id LIMIT ? OFFSET ?", [*params, max(1, limit), max(0, offset)]).fetchall()
             result = []
             for row in rows:
                 item = dict(row)
                 item["attrs"] = json.loads(item["attrs"]) if item["attrs"] else {}
                 result.append(item)
-            return result
+            return total, result
 
     def load_meta(self) -> Optional[dict]:
         with get_db(self.db_path) as conn:

@@ -42,6 +42,7 @@ downtime_store = DowntimeStore()
 _nsga2_tasks: dict = {}
 _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
+_graph_tasks: dict = {}
 _latest_hybrid_task_id: Optional[str] = None
 online_scheduler_v3: Optional[OnlineSchedulerV3] = None
 
@@ -1545,18 +1546,127 @@ def _instance_details(s: ShopFloor):
     }
 
 # === Graph ===
+GRAPH_BUILD_TIMEOUT_S = int(os.environ.get("LLM4DRD_GRAPH_TIMEOUT_S", "180"))
+GRAPH_WARN_EDGES = int(os.environ.get("LLM4DRD_GRAPH_WARN_EDGES", "300000"))
+GRAPH_MAX_EDGES = int(os.environ.get("LLM4DRD_GRAPH_MAX_EDGES", "2000000"))
+GRAPH_MAX_NODES = int(os.environ.get("LLM4DRD_GRAPH_MAX_NODES", "100000"))
+
+
+def _estimate_graph_size(current_shop: ShopFloor) -> dict:
+    node_count = (
+        len(current_shop.orders) + len(current_shop.tasks) + len(current_shop.operations)
+        + len(current_shop.machines) + len(current_shop.toolings) + len(current_shop.personnel)
+    )
+    structural_edges = len(current_shop.tasks) + sum(len(task.predecessor_task_ids) for task in current_shop.tasks.values())
+    structural_edges += len(current_shop.operations)
+    structural_edges += sum(len(op.predecessor_ops) + len(op.predecessor_tasks) for op in current_shop.operations.values())
+    machine_edges = 0
+    tooling_edges = 0
+    personnel_edges = 0
+    for op in current_shop.operations.values():
+        machine_edges += len(op.eligible_machine_ids or current_shop._machine_by_type.get(op.process_type, []))
+        tooling_edges += sum(len(current_shop._tooling_by_type.get(type_id, [])) for type_id in op.required_tooling_types)
+        personnel_edges += sum(len(current_shop._personnel_by_skill.get(skill_id, [])) for skill_id in op.required_personnel_skills)
+    total_edges = structural_edges + machine_edges + tooling_edges + personnel_edges
+    return {
+        "estimated_nodes": node_count,
+        "estimated_edges": total_edges,
+        "structural_edges": structural_edges,
+        "machine_edges": machine_edges,
+        "tooling_edges": tooling_edges,
+        "personnel_edges": personnel_edges,
+    }
+
+
 @app.post("/api/graph/build")
-async def build_graph():
-    """从当前实例构建异构图并保存到数据库"""
-    global shop
+async def build_graph(bg: BackgroundTasks):
+    """在后台构建异构图，并通过状态接口报告规模、阶段、进度与错误。"""
+    global shop, _graph_tasks
     if not shop and inst_store.has_data():
         shop = inst_store.build_shopfloor()
     if not shop:
         raise HTTPException(400, "请先生成实例")
-    hg = HeterogeneousGraph()
-    hg.build_from_shopfloor(shop)
-    graph_store.save_graph(hg)
-    return {"status": "ok", "stats": hg.get_graph_stats()}
+
+    for existing_id, existing in _graph_tasks.items():
+        if existing.get("status") in {"queued", "running"}:
+            return {"task_id": existing_id, "status": existing["status"], "message": "已有图谱构建任务正在运行"}
+
+    current_shop = shop
+    task_id = str(uuid.uuid4())[:8]
+    _graph_tasks = dict(list(_graph_tasks.items())[-19:])
+    _graph_tasks[task_id] = {
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "message": "任务已提交，正在准备规模预检",
+        "started_at": time.time(),
+        "elapsed_s": 0.0,
+        "timeout_s": GRAPH_BUILD_TIMEOUT_S,
+        "estimate": None,
+        "stats": None,
+        "warning": None,
+        "error": None,
+    }
+
+    def update(**values):
+        task = _graph_tasks[task_id]
+        task.update(values)
+        task["elapsed_s"] = round(time.time() - task["started_at"], 2)
+
+    def run():
+        deadline = time.monotonic() + GRAPH_BUILD_TIMEOUT_S
+        try:
+            update(status="running", stage="preflight", progress=3, message="正在估算节点、关系边和内存压力")
+            estimate = _estimate_graph_size(current_shop)
+            update(estimate=estimate, progress=8, message=f"规模预检完成：预计 {estimate['estimated_nodes']:,} 个节点、{estimate['estimated_edges']:,} 条边")
+            if estimate["estimated_nodes"] > GRAPH_MAX_NODES:
+                raise ValueError(f"数据量过大：预计节点 {estimate['estimated_nodes']:,}，超过安全上限 {GRAPH_MAX_NODES:,}")
+            if estimate["estimated_edges"] > GRAPH_MAX_EDGES:
+                raise ValueError(
+                    f"数据量过大：预计关系边 {estimate['estimated_edges']:,}，超过安全上限 {GRAPH_MAX_EDGES:,}。"
+                    "请减少每道工序的可用机器、工装或人员范围后重试。"
+                )
+            if estimate["estimated_edges"] > GRAPH_WARN_EDGES:
+                update(warning=f"预计 {estimate['estimated_edges']:,} 条边，构建可能持续较长时间，请保持页面开启")
+
+            hg = HeterogeneousGraph()
+
+            def build_progress(processed, total, nodes, edges):
+                ratio = processed / max(total, 1)
+                update(
+                    stage="building",
+                    progress=min(64, round(10 + ratio * 54)),
+                    message=f"正在构建内存图：已处理 {processed:,}/{total:,} 个业务实体，当前 {nodes:,} 个节点、{edges:,} 条边",
+                )
+
+            update(stage="building", progress=10, message="正在构建订单、任务、工序和资源关系")
+            hg.build_from_shopfloor(current_shop, progress_callback=build_progress, deadline=deadline)
+            stats = hg.get_graph_stats()
+
+            def save_progress(written, total):
+                ratio = written / max(total, 1)
+                update(stage="saving", progress=min(96, round(66 + ratio * 30)), message=f"正在保存图谱：{written:,}/{total:,} 条记录")
+
+            update(stage="saving", progress=66, message=f"内存图构建完成，正在保存 {stats['total_nodes']:,} 个节点、{stats['total_edges']:,} 条边")
+            graph_store.save_graph(hg, progress_callback=save_progress, deadline=deadline)
+            update(status="done", stage="done", progress=100, message="图谱构建并保存成功", stats=stats)
+        except TimeoutError as exc:
+            update(status="error", stage="timeout", message="图谱构建超时", error=f"{exc}；已超过 {GRAPH_BUILD_TIMEOUT_S} 秒限制")
+        except Exception as exc:
+            update(status="error", stage="error", message="图谱构建失败", error=str(exc))
+
+    bg.add_task(run)
+    return {"task_id": task_id, "status": "queued", "message": "图谱构建任务已提交", "timeout_s": GRAPH_BUILD_TIMEOUT_S}
+
+
+@app.get("/api/graph/status/{task_id}")
+async def graph_build_status(task_id: str):
+    task = _graph_tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "图谱构建任务不存在或已过期")
+    if task.get("status") in {"queued", "running"}:
+        task["elapsed_s"] = round(time.time() - task["started_at"], 2)
+    return {"task_id": task_id, **task}
 
 @app.get("/api/graph/meta")
 async def graph_meta():
@@ -1568,16 +1678,14 @@ async def graph_meta():
 @app.get("/api/graph/nodes")
 async def graph_nodes(node_type: str = None, search: str = None,
                       limit: int = 200, offset: int = 0):
-    nodes = graph_store.load_nodes(node_type=node_type, search=search)
-    total = len(nodes)
-    return {"total": total, "nodes": nodes[offset:offset + limit]}
+    total, nodes = graph_store.load_nodes(node_type=node_type, search=search, limit=min(max(limit, 1), 1000), offset=max(offset, 0))
+    return {"total": total, "nodes": nodes}
 
 @app.get("/api/graph/edges")
 async def graph_edges(edge_type: str = None, search: str = None,
                       limit: int = 200, offset: int = 0):
-    edges = graph_store.load_edges(edge_type=edge_type, search=search)
-    total = len(edges)
-    return {"total": total, "edges": edges[offset:offset + limit]}
+    total, edges = graph_store.load_edges(edge_type=edge_type, search=search, limit=min(max(limit, 1), 1000), offset=max(offset, 0))
+    return {"total": total, "edges": edges}
 
 @app.get("/api/graph/node/{node_id:path}/neighbors")
 async def node_neighbors(node_id: str):

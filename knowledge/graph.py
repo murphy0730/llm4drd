@@ -7,6 +7,7 @@
 边类型: 订单→任务、任务前置、任务→工序、工序顺序、前置任务约束、机器兼容
 """
 import networkx as nx
+import time
 from typing import Optional
 from ..core.models import ShopFloor
 
@@ -35,9 +36,15 @@ class HeterogeneousGraph:
     def __init__(self):
         self.graph = nx.DiGraph()
 
-    def build_from_shopfloor(self, shop: ShopFloor):
+    def build_from_shopfloor(self, shop: ShopFloor, progress_callback=None, deadline: float | None = None):
         """从车间配置构建异构图"""
         self.graph.clear()
+
+        def report(processed: int, total: int):
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("图谱内存构建超过时间限制")
+            if progress_callback:
+                progress_callback(processed, total, self.graph.number_of_nodes(), self.graph.number_of_edges())
 
         # 添加机器节点
         for mid, machine in shop.machines.items():
@@ -72,7 +79,11 @@ class HeterogeneousGraph:
                 skills=";".join(person.skills),
             )
 
+        report(0, max(1, len(shop.orders) + len(shop.tasks) + len(shop.operations)))
+
         # 添加订单节点
+        processed = 0
+        total_entities = max(1, len(shop.orders) + len(shop.tasks) + len(shop.operations))
         for oid, order in shop.orders.items():
             self.graph.add_node(
                 f"O:{oid}",
@@ -85,6 +96,9 @@ class HeterogeneousGraph:
                 release_time=order.release_time,
                 release_at=shop.time_label(order.release_time),
             )
+            processed += 1
+            if processed % 500 == 0:
+                report(processed, total_entities)
 
         # 添加任务节点
         for tid, task in shop.tasks.items():
@@ -117,6 +131,9 @@ class HeterogeneousGraph:
                     f"T:{pred_tid}", f"T:{tid}",
                     edge_type=self.EDGE_TASK_PREDECESSOR,
                 )
+            processed += 1
+            if processed % 500 == 0:
+                report(processed, total_entities)
 
         # 添加工序节点
         for opid, op in shop.operations.items():
@@ -175,6 +192,11 @@ class HeterogeneousGraph:
                         f"OP:{opid}", f"P:{person.id}",
                         edge_type=self.EDGE_PERSONNEL_ELIGIBLE,
                     )
+            processed += 1
+            if processed % 250 == 0:
+                report(processed, total_entities)
+
+        report(total_entities, total_entities)
 
     def get_graph_stats(self) -> dict:
         """获取图的统计信息"""
