@@ -1,5 +1,5 @@
 """FastAPI 服务 v3 — 完整后端"""
-import os, csv, io, json, inspect, logging, time, uuid, threading
+import os, csv, io, json, inspect, logging, time, uuid, threading, traceback
 from datetime import datetime
 from typing import Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
@@ -1255,6 +1255,7 @@ async def gen_instance(req: GenReq):
     last_result = None
     # 保存到数据库
     inst_store.save_from_shopfloor(shop)
+    graph_store.clear_all()
     return {"status": "ok", "summary": shop.summary(), "calendar": calendar_info, "details": _instance_details(shop)}
 
 @app.get("/api/instance/details")
@@ -1291,6 +1292,7 @@ async def update_order(order_id: str, data: dict):
     global shop
     inst_store.update_order(order_id, data)
     shop = inst_store.build_shopfloor()
+    graph_store.clear_all()
     return {"status": "ok"}
 
 @app.put("/api/instance/task/{task_id}")
@@ -1298,6 +1300,7 @@ async def update_task(task_id: str, data: dict):
     global shop
     inst_store.update_task(task_id, data)
     shop = inst_store.build_shopfloor()
+    graph_store.clear_all()
     return {"status": "ok"}
 
 @app.put("/api/instance/operation/{op_id}")
@@ -1317,6 +1320,7 @@ async def update_operation(op_id: str, data: dict):
     }
     inst_store.update_operation(op_id, data)
     shop = inst_store.build_shopfloor()
+    graph_store.clear_all()
     return {"status": "ok"}
 
 @app.put("/api/instance/machine/{machine_id}")
@@ -1324,6 +1328,7 @@ async def update_machine(machine_id: str, data: dict):
     global shop
     inst_store.update_machine(machine_id, data)
     shop = inst_store.build_shopfloor()
+    graph_store.clear_all()
     return {"status": "ok"}
 
 @app.post("/api/instance/import-excel")
@@ -1411,6 +1416,7 @@ async def import_excel(file: UploadFile = File(...)):
         else:
             downtime_store.clear_all()
         shop = inst_store.build_shopfloor()
+        graph_store.clear_all()
 
         return {"status": "ok", "summary": shop.summary(), "details": _instance_details(shop)}
     except Exception as e:
@@ -1582,9 +1588,7 @@ def _estimate_graph_size(current_shop: ShopFloor) -> dict:
 async def build_graph(bg: BackgroundTasks):
     """在后台构建异构图，并通过状态接口报告规模、阶段、进度与错误。"""
     global shop, _graph_tasks
-    if not shop and inst_store.has_data():
-        shop = inst_store.build_shopfloor()
-    if not shop:
+    if not shop and not inst_store.has_data():
         raise HTTPException(400, "请先生成实例")
 
     for existing_id, existing in _graph_tasks.items():
@@ -1614,10 +1618,17 @@ async def build_graph(bg: BackgroundTasks):
         task["elapsed_s"] = round(time.time() - task["started_at"], 2)
 
     def run():
+        global shop
         deadline = time.monotonic() + GRAPH_BUILD_TIMEOUT_S
         try:
+            if current_shop is None:
+                update(status="running", stage="loading", progress=1, message="正在从数据库恢复车间实例；数据量较大时此步骤可能需要一些时间")
+                build_shop = inst_store.build_shopfloor()
+                shop = build_shop
+            else:
+                build_shop = current_shop
             update(status="running", stage="preflight", progress=3, message="正在估算节点、关系边和内存压力")
-            estimate = _estimate_graph_size(current_shop)
+            estimate = _estimate_graph_size(build_shop)
             update(estimate=estimate, progress=8, message=f"规模预检完成：预计 {estimate['estimated_nodes']:,} 个节点、{estimate['estimated_edges']:,} 条边")
             if estimate["estimated_nodes"] > GRAPH_MAX_NODES:
                 raise ValueError(f"数据量过大：预计节点 {estimate['estimated_nodes']:,}，超过安全上限 {GRAPH_MAX_NODES:,}")
@@ -1640,7 +1651,7 @@ async def build_graph(bg: BackgroundTasks):
                 )
 
             update(stage="building", progress=10, message="正在构建订单、任务、工序和资源关系")
-            hg.build_from_shopfloor(current_shop, progress_callback=build_progress, deadline=deadline)
+            hg.build_from_shopfloor(build_shop, progress_callback=build_progress, deadline=deadline)
             stats = hg.get_graph_stats()
 
             def save_progress(written, total):
@@ -1795,6 +1806,10 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
     _latest_hybrid_task_id = task_id
     _hybrid_tasks[task_id] = {
         "status": "running",
+        "phase": "initializing",
+        "message": "正在初始化优化器并校验实例数据",
+        "created_at": time.time(),
+        "updated_at": time.time(),
         "config": req.model_dump(),
         "current_generation": 0,
         "archive_size": 0,
@@ -1842,6 +1857,16 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
 
             def _progress(snapshot: dict):
                 task = _hybrid_tasks[task_id]
+                phase = snapshot.get("phase", "coarse")
+                phase_messages = {
+                    "coarse": "正在进行近似评估与候选广搜",
+                    "exact_promotion": "正在对优质候选进行精确评估",
+                    "elite_refine": "正在使用 ALNS 精修精英方案",
+                    "finalize": "正在整理 Pareto 前沿与最终方案",
+                }
+                task["phase"] = phase
+                task["message"] = phase_messages.get(phase, "优化任务正在运行")
+                task["updated_at"] = time.time()
                 task["current_generation"] = snapshot.get("generation", 0)
                 task["archive_size"] = snapshot.get("archive_size", 0)
                 task["population_size"] = snapshot.get("population_size", req.population_size)
@@ -1860,6 +1885,9 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             payload = result.to_dict()
             export_payload = result.to_export_dict()
             _hybrid_tasks[task_id]["status"] = "done"
+            _hybrid_tasks[task_id]["phase"] = "done"
+            _hybrid_tasks[task_id]["message"] = "优化完成，方案已可用于评审"
+            _hybrid_tasks[task_id]["updated_at"] = time.time()
             _hybrid_tasks[task_id]["result"] = payload
             _hybrid_tasks[task_id]["export_result"] = export_payload
             _hybrid_tasks[task_id]["archive_size"] = payload["archive_size"]
@@ -1869,8 +1897,18 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             _hybrid_tasks[task_id]["preview"] = payload["solutions"][:3]
             _latest_hybrid_task_id = task_id
         except Exception as exc:
-            _hybrid_tasks[task_id]["status"] = "error"
-            _hybrid_tasks[task_id]["error"] = str(exc)
+            error_message = str(exc).strip() or "优化器抛出了未提供说明的异常"
+            error_trace = traceback.format_exc()
+            logging.exception("Hybrid optimization task %s failed", task_id)
+            _hybrid_tasks[task_id].update({
+                "status": "error",
+                "phase": "error",
+                "message": "优化任务执行失败",
+                "error": error_message,
+                "error_type": type(exc).__name__,
+                "technical_detail": error_trace[-4000:],
+                "updated_at": time.time(),
+            })
 
     bg.add_task(_run)
     return {"task_id": task_id, "status": "started", "config": req.model_dump()}
@@ -1883,6 +1921,10 @@ async def optimize_hybrid_status(task_id: str):
     return {
         "task_id": task_id,
         "status": task["status"],
+        "phase": task.get("phase", "initializing"),
+        "message": task.get("message", "优化任务正在运行"),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at"),
         "config": task.get("config"),
         "current_generation": task.get("current_generation", 0),
         "archive_size": task.get("archive_size", 0),
@@ -1898,6 +1940,8 @@ async def optimize_hybrid_status(task_id: str):
         "history": task.get("history", []),
         "preview": task.get("preview", []),
         "error": task.get("error"),
+        "error_type": task.get("error_type"),
+        "technical_detail": task.get("technical_detail"),
     }
 
 @app.get("/api/optimize/hybrid/result/{task_id}")

@@ -107,6 +107,7 @@ const app = {
   graphMeta: null,
   graphNodes: [],
   graphEdges: [],
+  cyGraphInstance: null,
   graphBuildTaskId: null,
   graphBuildStatus: null,
   graphBuildPollTimer: null,
@@ -138,6 +139,7 @@ const app = {
   aiBusy: false,
   aiLastRecommendedId: null,
   pollTimer: null,
+  optimizePollFailures: 0,
   optimizeForm: {
     objectiveKeys: ["total_tardiness", "makespan", "avg_net_available_utilization"],
     targetSolutionCount: 10,
@@ -189,7 +191,17 @@ const api = {
     const response = await fetch(`${CONFIG.API_BASE}${endpoint}`, options);
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || `HTTP ${response.status}`);
+      let message = text;
+      try {
+        const payload = JSON.parse(text);
+        if (typeof payload?.detail === "string") message = payload.detail;
+        else if (Array.isArray(payload?.detail)) {
+          message = payload.detail.map((item) => item.msg || JSON.stringify(item)).join("；");
+        } else if (payload?.message) message = payload.message;
+      } catch (_) {
+        // Keep the original response text when the server did not return JSON.
+      }
+      throw new Error(message || `请求失败（HTTP ${response.status}）`);
     }
     const contentType = response.headers.get("content-type") || "";
     if (
@@ -407,6 +419,91 @@ function statusChip(label, tone = "info") {
 
 function graphBuildIsRunning() {
   return ["queued", "running"].includes(String(app.graphBuildStatus?.status || "").toLowerCase());
+}
+
+function optimizeIsRunning() {
+  return ["submitting", "started", "queued", "running"].includes(String(app.optimizeStatus?.status || "").toLowerCase());
+}
+
+function optimizePhaseLabel(phase) {
+  return ({
+    submitting: "提交任务",
+    initializing: "初始化",
+    coarse: "候选广搜",
+    exact_promotion: "精确评估",
+    elite_refine: "精英精修",
+    finalize: "整理结果",
+    done: "已完成",
+    error: "执行失败",
+    connection: "连接异常",
+    submit: "提交失败",
+  })[phase] || humanizeCodeLabel(phase || "initializing");
+}
+
+function optimizeProgress(status) {
+  const state = String(status?.status || "").toLowerCase();
+  if (state === "done") return 100;
+  if (state === "error") return Math.min(99, Math.max(2, Number(status?.progress || 0)));
+  if (state === "submitting") return 2;
+  const phase = String(status?.phase || "initializing");
+  const generationRatio = Number(status?.current_generation || 0) / Math.max(1, Number(status?.config?.generations || app.optimizeForm.generations || 1));
+  const timeRatio = Number(status?.elapsed_s || 0) / Math.max(1, Number(status?.config?.time_limit_s || app.optimizeForm.timeLimitS || 1));
+  if (phase === "coarse") return Math.round(8 + Math.min(1, Math.max(generationRatio, timeRatio)) * 57);
+  if (phase === "exact_promotion") return 72;
+  if (phase === "elite_refine") return 84;
+  if (phase === "finalize") return 94;
+  return 5;
+}
+
+function renderOptimizeStatus() {
+  const status = app.optimizeStatus;
+  if (!status) return "";
+  const state = String(status.status || "running").toLowerCase();
+  const failed = state === "error" || state === "failed";
+  const done = state === "done" || state === "completed" || state === "success";
+  const tone = failed ? "danger" : done ? "success" : "info";
+  const label = failed ? "优化失败" : done ? "优化完成" : state === "submitting" ? "正在提交优化任务" : "优化正在运行";
+  const progress = optimizeProgress(status);
+  const message = failed
+    ? (status.error || status.message || "未收到具体错误说明")
+    : done
+      ? (status.message || "优化完成，方案已可用于评审")
+      : (status.message || "任务已提交，正在等待优化器返回进度");
+  return `
+    <article class="optimize-run-status ${tone}" id="optimize-run-status" role="status" aria-live="polite">
+      <div class="optimize-run-head">
+        <div>
+          <span class="eyebrow">Live optimization</span>
+          <h3>${escapeHtml(label)}</h3>
+        </div>
+        ${statusChip(failed ? "失败" : done ? "完成" : `${progress}%`, tone)}
+      </div>
+      <div class="optimize-run-progress"><i style="width:${progress}%"></i></div>
+      <p class="optimize-run-message">${escapeHtml(message)}</p>
+      <div class="optimize-run-meta">
+        <span>阶段：${escapeHtml(optimizePhaseLabel(status.phase || state))}</span>
+        <span>任务 ID：${escapeHtml(app.optimizeTaskId || "待分配")}</span>
+        <span>已耗时：${formatDurationSeconds(status.elapsed_s || 0)}</span>
+        <span>当前代数：${formatInt(status.current_generation || 0)} / ${formatInt(status.config?.generations || app.optimizeForm.generations)}</span>
+        <span>最近更新：${status.updated_at || status.received_at ? escapeHtml(formatDateTime(status.updated_at || status.received_at)) : "等待首次进度"}</span>
+      </div>
+      ${failed ? `
+        <div class="optimize-error-detail">
+          <strong>${escapeHtml(status.error_type ? `错误类型：${status.error_type}` : "失败原因")}</strong>
+          <span>请根据上方原因检查实例数据与优化参数后重试；若仍失败，可将下方技术详情提供给开发人员。</span>
+          ${status.technical_detail ? `<details><summary>查看技术详情</summary><pre>${escapeHtml(status.technical_detail)}</pre></details>` : ""}
+        </div>
+      ` : ""}
+      ${!failed ? `
+        <div class="optimize-run-stats">
+          <span>近似评估 <strong>${formatInt(status.approximate_evaluations || 0)}</strong></span>
+          <span>精确评估 <strong>${formatInt(status.exact_evaluations || 0)}</strong></span>
+          <span>候选池 <strong>${formatInt(status.coarse_pool_size || status.archive_size || 0)}</strong></span>
+          <span>可行率 <strong>${formatPercent(status.feasible_ratio || 0)}</strong></span>
+        </div>
+      ` : ""}
+    </article>
+  `;
 }
 
 function renderGraphBuildStatus() {
@@ -1237,8 +1334,10 @@ function updateShell() {
   el("topbar-resources").textContent = hasScene
     ? `${summary.machines || 0} 机 / ${summary.toolings || 0} 工装 / ${summary.personnel || 0} 人员`
     : "-";
-  el("topbar-opt-status").textContent = app.optimizeStatus?.status === "running"
+  el("topbar-opt-status").textContent = optimizeIsRunning()
     ? "优化进行中"
+    : ["error", "failed"].includes(String(app.optimizeStatus?.status || "").toLowerCase())
+      ? "优化失败"
     : app.optimizeResult
       ? "优化已完成"
       : "未启动";
@@ -1258,7 +1357,14 @@ function updateShell() {
   el("panel-selected-tardiness").textContent = solution ? metricDisplay(solution, "total_tardiness") : "-";
   el("panel-selected-utilization").textContent = solution ? metricDisplay(solution, "avg_net_available_utilization") : "-";
 
-  el("panel-opt-status").textContent = app.optimizeStatus?.status || (app.optimizeResult ? "done" : "未启动");
+  const optimizeState = String(app.optimizeStatus?.status || "").toLowerCase();
+  el("panel-opt-status").textContent = optimizeIsRunning()
+    ? "运行中"
+    : ["error", "failed"].includes(optimizeState)
+      ? "失败"
+      : app.optimizeResult
+        ? "已完成"
+        : "未启动";
   el("panel-opt-count").textContent = formatInt(app.optimizeResult?.found_solution_count || app.optimizeResult?.solutions?.length || 0);
   el("panel-opt-evals").textContent = formatInt(app.optimizeStatus?.total_evaluations || app.optimizeResult?.total_evaluations || 0);
   el("panel-opt-duration").textContent = formatDurationSeconds(app.optimizeStatus?.elapsed_s || app.optimizeResult?.elapsed_s || 0);
@@ -3148,9 +3254,9 @@ function renderInsights() {
           { footer: `当前仅预览前 ${Math.min(18, app.graphNodes.length)} 个节点。` },
         )}
       </article>
-      ${renderInteractiveGraph()}
+      ${renderLegacyCytoscapeGraph()}
     `;
-    requestAnimationFrame(() => mountInteractiveGraph());
+    requestAnimationFrame(() => mountLegacyCytoscapeGraph());
     return;
   }
 
@@ -3401,7 +3507,8 @@ function renderWorkflowStep3() {
   const focus = app.workflowFocus || "graph";
   const simMetrics = app.simResult?.metrics || {};
   const graphPanel = `
-    <article class="surface-card">
+    <div class="workflow-stage-stack">
+      <article class="surface-card">
       <div class="card-head"><h3>图谱构建</h3><p>构建订单 - 任务 - 工序 - 机器 - 工装 - 人员异构图，并作为后续结构洞察与优化引导基础。</p></div>
       ${renderGraphBuildStatus()}
       ${app.graphMeta ? renderKeyValueGrid([
@@ -3415,7 +3522,9 @@ function renderWorkflowStep3() {
         <button class="btn btn-ghost" type="button" data-nav-jump="structure-analysis">查看洞察</button>
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">切到仿真视图</button>
       </div>
-    </article>
+      </article>
+      ${app.graphMeta ? renderLegacyCytoscapeGraph() : ""}
+    </div>
   `;
 
   const simulationPanel = `
@@ -3497,7 +3606,7 @@ function renderWorkflowStep3() {
         ${simulationDetail || ""}
       </div>
     ` : `
-      <div class="two-column">
+      <div class="workflow-stage-stack">
         ${graphPanel}
         ${simulationPanel}
       </div>
@@ -3558,12 +3667,13 @@ function renderWorkflowStep4() {
         ? `建议约 ${recommendedBudget} 秒。当前保留手动值 ${app.optimizeForm.timeLimitS} 秒，可随时恢复建议值。`
         : `已按当前规模与参数自动推荐 ${recommendedBudget} 秒，可继续手动修改。`}</div>
       <div class="form-actions">
-        <button class="btn btn-primary" type="button" data-action="start-hybrid-optimize">启动优化</button>
+        <button class="btn btn-primary" type="button" data-action="start-hybrid-optimize" ${optimizeIsRunning() ? "disabled aria-busy=\"true\"" : ""}>${optimizeIsRunning() ? "优化运行中…" : "启动优化"}</button>
         <button class="btn btn-secondary" type="button" data-action="apply-budget-recommendation">采用建议预算</button>
         <button class="btn btn-ghost" type="button" data-nav-jump="pareto-library">进入方案库</button>
       </div>
     </article>
-    ${(status || result) ? `
+    ${renderOptimizeStatus()}
+    ${(status || result) && !["error", "failed"].includes(String(status?.status || "").toLowerCase()) ? `
       <article class="surface-card">
         <div class="card-head"><h3>优化进度与结果</h3><p>自动显示近似评估、精确评估与候选池规模。</p></div>
         ${renderKpiCards([
@@ -3637,6 +3747,9 @@ function renderWorkflow() {
   if (app.workflowStep === 4) html = renderWorkflowStep4();
   if (app.workflowStep === 5) html = renderWorkflowStep5();
   container.innerHTML = html;
+  if (app.workflowStep === 3 && (app.workflowFocus || "graph") === "graph" && app.graphMeta) {
+    requestAnimationFrame(() => mountLegacyCytoscapeGraph());
+  }
 }
 
 function renderConfigInstanceTab() {
@@ -4982,6 +5095,242 @@ function mountInteractiveGraph() {
   });
 }
 
+function legacyGraphDataset() {
+  const allNodes = asArray(app.graphNodes).map(normalizeGraphNode).filter((node) => node.id);
+  const allEdges = asArray(app.graphEdges).map(normalizeGraphEdge).filter((edge) => edge.source && edge.target);
+  if (allNodes.length <= 300) {
+    const nodeIds = new Set(allNodes.map((node) => node.id));
+    return {
+      nodes: allNodes,
+      edges: allEdges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)).slice(0, 1200),
+    };
+  }
+  const graph = buildGraphViewModel();
+  return {
+    nodes: asArray(graph?.visibleNodes),
+    edges: asArray(graph?.visibleEdges).slice(0, 1200),
+  };
+}
+
+function legacyGraphDetailContent(selectedNode, selectedEdges) {
+  return `
+    <div class="card-head"><h3>节点详情</h3><p>点击左侧节点后，这里会同步显示属性与直接关系。</p></div>
+    ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, selectedEdges)) : ""}
+    ${selectedEdges.length ? renderSimpleTable(
+      ["关系", "来源", "目标"],
+      selectedEdges.slice(0, 16).map((edge) => [
+        escapeHtml(humanizeCodeLabel(edge.edgeType || "-")),
+        escapeHtml(edge.source),
+        escapeHtml(edge.target),
+      ]),
+      { footer: selectedEdges.length > 16 ? `当前节点共 ${selectedEdges.length} 条直接关系，仅展示前 16 条。` : "" },
+    ) : renderEmptyState("暂无直接关系", "当前节点在已加载样本中没有直接关系。")}
+  `;
+}
+
+function focusLegacyCytoscapeNode(nodeId, options = {}) {
+  const cy = app.cyGraphInstance;
+  const node = cy?.getElementById(nodeId || "");
+  if (!node?.length) return false;
+
+  app.selectedGraphNodeId = node.id();
+  cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
+  cy.elements().addClass("cy-dimmed");
+  const neighborhood = node.neighborhood();
+  node.removeClass("cy-dimmed").addClass("cy-selected");
+  neighborhood.nodes().removeClass("cy-dimmed").addClass("cy-neighbor");
+  node.connectedEdges().removeClass("cy-dimmed").addClass("cy-neighbor-edge");
+
+  const { nodes, edges } = legacyGraphDataset();
+  const selectedNode = nodes.find((item) => item.id === node.id()) || null;
+  const selectedEdges = edges.filter((edge) => edge.source === node.id() || edge.target === node.id());
+  const root = document.fullscreenElement?.classList.contains("legacy-graph-workbench")
+    ? document.fullscreenElement
+    : document.querySelector(".page.active .legacy-graph-workbench");
+  const detail = root?.querySelector(".graph-detail-card");
+  if (detail) detail.innerHTML = legacyGraphDetailContent(selectedNode, selectedEdges);
+  if (options.fit) cy.animate({ fit: { eles: node.union(neighborhood), padding: 70 } }, { duration: 250 });
+  return true;
+}
+
+function renderLegacyCytoscapeGraph() {
+  const { nodes, edges } = legacyGraphDataset();
+  if (!nodes.length) {
+    return renderEmptyState("暂无图谱节点", "请先构建图谱，或确认当前实例已正确加载。");
+  }
+
+  const selectedId = nodes.some((node) => node.id === app.selectedGraphNodeId)
+    ? app.selectedGraphNodeId
+    : nodes[0].id;
+  app.selectedGraphNodeId = selectedId;
+  const selectedNode = nodes.find((node) => node.id === selectedId) || null;
+  const selectedEdges = edges.filter((edge) => edge.source === selectedId || edge.target === selectedId);
+
+  return `
+    <div class="surface-card graph-workbench legacy-graph-workbench">
+      <div class="card-head">
+        <h3>可交互有向异构图</h3>
+        <p>已迁移旧版 Cytoscape + Dagre 图谱组件，并接入当前版本的后台构建与分页数据。</p>
+      </div>
+      <div class="graph-toolbar legacy-graph-toolbar">
+        <label>
+          <span>布局方向</span>
+          <select data-cy-rankdir>
+            <option value="TB">从上到下</option>
+            <option value="LR">从左到右</option>
+          </select>
+        </label>
+        <label class="graph-search">
+          <span>搜索节点</span>
+          <input type="search" data-cy-search placeholder="输入订单、任务、工序或资源名称">
+        </label>
+        <label class="legacy-graph-switch"><input type="checkbox" data-cy-resource-edges checked> 显示资源可行边</label>
+        <button class="btn btn-ghost" type="button" data-cy-fit>适配视图</button>
+        <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen" aria-pressed="false">全屏查看</button>
+      </div>
+      <div class="graph-stage-meta">
+        <span>显示节点 ${formatInt(nodes.length)} / ${formatInt(app.graphMeta?.total_nodes || nodes.length)}</span>
+        <span>显示边 ${formatInt(edges.length)} / ${formatInt(app.graphMeta?.total_edges || edges.length)}</span>
+        <span>单击节点查看邻域，双击节点聚焦</span>
+      </div>
+      <div class="graph-neighbor-pills legacy-graph-shortcuts" aria-label="节点类型快捷入口">
+        ${GRAPH_NODE_ORDER.map((type) => nodes.find((node) => node.type === type)).filter(Boolean).map((node) => `
+          <button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(node.id)}" data-graph-node="${escapeHtml(node.id)}" data-node-label="${escapeHtml(node.label || node.id)}" data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}">
+            ${escapeHtml(graphTypeLabel(node.type))}：${escapeHtml(node.label || node.id)}
+          </button>
+        `).join("")}
+      </div>
+      <div class="split-panel graph-split">
+        <article class="surface-card graph-stage-card">
+          <div class="graph-shell legacy-graph-shell"><div class="cy-graph" data-cy-graph></div></div>
+          <div class="legend graph-legend">
+            ${GRAPH_NODE_ORDER.map((type) => `
+              <span class="legend-item"><span class="legend-swatch" style="background:${graphTypeColor(type)}"></span>${escapeHtml(graphTypeLabel(type))}</span>
+            `).join("")}
+          </div>
+        </article>
+        <article class="surface-card graph-detail-card">
+          ${legacyGraphDetailContent(selectedNode, selectedEdges)}
+        </article>
+      </div>
+      <div class="cy-graph-accessibility" aria-hidden="true">
+        ${nodes.map((node) => `<button type="button" data-action="focus-graph-node" data-id="${escapeHtml(node.id)}" data-graph-node="${escapeHtml(node.id)}" data-node-label="${escapeHtml(node.label || node.id)}" data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}"></button>`).join("")}
+        ${edges.map((edge) => `<span data-graph-link data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}"></span>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function mountLegacyCytoscapeGraph() {
+  const container = document.querySelector(".page.active [data-cy-graph]");
+  if (!container || container.dataset.bound === "1") return;
+  container.dataset.bound = "1";
+
+  if (typeof window.cytoscape !== "function") {
+    container.innerHTML = '<div class="empty-state"><h3>图谱组件加载失败</h3><p>请确认 /static/vendor 下的 Cytoscape 运行库完整。</p></div>';
+    return;
+  }
+
+  if (app.cyGraphInstance) app.cyGraphInstance.destroy();
+  const root = container.closest(".legacy-graph-workbench");
+  const { nodes, edges } = legacyGraphDataset();
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const elements = [
+    ...nodes.map((node) => ({
+      data: {
+        id: node.id,
+        label: node.label || node.entity_id || node.id,
+        node_type: node.type,
+        entity_id: node.entity_id || "",
+      },
+    })),
+    ...edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)).map((edge, index) => ({
+      data: {
+        id: `cy-edge-${edge.id || index}`,
+        source: edge.source,
+        target: edge.target,
+        edge_type: edge.edgeType,
+        edge_group: edge.group,
+      },
+    })),
+  ];
+
+  const cy = window.cytoscape({
+    container,
+    elements,
+    style: [
+      { selector: "node", style: { "label": "data(label)", "font-size": 9, "color": "#32485a", "text-valign": "bottom", "text-margin-y": 7, "text-max-width": 100, "text-wrap": "ellipsis", "width": 24, "height": 24, "border-width": 2, "border-color": "#ffffff" } },
+      { selector: 'node[node_type="order"]', style: { "background-color": graphTypeColor("order"), "shape": "diamond", "width": 38, "height": 38, "font-size": 11, "font-weight": 700 } },
+      { selector: 'node[node_type="task"]', style: { "background-color": graphTypeColor("task"), "shape": "round-rectangle", "width": 32, "height": 22 } },
+      { selector: 'node[node_type="operation"]', style: { "background-color": graphTypeColor("operation"), "shape": "ellipse", "width": 19, "height": 19, "font-size": 8 } },
+      { selector: 'node[node_type="machine"]', style: { "background-color": graphTypeColor("machine"), "shape": "hexagon", "width": 32, "height": 32 } },
+      { selector: 'node[node_type="tooling"]', style: { "background-color": graphTypeColor("tooling"), "shape": "round-diamond", "width": 29, "height": 29 } },
+      { selector: 'node[node_type="personnel"]', style: { "background-color": graphTypeColor("personnel"), "shape": "pentagon", "width": 29, "height": 29 } },
+      { selector: "edge", style: { "width": 1.2, "line-color": "#9caebe", "target-arrow-color": "#9caebe", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 0.7, "opacity": 0.62 } },
+      { selector: 'edge[edge_group="structure"]', style: { "line-color": "#0f4c81", "target-arrow-color": "#0f4c81", "opacity": 0.72 } },
+      { selector: 'edge[edge_group="resource"]', style: { "line-style": "dashed", "line-color": "#b76800", "target-arrow-color": "#b76800", "opacity": 0.58 } },
+      { selector: ".cy-selected", style: { "border-width": 5, "border-color": "#102f4c", "width": 46, "height": 46, "font-size": 12, "font-weight": 700, "z-index": 9999 } },
+      { selector: ".cy-neighbor", style: { "border-width": 3, "border-color": "#0f4c81", "opacity": 1, "z-index": 100 } },
+      { selector: ".cy-neighbor-edge", style: { "width": 3, "opacity": 1, "z-index": 100 } },
+      { selector: ".cy-dimmed", style: { "opacity": 0.1 } },
+      { selector: ".cy-search-match", style: { "border-width": 5, "border-color": "#d97706", "width": 42, "height": 42, "z-index": 9999 } },
+    ],
+    minZoom: 0.05,
+    maxZoom: 5,
+    boxSelectionEnabled: false,
+  });
+  app.cyGraphInstance = cy;
+
+  const runLayout = () => {
+    const rankDir = root?.querySelector("[data-cy-rankdir]")?.value || "TB";
+    try {
+      cy.layout({ name: "dagre", rankDir, rankSep: 150, nodeSep: 28, edgeSep: 10, ranker: "tight-tree", padding: 40, fit: true, animate: false }).run();
+    } catch (error) {
+      console.warn("Dagre layout unavailable, falling back to breadthfirst", error);
+      cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: true }).run();
+    }
+  };
+  runLayout();
+  const initial = cy.getElementById(app.selectedGraphNodeId || "");
+  if (initial.length) {
+    focusLegacyCytoscapeNode(initial.id());
+    cy.fit(initial.union(initial.neighborhood()), 70);
+  }
+
+  cy.on("tap", "node", (event) => {
+    focusLegacyCytoscapeNode(event.target.id());
+  });
+  cy.on("tap", "edge", (event) => {
+    const edge = event.target;
+    const source = edge.source();
+    focusLegacyCytoscapeNode(source.id());
+    edge.removeClass("cy-dimmed").addClass("cy-neighbor-edge");
+    edge.target().removeClass("cy-dimmed").addClass("cy-neighbor");
+  });
+  cy.on("dbltap", "node", (event) => {
+    cy.animate({ fit: { eles: event.target.union(event.target.neighborhood()), padding: 70 } }, { duration: 350 });
+  });
+  cy.on("tap", (event) => {
+    if (event.target !== cy) return;
+    cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
+  });
+
+  root?.querySelector("[data-cy-rankdir]")?.addEventListener("change", runLayout);
+  root?.querySelector("[data-cy-fit]")?.addEventListener("click", () => cy.fit(undefined, 40));
+  root?.querySelector("[data-cy-resource-edges]")?.addEventListener("change", (event) => {
+    cy.edges('[edge_group="resource"]').style("display", event.target.checked ? "element" : "none");
+    runLayout();
+  });
+  root?.querySelector("[data-cy-search]")?.addEventListener("input", (event) => {
+    const term = String(event.target.value || "").trim().toLowerCase();
+    cy.elements().removeClass("cy-search-match");
+    if (!term) return;
+    const matches = cy.nodes().filter((node) => `${node.id()} ${node.data("label") || ""} ${node.data("entity_id") || ""}`.toLowerCase().includes(term));
+    matches.addClass("cy-search-match");
+    if (matches.length) cy.animate({ fit: { eles: matches, padding: 90 } }, { duration: 250 });
+  });
+}
+
 
 async function renderCurrentPage() {
   ensureReviewSelection();
@@ -5061,11 +5410,23 @@ function collectOptimizeForm() {
 async function pollOptimizeStatus() {
   if (!app.optimizeTaskId) return;
   try {
-    app.optimizeStatus = await api.getOptimizeStatus(app.optimizeTaskId);
+    app.optimizeStatus = {
+      ...await api.getOptimizeStatus(app.optimizeTaskId),
+      received_at: Date.now() / 1000,
+    };
+    app.optimizePollFailures = 0;
     updateShell();
     if (["workflow", "dashboard", "review", "system"].includes(app.currentPage)) await renderCurrentPage();
     const lowered = String(app.optimizeStatus?.status || "").toLowerCase();
-    if (["done", "completed", "success", "failed", "error"].includes(lowered)) {
+    if (["failed", "error"].includes(lowered)) {
+      window.clearInterval(app.pollTimer);
+      app.pollTimer = null;
+      updateShell();
+      await renderCurrentPage();
+      toast(`优化失败：${app.optimizeStatus?.error || app.optimizeStatus?.message || "未收到具体原因"}`, "error");
+      return;
+    }
+    if (["done", "completed", "success"].includes(lowered)) {
       window.clearInterval(app.pollTimer);
       app.pollTimer = null;
       app.optimizeResult = await api.getOptimizeResult(app.optimizeTaskId);
@@ -5073,12 +5434,25 @@ async function pollOptimizeStatus() {
       ensureReviewSelection();
       updateShell();
       await renderCurrentPage();
-      toast(lowered.includes("fail") ? `优化失败：${app.optimizeStatus?.error || "未知错误"}` : "混合优化已完成。", lowered.includes("fail") ? "warning" : "success");
+      toast("混合优化已完成。", "success");
     }
   } catch (error) {
+    app.optimizePollFailures += 1;
+    if (app.optimizePollFailures < 3) return;
     window.clearInterval(app.pollTimer);
     app.pollTimer = null;
-    toast(`轮询优化状态失败：${error.message}`, "warning");
+    app.optimizeStatus = {
+      ...(app.optimizeStatus || {}),
+      status: "error",
+      phase: "connection",
+      message: "连续 3 次无法获取优化进度",
+      error: `无法连接到优化状态服务：${error.message}`,
+      error_type: "StatusConnectionError",
+      updated_at: Date.now() / 1000,
+    };
+    updateShell();
+    await renderCurrentPage();
+    toast(app.optimizeStatus.error, "error");
   }
 }
 
@@ -5187,6 +5561,28 @@ async function fetchGraphDataset(meta) {
   };
 }
 
+async function loadExistingGraph() {
+  try {
+    const meta = await api.getGraphMeta();
+    const { nodes, edges } = await fetchGraphDataset(meta);
+    app.graphMeta = {
+      ...meta,
+      created_at: tryParseDate(meta?.created_at) ? meta.created_at : new Date().toISOString(),
+    };
+    app.graphNodes = asArray(nodes);
+    app.graphEdges = asArray(edges);
+    const initialNode = app.graphNodes.find((node) => (node.node_type || node.type) === "order") || app.graphNodes[0];
+    app.selectedGraphNodeId = initialNode?.node_id || initialNode?.id || null;
+    resetGraphView({ preserveFilters: true });
+    return true;
+  } catch (error) {
+    app.graphMeta = null;
+    app.graphNodes = [];
+    app.graphEdges = [];
+    return false;
+  }
+}
+
 function stopGraphBuildPolling() {
   if (app.graphBuildPollTimer) window.clearTimeout(app.graphBuildPollTimer);
   app.graphBuildPollTimer = null;
@@ -5216,7 +5612,8 @@ async function finishGraphBuild(status) {
   };
   app.graphNodes = asArray(nodes?.items || nodes?.nodes || nodes);
   app.graphEdges = asArray(edges?.items || edges?.edges || edges);
-  app.selectedGraphNodeId = app.graphNodes[0]?.node_id || app.graphNodes[0]?.id || null;
+  const initialNode = app.graphNodes.find((node) => (node.node_type || node.type) === "order") || app.graphNodes[0];
+  app.selectedGraphNodeId = initialNode?.node_id || initialNode?.id || null;
   resetGraphView({ preserveFilters: true });
   app.graphBuildStatus = { ...status, status: "done", stage: "done", progress: 100, message: "图谱构建并加载成功" };
   toast(`图谱构建完成：${formatInt(meta.total_nodes)} 个节点、${formatInt(meta.total_edges)} 条边。`, "success");
@@ -5313,18 +5710,46 @@ async function handleStartOptimize() {
     toast("请至少选择 1 个优化目标。", "warning");
     return;
   }
+  app.optimizeStatus = {
+    status: "submitting",
+    phase: "submitting",
+    message: "正在提交参数并创建优化任务",
+    elapsed_s: 0,
+    updated_at: Date.now() / 1000,
+  };
+  app.optimizeTaskId = null;
+  app.optimizePollFailures = 0;
+  await renderCurrentPage();
+  toast("正在提交优化任务，请稍候…", "info");
   try {
     const result = await api.startHybridOptimize(payload);
     app.optimizeTaskId = result.task_id;
-    app.optimizeStatus = { status: result.status || "running" };
+    app.optimizeStatus = {
+      status: "running",
+      phase: "initializing",
+      message: "任务已创建，正在初始化优化器",
+      config: result.config || payload,
+      elapsed_s: 0,
+      updated_at: Date.now() / 1000,
+    };
     app.optimizeResult = null;
     app.referenceSolutions = [];
     app.exactReference = null;
     startOptimizePolling();
+    await renderCurrentPage();
+    toast(`优化任务 ${result.task_id} 已启动，页面将持续更新运行状态。`, "success");
     await pollOptimizeStatus();
-    toast("混合优化已启动。", "success");
   } catch (error) {
-    toast(`启动优化失败：${error.message}`, "warning");
+    app.optimizeStatus = {
+      status: "error",
+      phase: "submit",
+      message: "优化任务未能启动",
+      error: error.message,
+      error_type: "SubmitError",
+      updated_at: Date.now() / 1000,
+    };
+    await renderCurrentPage();
+    toast(`启动优化失败：${error.message}`, "error");
   }
 }
 
@@ -5614,8 +6039,9 @@ async function handleAction(action, target) {
   if (action === "toggle-help") return toast("左侧按流程切换页面，右侧卡片会始终显示当前场景和方案上下文。");
   if (action === "focus-graph-node") {
     if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
+    if (target.closest(".legacy-graph-workbench") && focusLegacyCytoscapeNode(target.dataset.id, { fit: true })) return;
     app.selectedGraphNodeId = target.dataset.id;
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "set-graph-mode") {
     app.graphView.mode = target.dataset.mode || "focus";
@@ -5733,7 +6159,10 @@ async function handleAction(action, target) {
   }
   if (action === "toggle-graph-fullscreen") {
     const shell = target.closest(".graph-workbench") || document.querySelector(".graph-workbench");
-    if (!shell || !shell.requestFullscreen) return;
+    if (!shell || !shell.requestFullscreen) {
+      toast("当前浏览器不支持图谱全屏显示。", "warning");
+      return;
+    }
     if (document.fullscreenElement === shell) {
       if (document.exitFullscreen) await document.exitFullscreen();
       return;
@@ -5749,6 +6178,26 @@ async function handleAction(action, target) {
 }
 
 function bindGlobalEvents() {
+  document.addEventListener("fullscreenchange", () => {
+    const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-workbench")
+      ? document.fullscreenElement
+      : null;
+    document.querySelectorAll('[data-action="toggle-graph-fullscreen"]').forEach((button) => {
+      const active = !!fullscreenGraph && button.closest(".graph-workbench") === fullscreenGraph;
+      button.textContent = active ? "退出全屏" : "全屏查看";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    const resizeGraph = () => {
+      const cy = app.cyGraphInstance;
+      if (!cy) return;
+      cy.resize();
+      const selected = cy.getElementById(app.selectedGraphNodeId || "");
+      if (selected.length) cy.fit(selected.union(selected.neighborhood()), fullscreenGraph ? 110 : 70);
+    };
+    window.requestAnimationFrame(resizeGraph);
+    window.setTimeout(resizeGraph, 120);
+  });
+
   document.addEventListener("click", async (event) => {
     const insightTabTarget = event.target.closest("[data-insight-tab]");
     if (insightTabTarget) {
@@ -5915,6 +6364,7 @@ async function init() {
   bindGlobalEvents();
   await loadCatalogs();
   await syncCurrentScene(true);
+  if (app.currentScene) await loadExistingGraph();
   const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "scene-library");
   await navigate(navKey, false);
 }

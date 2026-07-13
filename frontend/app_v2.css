@@ -1198,6 +1198,39 @@ a {
   pointer-events: none;
 }
 
+.legacy-graph-shell {
+  min-height: 650px;
+  padding: 0;
+}
+
+.cy-graph {
+  width: 100%;
+  height: 650px;
+  border-radius: inherit;
+}
+
+.legacy-graph-toolbar > label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.legacy-graph-switch {
+  display: flex !important;
+  grid-auto-flow: column;
+  align-items: center;
+  justify-content: start;
+}
+
+.legacy-graph-switch input {
+  width: auto;
+}
+
+.cy-graph-accessibility {
+  display: none;
+}
+
 .graph-workbench {
   display: grid;
   gap: 16px;
@@ -1215,6 +1248,45 @@ a {
 
 .graph-workbench:fullscreen .graph-svg {
   min-height: calc(100vh - 340px);
+}
+
+.legacy-graph-workbench:fullscreen {
+  box-sizing: border-box;
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+}
+
+.legacy-graph-workbench:fullscreen .legacy-graph-toolbar {
+  flex-wrap: nowrap;
+}
+
+.legacy-graph-workbench:fullscreen .graph-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+}
+
+.legacy-graph-workbench:fullscreen .graph-stage-card {
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-content: stretch;
+  min-height: 0;
+  height: 100%;
+}
+
+.legacy-graph-workbench:fullscreen .legacy-graph-shell,
+.legacy-graph-workbench:fullscreen .cy-graph {
+  min-height: 0;
+  height: 100%;
+}
+
+.legacy-graph-workbench:fullscreen .graph-detail-card {
+  display: none;
 }
 
 .graph-toolbar {

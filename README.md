@@ -241,6 +241,8 @@ SQLite（WAL 模式）：
 | `/api/online/status` | GET | 获取当前状态 |
 | `/api/downtime` | GET/POST | 停机记录管理 |
 | `/api/downtime/{id}` | PUT/DELETE | 停机记录编辑 |
+| `/api/graph/build` | POST | 提交后台图谱构建任务 |
+| `/api/graph/status/{id}` | GET | 查询图谱规模、阶段、进度与错误 |
 
 ---
 
@@ -264,6 +266,13 @@ SQLite（WAL 模式）：
 ```
 
 环境变量（优先级高于配置文件）：`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM4DRD_DB`, `LLM4DRD_CONFIG`
+
+大规模图谱构建保护可通过以下环境变量调整：
+
+- `LLM4DRD_GRAPH_TIMEOUT_S`：构建与保存总超时，默认 180 秒
+- `LLM4DRD_GRAPH_WARN_EDGES`：关系边预警阈值，默认 300,000
+- `LLM4DRD_GRAPH_MAX_EDGES`：关系边安全上限，默认 2,000,000
+- `LLM4DRD_GRAPH_MAX_NODES`：节点安全上限，默认 100,000
 
 ---
 
