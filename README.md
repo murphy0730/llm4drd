@@ -72,8 +72,8 @@ python -m llm4drd_platform
 ### 启动 Web 服务
 
 ```bash
-uvicorn llm4drd_platform.api.server:app --reload --port 8000
-# 前端: http://localhost:8000
+uvicorn llm4drd_platform.api.server:app --reload --port 8888
+# 前端: http://127.0.0.1:8888/
 ```
 
 ---
@@ -221,7 +221,7 @@ SQLite（WAL 模式）：
 
 ## REST API
 
-启动后访问 `http://localhost:8000/docs` 查看交互式 API 文档。
+启动后访问 `http://127.0.0.1:8888/docs` 查看交互式 API 文档。
 
 | 路径 | 方法 | 说明 |
 |------|------|------|

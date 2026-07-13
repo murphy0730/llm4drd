@@ -51,7 +51,8 @@ async def startup():
 
 @app.get("/")
 async def index():
-    f = os.path.join(FRONT, "index.html")
+    # Keep one supported HTML/JavaScript contract for the application shell.
+    f = os.path.join(FRONT, "index_v2.html")
     return FileResponse(f) if os.path.exists(f) else {"msg": "API running"}
 
 @app.get("/v2")

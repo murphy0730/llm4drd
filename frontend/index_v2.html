@@ -6,25 +6,28 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-  <title>LLM4DRD 智能调度决策中枢 V2</title>
+  <title>LLM4DRD 智能调度决策中枢</title>
   <link rel="stylesheet" href="/static/app_v2.css?v=20260327-17">
+  <link rel="stylesheet" href="/static/design-system.css?v=20260713-1">
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand-block">
-        <div class="brand-mark">LLM4DRD</div>
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M7.2 18.4 18.6 7M15.1 5.7l3.2-1.6 1.6 3.2-1.7 1.6M5.2 15.8c-1.7-2.5-1.4-5.6.6-7.8M8.1 17.7c-2.7-3.5-2.4-8.4.7-11.5"/></svg>
+        </div>
         <div class="brand-copy">
-          <h1>智能调度决策中枢</h1>
-          <p>面向领导展示、业务决策与计划执行的工业级智能排产前台</p>
+          <h1>LLM4DRD</h1>
+          <p>智能调度决策中枢</p>
         </div>
       </div>
 
       <div class="topbar-scene">
-        <span class="eyebrow">当前场景</span>
+        <span class="eyebrow">当前实例</span>
         <button class="scene-pill" type="button" data-action="goto-scene-library">
-          <span id="topbar-scene-name">未加载场景</span>
-          <span class="scene-pill-meta" id="topbar-scene-meta">点击切换或同步当前实例</span>
+          <span id="topbar-scene-name">未加载实例</span>
+          <span class="scene-pill-meta" id="topbar-scene-meta">查看实例摘要</span>
         </button>
       </div>
 
@@ -50,53 +53,23 @@
     </header>
 
     <div class="workspace">
-      <aside class="sidebar">
+      <aside class="sidebar" aria-label="主导航">
         <div class="sidebar-group">
-          <div class="sidebar-title">场景</div>
-          <button class="nav-item" type="button" data-nav="scene-library">场景库</button>
-          <button class="nav-item" type="button" data-nav="new-scene">新建场景</button>
+          <div class="sidebar-title">调度流程</div>
+          <button class="nav-item requires-scene" type="button" data-nav="dashboard"><span class="nav-index">01</span>工作概览</button>
+          <button class="nav-item requires-scene" type="button" data-nav="config"><span class="nav-index">02</span>实例与约束</button>
+          <button class="nav-item requires-scene" type="button" data-nav="simulate"><span class="nav-index">03</span>仿真与洞察</button>
+          <button class="nav-item requires-scene" type="button" data-nav="optimize-launch"><span class="nav-index">04</span>优化求解</button>
+          <button class="nav-item requires-scene" type="button" data-nav="solution-review"><span class="nav-index">05</span>方案评审</button>
         </div>
 
-        <div class="sidebar-group requires-scene">
-          <div class="sidebar-title">决策路径</div>
-          <button class="nav-item" type="button" data-nav="dashboard">智能仪表板</button>
-          <button class="nav-item nav-parent" type="button" data-nav="insights">洞察中心</button>
-          <div class="nav-submenu">
-            <button class="nav-subitem" type="button" data-nav="structure-analysis">结构分析</button>
-            <button class="nav-subitem" type="button" data-nav="resource-analysis">资源分析</button>
-            <button class="nav-subitem" type="button" data-nav="bottleneck-analysis">瓶颈与关键路径</button>
-          </div>
-          <button class="nav-item" type="button" data-nav="solution-review">方案评审</button>
-        </div>
-
-        <div class="sidebar-group requires-scene">
-          <div class="sidebar-title">操作工作台</div>
-          <button class="nav-item" type="button" data-nav="workflow">工作台</button>
-          <button class="nav-item nav-parent" type="button" data-nav="config">问题配置</button>
-          <div class="nav-submenu">
-            <button class="nav-subitem" type="button" data-nav="instance-setup">实例生成与导入</button>
-            <button class="nav-subitem" type="button" data-nav="order-maintenance">订单维护</button>
-            <button class="nav-subitem" type="button" data-nav="resource-maintenance">资源维护</button>
-            <button class="nav-subitem" type="button" data-nav="downtime-management">停机与在制状态</button>
-          </div>
-          <button class="nav-item" type="button" data-nav="graph">图构建与分析</button>
-          <button class="nav-item" type="button" data-nav="simulate">仿真排产</button>
-        </div>
-
-        <div class="sidebar-group requires-scene">
-          <div class="sidebar-title">优化与方案</div>
-          <button class="nav-item" type="button" data-nav="optimize-config">参数配置</button>
-          <button class="nav-item" type="button" data-nav="optimize-launch">启动优化</button>
-          <button class="nav-item" type="button" data-nav="pareto-library">Pareto 方案库</button>
-          <button class="nav-item" type="button" data-nav="exact-reference">精确冠军参考</button>
-          <button class="nav-item" type="button" data-nav="ai-review">AI 评审助手</button>
-        </div>
-
-        <div class="sidebar-group">
+        <div class="sidebar-group sidebar-utility">
+          <div class="sidebar-title">实例</div>
+          <button class="nav-item" type="button" data-nav="scene-library">当前实例</button>
+          <button class="nav-item" type="button" data-nav="new-scene">新建或导入</button>
           <div class="sidebar-title">系统</div>
           <button class="nav-item" type="button" data-nav="llm-config">大模型连接</button>
-          <button class="nav-item" type="button" data-nav="export-data">文件导出</button>
-          <button class="nav-item" type="button" data-nav="settings">系统设置</button>
+          <button class="nav-item" type="button" data-nav="settings">系统状态</button>
         </div>
       </aside>
 
@@ -104,13 +77,13 @@
         <section class="page active" id="page-scene-library">
           <div class="page-header">
             <div>
-              <span class="eyebrow">Scenario Hub</span>
-              <h2>场景库</h2>
-              <p>统一管理当前活动实例、最近场景记录与快速启动入口。</p>
+              <span class="eyebrow">Active instance</span>
+              <h2>当前实例</h2>
+              <p>查看正在使用的实例与最近摘要记录。</p>
             </div>
             <div class="page-header-actions">
               <button class="btn btn-ghost" type="button" data-action="sync-current-scene">同步当前实例</button>
-              <button class="btn btn-primary" type="button" data-action="goto-new-scene">新建场景</button>
+              <button class="btn btn-primary" type="button" data-action="goto-new-scene">新建或导入</button>
             </div>
           </div>
           <div class="page-body" id="scene-library-content"></div>
@@ -120,8 +93,8 @@
           <div class="page-header">
             <div>
               <span class="eyebrow">Create</span>
-              <h2>新建场景</h2>
-              <p>通过参数化生成或 Excel 导入，快速构建可仿真、可优化的调度场景。</p>
+              <h2>新建或导入</h2>
+              <p>通过参数生成或 Excel 导入构建调度实例。</p>
             </div>
           </div>
           <div class="page-body">
@@ -184,13 +157,13 @@
         <section class="page" id="page-dashboard">
           <div class="page-header">
             <div>
-              <span class="eyebrow">Executive Dashboard</span>
-              <h2>智能仪表板</h2>
-              <p>一屏掌握问题规模、关键瓶颈、候选方案与下一步决策建议。</p>
+              <span class="eyebrow">Workflow overview</span>
+              <h2>工作概览</h2>
+              <p>确认当前进度、关键结果与下一步操作。</p>
             </div>
             <div class="page-header-actions">
-              <button class="btn btn-ghost" type="button" data-action="goto-workflow-step" data-step="4">进入优化</button>
-              <button class="btn btn-primary" type="button" data-action="goto-review">进入方案评审</button>
+              <button class="btn btn-ghost" type="button" data-action="goto-workflow-step" data-step="4">优化求解</button>
+              <button class="btn btn-primary" type="button" data-action="goto-review">方案评审</button>
             </div>
           </div>
           <div class="page-body" id="dashboard-content"></div>
@@ -199,9 +172,9 @@
         <section class="page" id="page-insights">
           <div class="page-header">
             <div>
-              <span class="eyebrow">Insights Center</span>
-              <h2>洞察中心</h2>
-              <p>围绕结构、资源与瓶颈三类视角解释问题本质与优化空间。</p>
+              <span class="eyebrow">Simulation insights</span>
+              <h2>仿真与洞察</h2>
+              <p>用基线排程验证实例，并解释结构、资源与瓶颈。</p>
             </div>
             <div class="page-header-actions">
               <button class="btn btn-ghost" type="button" data-action="build-graph">重新构建图谱</button>
@@ -252,8 +225,8 @@
         <section class="page" id="page-config">
           <div class="page-header">
             <div>
-              <span class="eyebrow">Data Studio</span>
-              <h2>问题配置</h2>
+              <span class="eyebrow">Instance constraints</span>
+              <h2>实例与约束</h2>
               <p>围绕实例、订单、工序、资源、停机和初始在制状态完成主数据与约束维护。</p>
             </div>
           </div>
@@ -292,7 +265,7 @@
         <button class="panel-toggle" type="button" data-action="toggle-panel">收起</button>
 
         <section class="context-card">
-          <div class="context-card-head"><h3>当前场景</h3></div>
+          <div class="context-card-head"><h3>当前实例</h3></div>
           <div class="context-grid">
             <div><span>名称</span><strong id="panel-scene-name">未加载</strong></div>
             <div><span>订单</span><strong id="panel-orders">-</strong></div>

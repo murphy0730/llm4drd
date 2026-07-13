@@ -102,7 +102,7 @@ def run_v2_smoke(base_url: str, headless: bool = True, channel: str = "msedge") 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a smoke test against the V2 frontend.")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000/v2")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8888/")
     parser.add_argument("--channel", default="msedge")
     parser.add_argument("--headed", action="store_true", help="Launch the browser with a visible window.")
     args = parser.parse_args()

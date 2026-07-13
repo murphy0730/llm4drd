@@ -1109,7 +1109,7 @@ async function syncCurrentScene(silent = false) {
     app.currentSceneId = "current-instance";
     app.currentScene = {
       id: "current-instance",
-      name: "当前活动实例",
+      name: "当前实例",
       summary: app.instanceDetails.summary || {},
     };
     rememberCurrentScene("当前后端实例");
@@ -1176,7 +1176,7 @@ function updateShell() {
   el("topbar-scene-name").textContent = hasScene ? app.currentScene.name : "未加载场景";
   el("topbar-scene-meta").textContent = hasScene
     ? `${summary.orders || 0} 单 / ${summary.operations || 0} 工序`
-    : "点击进入场景库";
+    : "请新建或导入实例";
   el("topbar-orders-ops").textContent = hasScene ? `${summary.orders || 0} / ${summary.operations || 0}` : "-";
   el("topbar-resources").textContent = hasScene
     ? `${summary.machines || 0} 机 / ${summary.toolings || 0} 工装 / ${summary.personnel || 0} 人员`
@@ -1298,11 +1298,11 @@ function renderSceneLibrary() {
   container.innerHTML = `
     <article class="surface-card executive-hero">
       <div class="executive-hero-copy">
-        <span class="eyebrow">Scenario Overview</span>
+        <span class="eyebrow">Instance overview</span>
         <h3>${hasScene ? escapeHtml(app.currentScene.name || "\u5f53\u524d\u6d3b\u52a8\u5b9e\u4f8b") : "\u5f53\u524d\u6682\u65e0\u6d3b\u52a8\u5b9e\u4f8b"}</h3>
         <p>${hasScene
-          ? "\u5f53\u524d\u5b9e\u4f8b\u5df2\u7ecf\u8fdb\u5165\u53ef\u4eff\u771f\u3001\u53ef\u4f18\u5316\u3001\u53ef\u8bc4\u5ba1\u72b6\u6001\u3002\u4f60\u53ef\u4ee5\u7ee7\u7eed\u8fdb\u5165\u6d1e\u5bdf\u5206\u6790\u3001\u6df7\u5408\u4f18\u5316\u548c AI \u65b9\u6848\u8bc4\u5ba1\u3002"
-          : "\u5148\u901a\u8fc7\u65b0\u5efa\u573a\u666f\u3001Excel \u5bfc\u5165\u6216\u540c\u6b65\u5f53\u524d\u5b9e\u4f8b\uff0c\u5efa\u7acb\u4e00\u4e2a\u5b8c\u6574\u53ef\u5206\u6790\u7684\u8c03\u5ea6\u95ee\u9898\u3002"}
+          ? "当前实例已可用于仿真、优化和方案评审。"
+          : "请先生成或导入实例，建立一个可分析的调度问题。"}
         </p>
       </div>
       <div class="executive-hero-metrics">
@@ -1315,7 +1315,7 @@ function renderSceneLibrary() {
       <article class="surface-card">
         <div class="card-head">
           <h3>\u5f53\u524d\u6d3b\u52a8\u5b9e\u4f8b</h3>
-          <p>\u7528\u4e8e\u786e\u8ba4\u5f53\u524d V2 \u6b63\u5728\u5206\u6790\u7684\u573a\u666f\u5bf9\u8c61\u548c\u89c4\u6a21\u3002</p>
+          <p>确认当前正在分析的实例对象和规模。</p>
         </div>
         ${hasScene ? renderKeyValueGrid([
           { label: "\u5b9e\u4f8b\u540d\u79f0", value: escapeHtml(app.currentScene.name || "\u5f53\u524d\u6d3b\u52a8\u5b9e\u4f8b") },
@@ -1330,8 +1330,8 @@ function renderSceneLibrary() {
       </article>
       <article class="surface-card">
         <div class="card-head">
-          <h3>\u6700\u8fd1\u573a\u666f\u8bb0\u5f55</h3>
-          <p>\u4fdd\u7559\u6700\u8fd1\u4f7f\u7528\u8fc7\u7684\u5b9e\u4f8b\u5feb\u7167\uff0c\u4fbf\u4e8e\u5feb\u901f\u56de\u5fc6\u89c4\u6a21\u548c\u8ba1\u5212\u8d77\u70b9\u3002</p>
+          <h3>最近实例摘要</h3>
+          <p>这里只记录规模和计划起点，不代表后端保存了可切换的实例副本。</p>
         </div>
         ${historyRows.length ? renderSimpleTable(
           ["\u540d\u79f0", "\u8ba2\u5355 / \u5de5\u5e8f", "\u8d44\u6e90", "\u8bb0\u5f55\u65f6\u95f4"],
@@ -1353,12 +1353,22 @@ function renderDashboard() {
   const summary = getSceneSummary();
   const selected = getSelectedReviewCandidate();
   const objectiveKeys = app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys || [];
+  const flowSteps = [
+    { index: "01", label: "实例准备", done: !!app.currentScene, nav: "config" },
+    { index: "02", label: "约束校验", done: Number(summary.operations || 0) > 0 && Number(summary.machines || 0) > 0, nav: "config" },
+    { index: "03", label: "基线仿真", done: !!app.simResult, nav: "simulate" },
+    { index: "04", label: "优化求解", done: !!app.optimizeResult, nav: "optimize-launch" },
+    { index: "05", label: "方案评审", done: !!selected, nav: "solution-review" },
+  ];
+  const activeStep = flowSteps.findIndex((item) => !item.done);
+  const nextStep = flowSteps[activeStep < 0 ? flowSteps.length - 1 : activeStep];
   container.innerHTML = `
     <article class="surface-card executive-hero">
       <div class="executive-hero-copy">
-        <span class="eyebrow">Executive Dashboard</span>
-        <h3>\u5f53\u524d\u8c03\u5ea6\u95ee\u9898\u5df2\u8fdb\u5165\u53ef\u8bc4\u5ba1\u72b6\u6001</h3>
-        <p>\u8fd9\u91cc\u9002\u5408\u9886\u5bfc\u548c\u4e1a\u52a1\u5148\u770b\u6e05\u695a\u89c4\u6a21\u3001\u4f18\u5316\u8fdb\u5c55\u548c\u5f53\u524d\u63a8\u8350\u65b9\u6848\uff0c\u518d\u8fdb\u5165\u66f4\u7ec6\u7684\u7ed3\u6784\u6d1e\u5bdf\u4e0e\u65b9\u6848\u8bc4\u5ba1\u3002</p>
+        <span class="eyebrow">Current workflow</span>
+        <h3>${activeStep < 0 ? "当前调度流程已完成" : `下一步：${escapeHtml(nextStep.label)}`}</h3>
+        <p>${activeStep < 0 ? "实例、仿真和候选方案均已就绪，可继续复核并导出最终方案。" : "按业务顺序推进，每一步的结果会自动成为下一步的输入。"}</p>
+        <div class="form-actions"><button class="btn btn-primary" type="button" data-nav-jump="${escapeHtml(nextStep.nav)}">${activeStep < 0 ? "返回方案评审" : `继续${escapeHtml(nextStep.label)}`}</button></div>
       </div>
       <div class="executive-hero-metrics">
         <div><span>\u5f53\u524d\u4e3b\u76ee\u6807</span><strong>${escapeHtml(objectiveShortList(objectiveKeys))}</strong></div>
@@ -1366,6 +1376,15 @@ function renderDashboard() {
         <div><span>\u5f53\u524d\u5173\u6ce8\u65b9\u6848</span><strong>${escapeHtml(selected?.name || "\u672a\u6307\u5b9a")}</strong></div>
       </div>
     </article>
+    <nav class="workflow-overview" aria-label="调度流程进度">
+      ${flowSteps.map((item, index) => `
+        <button class="workflow-overview-step ${item.done ? "done" : index === activeStep ? "active" : "pending"}" type="button" data-nav-jump="${item.nav}">
+          <span>${item.done ? "✓" : item.index}</span>
+          <strong>${item.label}</strong>
+          <small>${item.done ? "已完成" : index === activeStep ? "下一步" : "待开始"}</small>
+        </button>
+      `).join("")}
+    </nav>
     ${renderKpiCards([
       { label: "\u8ba2\u5355", value: formatInt(summary.orders), hint: "\u5f53\u524d\u5b9e\u4f8b\u8ba2\u5355\u89c4\u6a21" },
       { label: "\u5de5\u5e8f", value: formatInt(summary.operations), hint: "\u5f53\u524d\u5b9e\u4f8b\u5de5\u5e8f\u603b\u91cf" },
@@ -3261,7 +3280,7 @@ function renderWorkflowStep1() {
   return `
     <div class="two-column">
       <article class="surface-card">
-        <div class="card-head"><h3>从零创建或导入场景</h3><p>这一步直接复用新建场景入口，保证工作流与场景库一致。</p></div>
+        <div class="card-head"><h3>从零创建或导入实例</h3><p>统一从实例入口完成参数生成或 Excel 导入。</p></div>
         <div class="form-actions">
           <button class="btn btn-primary" type="button" data-nav-jump="new-scene">打开新建场景</button>
           <button class="btn btn-ghost" type="button" data-action="sync-current-scene">同步当前实例</button>
@@ -3530,6 +3549,25 @@ function renderWorkflowStep5() {
 }
 
 function renderWorkflow() {
+  const page = el("page-workflow");
+  const heading = page?.querySelector(".page-header h2");
+  const description = page?.querySelector(".page-header p");
+  if (heading) {
+    heading.textContent = app.workflowStep === 3
+      ? "仿真与洞察"
+      : app.workflowStep === 4
+        ? "优化求解"
+        : app.workflowStep === 5
+          ? "方案评审"
+          : "调度工作台";
+  }
+  if (description) {
+    description.textContent = app.workflowStep === 3
+      ? "用基线排程验证实例，并定位结构、资源与瓶颈问题。"
+      : app.workflowStep === 4
+        ? "配置业务目标与计算预算，生成多目标候选方案。"
+        : "按照业务步骤完成实例准备、约束校验与方案决策。";
+  }
   renderWorkflowRail();
   const container = el("workflow-content");
   let html = "";
@@ -3542,25 +3580,53 @@ function renderWorkflow() {
 }
 
 function renderConfigInstanceTab() {
+  const summary = getSceneSummary();
+  const readiness = [
+    { label: "订单与任务", ok: Number(summary.orders || 0) > 0 && Number(summary.tasks || 0) > 0, hint: "至少包含一个订单和任务" },
+    { label: "工序结构", ok: Number(summary.operations || 0) > 0, hint: "至少包含一道可排工序" },
+    { label: "生产资源", ok: Number(summary.machines || 0) > 0, hint: "至少配置一台机器" },
+    { label: "计划时间", ok: !!app.instanceDetails?.plan_start_at, hint: "已设置计划起点" },
+    { label: "资源日历", ok: Number(summary.calendar_days || 0) > 0, hint: "班次日历可覆盖排产跨度" },
+  ];
+  const readyCount = readiness.filter((item) => item.ok).length;
   return `
+    <article class="surface-card readiness-panel">
+      <div class="card-head">
+        <div><h3>数据就绪检查</h3><p>在仿真前确认实例具备最小排产条件。</p></div>
+        ${statusChip(`${readyCount} / ${readiness.length} 通过`, readyCount === readiness.length ? "success" : "warning")}
+      </div>
+      <div class="readiness-list">
+        ${readiness.map((item) => `
+          <div class="readiness-item ${item.ok ? "passed" : "blocked"}">
+            <span>${item.ok ? "✓" : "!"}</span>
+            <strong>${item.label}</strong>
+            <small>${item.hint}</small>
+          </div>
+        `).join("")}
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="button" data-nav-jump="simulate" ${readyCount === readiness.length ? "" : "disabled"}>运行基线仿真</button>
+        ${readyCount === readiness.length ? "" : '<span class="subtle-note">完成缺失项目后即可进入仿真。</span>'}
+      </div>
+    </article>
     <div class="two-column">
       <article class="surface-card">
         <div class="card-head"><h3>当前实例摘要</h3><p>用于确认当前实例是否已经可用于仿真与优化。</p></div>
         ${renderKeyValueGrid([
-          { label: "订单", value: formatInt(getSceneSummary().orders) },
-          { label: "任务", value: formatInt(getSceneSummary().tasks) },
-          { label: "工序", value: formatInt(getSceneSummary().operations) },
-          { label: "机器", value: formatInt(getSceneSummary().machines) },
-          { label: "工装", value: formatInt(getSceneSummary().toolings) },
-          { label: "人员", value: formatInt(getSceneSummary().personnel) },
+          { label: "订单", value: formatInt(summary.orders) },
+          { label: "任务", value: formatInt(summary.tasks) },
+          { label: "工序", value: formatInt(summary.operations) },
+          { label: "机器", value: formatInt(summary.machines) },
+          { label: "工装", value: formatInt(summary.toolings) },
+          { label: "人员", value: formatInt(summary.personnel) },
           { label: "计划起点", value: formatDateTime(app.instanceDetails?.plan_start_at) },
-          { label: "自动日历天数", value: `${formatInt(app.instanceDetails?.summary?.calendar_days || 0)} 天` },
+          { label: "自动日历天数", value: `${formatInt(summary.calendar_days || 0)} 天` },
         ])}
       </article>
       <article class="surface-card">
-        <div class="card-head"><h3>快捷动作</h3><p>重用新建场景能力与导出能力。</p></div>
+        <div class="card-head"><h3>快捷动作</h3><p>新建、导入或导出当前实例数据。</p></div>
         <div class="form-actions">
-          <button class="btn btn-primary" type="button" data-nav-jump="new-scene">打开新建场景</button>
+          <button class="btn btn-primary" type="button" data-nav-jump="new-scene">新建或导入</button>
           <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
           <button class="btn btn-ghost" type="button" data-action="export-csv">导出 CSV</button>
         </div>
@@ -5682,7 +5748,7 @@ function bindGlobalEvents() {
   });
 
   window.addEventListener("hashchange", async () => {
-    const navKey = window.location.hash.replace("#", "") || "scene-library";
+    const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "scene-library");
     await navigate(navKey, false);
   });
 }
@@ -5693,13 +5759,13 @@ async function init() {
   bindGlobalEvents();
   await loadCatalogs();
   await syncCurrentScene(true);
-  const navKey = window.location.hash.replace("#", "") || "scene-library";
+  const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "scene-library");
   await navigate(navKey, false);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   init().catch((error) => {
     console.error(error);
-    toast(`V2 初始化失败：${error.message}`, "warning");
+    toast(`应用初始化失败：${error.message}`, "warning");
   });
 });
