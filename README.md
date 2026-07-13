@@ -279,3 +279,4 @@ python-multipart    # 文件上传
 openpyxl>=3.1.0     # Excel 导出
 ortools>=9.7        # CP-SAT 精确求解 (可选)
 ```
+"# llm4drd-platform" 

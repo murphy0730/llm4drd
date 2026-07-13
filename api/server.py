@@ -54,6 +54,11 @@ async def index():
     f = os.path.join(FRONT, "index.html")
     return FileResponse(f) if os.path.exists(f) else {"msg": "API running"}
 
+@app.get("/v2")
+async def index_v2():
+    f = os.path.join(FRONT, "index_v2.html")
+    return FileResponse(f) if os.path.exists(f) else {"msg": "V2 frontend not found"}
+
 # === Models ===
 class GenReq(BaseModel):
     num_orders: int = 10; tasks_per_order_min: int = 2; tasks_per_order_max: int = 5
@@ -529,6 +534,11 @@ def _build_exact_reference_fallback(
     chosen["objectives"] = objective_payload
     chosen["metrics"] = {
         **{key: round(float(value), 4) for key, value in analytics.objective_values.items()},
+        **{
+            key: round(float(value), 4)
+            for key, value in winner.get("metrics", {}).items()
+            if isinstance(value, (int, float)) and key not in analytics.objective_values
+        },
         "evaluation_mode": "exact_simulation_selection",
         "status": "FALLBACK_SIMULATION",
         "solve_time_s": 0.0,
@@ -607,6 +617,7 @@ def _build_exact_reference_solution(
     )
     analytics = build_schedule_analytics(current_shop, SimResult(schedule=result.schedule))
     metrics = {
+        **{key: round(float(value), 4) for key, value in analytics.objective_values.items()},
         **{key: round(float(value), 4) for key, value in result.objectives.items()},
         "solve_time_s": round(result.solve_time_s, 3),
         "status": result.status,

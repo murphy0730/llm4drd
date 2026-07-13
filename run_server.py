@@ -1,6 +1,8 @@
 import importlib.util
 import pathlib
 import sys
+import threading
+import webbrowser
 
 import uvicorn
 
@@ -19,6 +21,8 @@ def main() -> None:
     sys.modules["llm4drd_platform"] = pkg
     spec.loader.exec_module(pkg)
 
+    target_url = "http://127.0.0.1:8000/v2"
+    threading.Timer(1.0, lambda: webbrowser.open(target_url)).start()
     uvicorn.run("llm4drd_platform.api.server:app", host="127.0.0.1", port=8000)
 
 

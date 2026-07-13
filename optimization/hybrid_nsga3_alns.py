@@ -1318,6 +1318,19 @@ class HybridNSGA3ALNSOptimizer:
         self.status_history.append(snapshot)
         return snapshot
 
+    def _format_metric_payload(self, metrics: dict) -> dict:
+        payload: dict = {}
+        for key, value in (metrics or {}).items():
+            if isinstance(value, bool):
+                payload[key] = value
+            elif isinstance(value, int):
+                payload[key] = value
+            elif isinstance(value, float):
+                payload[key] = round(value, 4)
+            elif isinstance(value, str):
+                payload[key] = value
+        return payload
+
     def _format_solution_payload(
         self,
         solution: OptimizationSolution,
@@ -1337,6 +1350,7 @@ class HybridNSGA3ALNSOptimizer:
             "feasible": solution.feasible,
             "evaluation_mode": solution.metrics.get("evaluation_mode", "exact"),
             "objectives": {spec.key: round(solution.objectives.get(spec.key, 0.0), 4) for spec in self.specs},
+            "metrics": self._format_metric_payload(solution.metrics),
             "delta_vs_baseline": deltas,
             "candidate": solution.candidate.summary(),
             "summary": {
@@ -1364,19 +1378,7 @@ class HybridNSGA3ALNSOptimizer:
             "rule_name": self.config.baseline_rule_name,
             "evaluation_mode": solution.metrics.get("evaluation_mode", "exact"),
             "objectives": {spec.key: round(solution.objectives.get(spec.key, 0.0), 4) for spec in self.specs},
-            "metrics": {
-                "makespan": round(solution.metrics.get("makespan", 0.0), 4),
-                "total_tardiness": round(solution.metrics.get("total_tardiness", 0.0), 4),
-                "avg_utilization": round(solution.metrics.get("avg_utilization", 0.0), 4),
-                "critical_utilization": round(solution.metrics.get("critical_utilization", 0.0), 4),
-                "avg_active_window_utilization": round(solution.metrics.get("avg_active_window_utilization", 0.0), 4),
-                "critical_active_window_utilization": round(solution.metrics.get("critical_active_window_utilization", 0.0), 4),
-                "avg_net_available_utilization": round(solution.metrics.get("avg_net_available_utilization", 0.0), 4),
-                "critical_net_available_utilization": round(solution.metrics.get("critical_net_available_utilization", 0.0), 4),
-                "tooling_utilization": round(solution.metrics.get("tooling_utilization", 0.0), 4),
-                "personnel_utilization": round(solution.metrics.get("personnel_utilization", 0.0), 4),
-                "assembly_sync_penalty": round(solution.metrics.get("assembly_sync_penalty", 0.0), 4),
-            },
+            "metrics": self._format_metric_payload(solution.metrics),
             "schedule": solution.schedule if schedule_limit is None else solution.schedule[:schedule_limit],
             "summary": solution.analytics_summary,
         }
