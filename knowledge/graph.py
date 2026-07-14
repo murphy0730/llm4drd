@@ -81,6 +81,21 @@ class HeterogeneousGraph:
 
         report(0, max(1, len(shop.orders) + len(shop.tasks) + len(shop.operations)))
 
+        # Task dependencies can be declared either directly on the task or on
+        # one of its operations.  Aggregate both sources for the task-level
+        # view so operations.predecessor_tasks is not lost between task nodes.
+        task_predecessors = {
+            task_id: list(task.predecessor_task_ids)
+            for task_id, task in shop.tasks.items()
+        }
+        for op in shop.operations.values():
+            predecessors = task_predecessors.get(op.task_id)
+            if predecessors is None:
+                continue
+            for predecessor_task_id in op.predecessor_tasks:
+                if predecessor_task_id not in predecessors:
+                    predecessors.append(predecessor_task_id)
+
         # 添加订单节点
         processed = 0
         total_entities = max(1, len(shop.orders) + len(shop.tasks) + len(shop.operations))
@@ -126,7 +141,7 @@ class HeterogeneousGraph:
                 edge_type=self.EDGE_ORDER_TASK,
             )
             # 任务前置约束
-            for pred_tid in task.predecessor_task_ids:
+            for pred_tid in task_predecessors[tid]:
                 self.graph.add_edge(
                     f"T:{pred_tid}", f"T:{tid}",
                     edge_type=self.EDGE_TASK_PREDECESSOR,

@@ -1755,7 +1755,18 @@ def _estimate_graph_size(current_shop: ShopFloor) -> dict:
         len(current_shop.orders) + len(current_shop.tasks) + len(current_shop.operations)
         + len(current_shop.machines) + len(current_shop.toolings) + len(current_shop.personnel)
     )
-    structural_edges = len(current_shop.tasks) + sum(len(task.predecessor_task_ids) for task in current_shop.tasks.values())
+    task_predecessor_edges = {
+        (predecessor_id, task_id)
+        for task_id, task in current_shop.tasks.items()
+        for predecessor_id in task.predecessor_task_ids
+    }
+    task_predecessor_edges.update(
+        (predecessor_id, op.task_id)
+        for op in current_shop.operations.values()
+        if op.task_id in current_shop.tasks
+        for predecessor_id in op.predecessor_tasks
+    )
+    structural_edges = len(current_shop.tasks) + len(task_predecessor_edges)
     structural_edges += len(current_shop.operations)
     structural_edges += sum(len(op.predecessor_ops) + len(op.predecessor_tasks) for op in current_shop.operations.values())
     machine_edges = 0
