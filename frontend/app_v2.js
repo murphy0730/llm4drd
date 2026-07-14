@@ -5128,6 +5128,32 @@ function legacyGraphDetailContent(selectedNode, selectedEdges) {
   `;
 }
 
+function legacyGraphSelectionContent(selectedNode, selectedEdges, nodes) {
+  if (!selectedNode) return '<span class="subtle-note">尚未选中节点</span>';
+
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const relationButtons = selectedEdges.slice(0, 12).map((edge) => {
+    const isOutgoing = edge.source === selectedNode.id;
+    const neighborId = isOutgoing ? edge.target : edge.source;
+    const neighbor = nodeById.get(neighborId);
+    const neighborLabel = neighbor?.label || neighbor?.entity_id || neighborId;
+    const direction = isOutgoing ? "→" : "←";
+    return `
+      <button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(neighborId)}" title="选中关联节点 ${escapeHtml(neighborLabel)}">
+        ${escapeHtml(humanizeCodeLabel(edge.edgeType || "关系"))} ${direction} ${escapeHtml(neighborLabel)}
+      </button>
+    `;
+  }).join("");
+
+  return `
+    <span class="pill active" title="当前选中节点">
+      当前：${escapeHtml(graphTypeLabel(selectedNode.type))} · ${escapeHtml(selectedNode.label || selectedNode.entity_id || selectedNode.id)}
+    </span>
+    ${relationButtons || '<span class="subtle-note">当前节点没有直接关系</span>'}
+    ${selectedEdges.length > 12 ? `<span class="subtle-note">另有 ${formatInt(selectedEdges.length - 12)} 条直接关系</span>` : ""}
+  `;
+}
+
 function focusLegacyCytoscapeNode(nodeId, options = {}) {
   const cy = app.cyGraphInstance;
   const node = cy?.getElementById(nodeId || "");
@@ -5149,6 +5175,8 @@ function focusLegacyCytoscapeNode(nodeId, options = {}) {
     : document.querySelector(".page.active .legacy-graph-workbench");
   const detail = root?.querySelector(".graph-detail-card");
   if (detail) detail.innerHTML = legacyGraphDetailContent(selectedNode, selectedEdges);
+  const selection = root?.querySelector("[data-graph-selection]");
+  if (selection) selection.innerHTML = legacyGraphSelectionContent(selectedNode, selectedEdges, nodes);
   if (options.fit) cy.animate({ fit: { eles: node.union(neighborhood), padding: 70 } }, { duration: 250 });
   return true;
 }
@@ -5193,12 +5221,8 @@ function renderLegacyCytoscapeGraph() {
         <span>显示边 ${formatInt(edges.length)} / ${formatInt(app.graphMeta?.total_edges || edges.length)}</span>
         <span>单击节点查看邻域，双击节点聚焦</span>
       </div>
-      <div class="graph-neighbor-pills legacy-graph-shortcuts" aria-label="节点类型快捷入口">
-        ${GRAPH_NODE_ORDER.map((type) => nodes.find((node) => node.type === type)).filter(Boolean).map((node) => `
-          <button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(node.id)}" data-graph-node="${escapeHtml(node.id)}" data-node-label="${escapeHtml(node.label || node.id)}" data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}">
-            ${escapeHtml(graphTypeLabel(node.type))}：${escapeHtml(node.label || node.id)}
-          </button>
-        `).join("")}
+      <div class="graph-neighbor-pills legacy-graph-shortcuts" data-graph-selection aria-label="当前选中节点与直接关系">
+        ${legacyGraphSelectionContent(selectedNode, selectedEdges, nodes)}
       </div>
       <div class="split-panel graph-split">
         <article class="surface-card graph-stage-card">
@@ -5325,9 +5349,12 @@ function mountLegacyCytoscapeGraph() {
     const term = String(event.target.value || "").trim().toLowerCase();
     cy.elements().removeClass("cy-search-match");
     if (!term) return;
-    const matches = cy.nodes().filter((node) => `${node.id()} ${node.data("label") || ""} ${node.data("entity_id") || ""}`.toLowerCase().includes(term));
-    matches.addClass("cy-search-match");
-    if (matches.length) cy.animate({ fit: { eles: matches, padding: 90 } }, { duration: 250 });
+    const matches = cy.nodes().filter((node) => [node.id(), node.data("label"), node.data("entity_id")]
+      .some((value) => String(value || "").toLowerCase().includes(term)));
+    if (!matches.length) return;
+    const exactMatch = matches.filter((node) => [node.id(), node.data("label"), node.data("entity_id")]
+      .some((value) => String(value || "").toLowerCase() === term))[0];
+    focusLegacyCytoscapeNode((exactMatch || matches[0]).id());
   });
 }
 
