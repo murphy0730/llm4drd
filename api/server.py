@@ -1603,6 +1603,12 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
         for predecessor_task_id in op.predecessor_tasks:
             if predecessor_task_id not in current_shop.tasks:
                 err("关联关系", op_id, f"前置任务 {predecessor_task_id} 不存在，该工序将永远无法就绪", sheet="operations / tasks")
+        for machine_field in op.eligible_machine_ids:
+            # 兼容旧数据里未拆分的逗号分隔串，逐个机台号与 machines sheet 比对
+            for machine_token in machine_field.replace("，", ",").split(","):
+                machine_token = machine_token.strip()
+                if machine_token and machine_token not in current_shop.machines:
+                    err("关联关系", op_id, f"工序 {op.name or op_id} 指定的可用机台 {machine_token} 在 machines sheet 中不存在（machine_id 不匹配）", sheet="operations / machines")
         if not current_shop.get_eligible_machines(op):
             ops_without_machine += 1
             if ops_without_machine <= 20:

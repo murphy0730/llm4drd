@@ -9,3 +9,4 @@ run.stdout.log
 run.stderr.log
 server.log
 .idea/
+.workbuddy/
