@@ -925,3 +925,75 @@ class GraphStore:
             for edge in outgoing + incoming:
                 edge["attrs"] = json.loads(edge["attrs"]) if edge["attrs"] else {}
             return {"outgoing": outgoing, "incoming": incoming}
+
+    def load_order_subgraph(self, order_id: str) -> dict:
+        """Load one order, its tasks/operations, and resources used by those operations."""
+        with get_db(self.db_path) as conn:
+            order_row = conn.execute(
+                """
+                SELECT * FROM graph_nodes
+                WHERE node_type='order' AND (node_id=? OR entity_id=? OR node_id=? )
+                ORDER BY CASE WHEN node_id=? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (order_id, order_id, f"O:{order_id}", order_id),
+            ).fetchone()
+            if not order_row:
+                return {"order_id": None, "nodes": [], "edges": []}
+
+            order_node_id = order_row["node_id"]
+            task_rows = conn.execute(
+                "SELECT target FROM graph_edges WHERE source=? AND edge_type='order_has_task'",
+                (order_node_id,),
+            ).fetchall()
+            task_ids = [row["target"] for row in task_rows]
+
+            operation_ids = []
+            if task_ids:
+                placeholders = ",".join("?" for _ in task_ids)
+                operation_ids = [
+                    row["target"]
+                    for row in conn.execute(
+                        f"SELECT target FROM graph_edges WHERE source IN ({placeholders}) AND edge_type='task_has_operation'",
+                        task_ids,
+                    ).fetchall()
+                ]
+
+            resource_ids = []
+            if operation_ids:
+                placeholders = ",".join("?" for _ in operation_ids)
+                resource_ids = [
+                    row["target"]
+                    for row in conn.execute(
+                        f"""
+                        SELECT DISTINCT target FROM graph_edges
+                        WHERE source IN ({placeholders})
+                          AND edge_type IN ('machine_eligible','tooling_eligible','personnel_eligible')
+                        """,
+                        operation_ids,
+                    ).fetchall()
+                ]
+
+            node_ids = list(dict.fromkeys([order_node_id, *task_ids, *operation_ids, *resource_ids]))
+            placeholders = ",".join("?" for _ in node_ids)
+            nodes = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM graph_nodes WHERE node_id IN ({placeholders}) ORDER BY rowid",
+                    node_ids,
+                ).fetchall()
+            ]
+            edges = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT * FROM graph_edges
+                    WHERE source IN ({placeholders}) AND target IN ({placeholders})
+                    ORDER BY id
+                    """,
+                    [*node_ids, *node_ids],
+                ).fetchall()
+            ]
+            for item in nodes + edges:
+                item["attrs"] = json.loads(item["attrs"]) if item["attrs"] else {}
+            return {"order_id": order_node_id, "nodes": nodes, "edges": edges}

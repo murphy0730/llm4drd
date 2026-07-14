@@ -1901,6 +1901,13 @@ async def graph_edges(edge_type: str = None, search: str = None,
     total, edges = graph_store.load_edges(edge_type=edge_type, search=search, limit=min(max(limit, 1), 1000), offset=max(offset, 0))
     return {"total": total, "edges": edges}
 
+@app.get("/api/graph/order/{order_id}")
+async def graph_order(order_id: str):
+    result = graph_store.load_order_subgraph(order_id)
+    if not result["order_id"]:
+        raise HTTPException(404, f"图谱中不存在订单 {order_id}")
+    return result
+
 @app.get("/api/graph/node/{node_id:path}/neighbors")
 async def node_neighbors(node_id: str):
     return graph_store.get_node_neighbors(node_id)

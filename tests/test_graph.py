@@ -1,10 +1,45 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from llm4drd.core.models import Operation, Order, ShopFloor, Task
+from llm4drd.data.db import GraphStore, init_db
 from llm4drd.knowledge.graph import HeterogeneousGraph
 
 
 class HeterogeneousGraphTests(unittest.TestCase):
+    def test_order_subgraph_excludes_other_orders_and_keeps_resources(self):
+        graph = HeterogeneousGraph()
+        for node_id, node_type, entity_id in [
+            ("O:O-1", "order", "O-1"),
+            ("T:T-1", "task", "T-1"),
+            ("OP:OP-1", "operation", "OP-1"),
+            ("O:O-2", "order", "O-2"),
+            ("T:T-2", "task", "T-2"),
+            ("OP:OP-2", "operation", "OP-2"),
+            ("M:M-1", "machine", "M-1"),
+        ]:
+            graph.graph.add_node(
+                node_id, node_type=node_type, entity_id=entity_id, label=entity_id
+            )
+        graph.graph.add_edge("O:O-1", "T:T-1", edge_type="order_has_task")
+        graph.graph.add_edge("T:T-1", "OP:OP-1", edge_type="task_has_operation")
+        graph.graph.add_edge("OP:OP-1", "M:M-1", edge_type="machine_eligible")
+        graph.graph.add_edge("O:O-2", "T:T-2", edge_type="order_has_task")
+        graph.graph.add_edge("T:T-2", "OP:OP-2", edge_type="task_has_operation")
+        graph.graph.add_edge("OP:OP-2", "M:M-1", edge_type="machine_eligible")
+
+        with TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "graph.db")
+            init_db(db_path)
+            store = GraphStore(db_path)
+            store.save_graph(graph)
+            result = store.load_order_subgraph("O-1")
+
+        node_ids = {node["node_id"] for node in result["nodes"]}
+        self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1", "M:M-1"})
+        self.assertEqual(len(result["edges"]), 3)
+
     def test_operation_predecessor_tasks_create_all_task_level_edges(self):
         predecessor_ids = ["T-P1", "T-P2", "T-P3"]
         target_task = Task(
