@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>LLM4DRD 智能调度决策中枢</title>
-  <link rel="stylesheet" href="/static/app_v2.css?v=20260713-19">
+  <link rel="stylesheet" href="/static/app_v2.css?v=20260714-20">
   <link rel="stylesheet" href="/static/design-system.css?v=20260713-2">
 </head>
 <body>
@@ -25,7 +25,7 @@
 
       <div class="topbar-scene">
         <span class="eyebrow">当前实例</span>
-        <button class="scene-pill" type="button" data-action="goto-scene-library">
+        <button class="scene-pill" type="button" data-action="goto-new-scene">
           <span id="topbar-scene-name">未加载实例</span>
           <span class="scene-pill-meta" id="topbar-scene-meta">查看实例摘要</span>
         </button>
@@ -56,7 +56,7 @@
       <aside class="sidebar" aria-label="主导航">
         <div class="sidebar-group">
           <div class="sidebar-title">调度流程</div>
-          <button class="nav-item requires-scene" type="button" data-nav="dashboard"><span class="nav-index">01</span>工作概览</button>
+          <button class="nav-item" type="button" data-nav="new-scene"><span class="nav-index">01</span>新建与导入</button>
           <button class="nav-item requires-scene" type="button" data-nav="config"><span class="nav-index">02</span>实例与约束</button>
           <button class="nav-item requires-scene" type="button" data-nav="simulate"><span class="nav-index">03</span>仿真与洞察</button>
           <button class="nav-item requires-scene" type="button" data-nav="optimize-launch"><span class="nav-index">04</span>优化求解</button>
@@ -64,9 +64,8 @@
         </div>
 
         <div class="sidebar-group sidebar-utility">
-          <div class="sidebar-title">实例</div>
-          <button class="nav-item" type="button" data-nav="scene-library">当前实例</button>
-          <button class="nav-item" type="button" data-nav="new-scene">新建或导入</button>
+          <div class="sidebar-title">辅助</div>
+          <button class="nav-item requires-scene" type="button" data-nav="dashboard">工作概览</button>
           <div class="sidebar-title">系统</div>
           <button class="nav-item" type="button" data-nav="llm-config">大模型连接</button>
           <button class="nav-item" type="button" data-nav="settings">系统状态</button>
@@ -74,27 +73,15 @@
       </aside>
 
       <main class="main-stage">
-        <section class="page active" id="page-scene-library">
-          <div class="page-header">
-            <div>
-              <span class="eyebrow">Active instance</span>
-              <h2>当前实例</h2>
-              <p>查看正在使用的实例与最近摘要记录。</p>
-            </div>
-            <div class="page-header-actions">
-              <button class="btn btn-ghost" type="button" data-action="sync-current-scene">同步当前实例</button>
-              <button class="btn btn-primary" type="button" data-action="goto-new-scene">新建或导入</button>
-            </div>
-          </div>
-          <div class="page-body" id="scene-library-content"></div>
-        </section>
-
-        <section class="page" id="page-new-scene">
+        <section class="page active" id="page-new-scene">
           <div class="page-header">
             <div>
               <span class="eyebrow">Create</span>
-              <h2>新建或导入</h2>
-              <p>通过参数生成或 Excel 导入构建调度实例。</p>
+              <h2>新建与导入</h2>
+              <p>通过参数生成或 Excel 导入构建调度实例，这是调度流程的第一步。</p>
+            </div>
+            <div class="page-header-actions">
+              <button class="btn btn-ghost" type="button" data-action="sync-current-scene">同步当前实例</button>
             </div>
           </div>
           <div class="page-body">
@@ -141,6 +128,14 @@
                       <button class="btn btn-primary" type="button" data-action="trigger-import">选择 Excel</button>
                       <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
                     </div>
+                  </div>
+                  <div class="import-progress" id="import-progress" hidden aria-live="polite">
+                    <div class="import-progress-head">
+                      <span class="import-spinner" aria-hidden="true"></span>
+                      <strong id="import-progress-label">正在上传 Excel…</strong>
+                    </div>
+                    <div class="import-progress-track"><i id="import-progress-bar" style="width:0%"></i></div>
+                    <p class="import-progress-note" id="import-progress-note">请勿关闭页面，导入完成后会自动跳转到“实例与约束”查看校验结果。</p>
                   </div>
                 </div>
                 <div class="hint-list">
@@ -316,6 +311,6 @@
   <script src="/static/vendor/cytoscape.min.js?v=3.30.4"></script>
   <script src="/static/vendor/dagre.min.js?v=0.8.5"></script>
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
-  <script src="/static/app_v2.js?v=20260714-28"></script>
+  <script src="/static/app_v2.js?v=20260714-29"></script>
 </body>
 </html>

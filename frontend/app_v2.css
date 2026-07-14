@@ -2083,3 +2083,152 @@ a {
     min-width: 0;
   }
 }
+
+/* === 导入进度（阶段一：Loading 状态） === */
+.import-progress {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--line, #d8e0e8);
+  border-radius: 12px;
+  background: rgba(15, 76, 129, 0.05);
+}
+
+.import-progress.is-error {
+  border-color: var(--danger);
+  background: rgba(179, 58, 47, 0.07);
+}
+
+.import-progress.is-success {
+  border-color: var(--success);
+  background: rgba(25, 113, 82, 0.07);
+}
+
+.import-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.import-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(15, 76, 129, 0.25);
+  border-top-color: #0f4c81;
+  animation: import-spin 0.8s linear infinite;
+  flex: none;
+}
+
+.import-progress.is-error .import-spinner,
+.import-progress.is-success .import-spinner {
+  animation: none;
+  border-color: transparent;
+}
+
+@keyframes import-spin {
+  to { transform: rotate(360deg); }
+}
+
+.import-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(15, 76, 129, 0.12);
+  overflow: hidden;
+}
+
+.import-progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #0f4c81;
+  transition: width 0.25s ease;
+}
+
+.import-progress.is-error .import-progress-track i { background: var(--danger); }
+.import-progress.is-success .import-progress-track i { background: var(--success); }
+
+.import-progress-track.indeterminate i {
+  width: 40%;
+  animation: import-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes import-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(280%); }
+}
+
+.import-progress-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft, #5b6c7c);
+}
+
+/* === 数据强校验面板（阶段二） === */
+.validation-panel.danger { border-color: var(--danger); }
+.validation-panel.warning { border-color: #b76800; }
+.validation-panel.success { border-color: var(--success); }
+
+/* === 仿真不可行横幅（阶段三：Error 状态） === */
+.sim-infeasible-banner {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--danger);
+  border-left-width: 5px;
+  border-radius: 12px;
+  background: rgba(179, 58, 47, 0.07);
+}
+
+.sim-infeasible-banner strong { color: var(--danger); }
+.sim-infeasible-banner span { font-size: 13px; color: var(--ink-soft, #5b6c7c); }
+
+/* === 错误弹窗（阶段四） === */
+.error-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(12, 24, 36, 0.45);
+}
+
+.error-modal {
+  width: min(560px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  padding: 22px 24px;
+  border-radius: 16px;
+  border: 1px solid var(--danger);
+  background: var(--surface, #ffffff);
+  box-shadow: 0 24px 60px rgba(12, 24, 36, 0.35);
+}
+
+.error-modal h3 {
+  margin: 0 0 10px;
+  color: var(--danger);
+}
+
+.error-modal p {
+  margin: 0 0 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.error-modal details {
+  margin-bottom: 12px;
+}
+
+.error-modal pre {
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(12, 24, 36, 0.06);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

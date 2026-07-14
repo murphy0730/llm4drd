@@ -1,5 +1,5 @@
 """FastAPI 服务 v3 — 完整后端"""
-import os, csv, io, json, inspect, logging, time, uuid, threading, traceback
+import os, csv, io, json, inspect, logging, math, time, uuid, threading, traceback
 from datetime import datetime
 from typing import Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
@@ -1256,7 +1256,7 @@ async def gen_instance(req: GenReq):
     # 保存到数据库
     inst_store.save_from_shopfloor(shop)
     graph_store.clear_all()
-    return {"status": "ok", "summary": shop.summary(), "calendar": calendar_info, "details": _instance_details(shop)}
+    return {"status": "ok", "summary": shop.summary(), "calendar": calendar_info, "details": _instance_details(shop), "validation": _validate_instance(shop)}
 
 @app.get("/api/instance/details")
 async def inst_details():
@@ -1418,8 +1418,17 @@ async def import_excel(file: UploadFile = File(...)):
         shop = inst_store.build_shopfloor()
         graph_store.clear_all()
 
-        return {"status": "ok", "summary": shop.summary(), "details": _instance_details(shop)}
+        validation = _validate_instance(shop)
+        logging.info(
+            "excel import: orders=%d tasks=%d operations=%d validation=%s errors=%d",
+            len(shop.orders), len(shop.tasks), len(shop.operations),
+            validation["status"], validation["error_count"],
+        )
+        return {"status": "ok", "summary": shop.summary(), "details": _instance_details(shop), "validation": validation}
+    except HTTPException:
+        raise
     except Exception as e:
+        logging.exception("Excel import failed")
         raise HTTPException(400, f"Excel导入失败: {e}")
 
 @app.get("/api/instance/template")
@@ -1552,10 +1561,135 @@ def _instance_details(s: ShopFloor):
     }
 
 # === Graph ===
-GRAPH_BUILD_TIMEOUT_S = int(os.environ.get("LLM4DRD_GRAPH_TIMEOUT_S", "180"))
+GRAPH_BUILD_TIMEOUT_S = int(os.environ.get("LLM4DRD_GRAPH_TIMEOUT_S", "600"))
 GRAPH_WARN_EDGES = int(os.environ.get("LLM4DRD_GRAPH_WARN_EDGES", "300000"))
 GRAPH_MAX_EDGES = int(os.environ.get("LLM4DRD_GRAPH_MAX_EDGES", "2000000"))
 GRAPH_MAX_NODES = int(os.environ.get("LLM4DRD_GRAPH_MAX_NODES", "100000"))
+
+
+def _validate_instance(current_shop: ShopFloor) -> dict:
+    """对当前实例做强校验：数据完整性、关联关系、约束条件。
+
+    错误级别问题（error）会直接导致仿真/优化静默失败（例如空排程、指标全为 0），
+    必须在“实例与约束”页显式暴露给用户。
+    """
+    errors: list[dict] = []
+    warnings: list[dict] = []
+
+    def err(category: str, entity: str, message: str):
+        errors.append({"severity": "error", "category": category, "entity": entity, "message": message})
+
+    def warn(category: str, entity: str, message: str):
+        warnings.append({"severity": "warning", "category": category, "entity": entity, "message": message})
+
+    # --- 关联关系：任务 → 订单 / 前置任务 ---
+    for task_id, task in current_shop.tasks.items():
+        if task.order_id not in current_shop.orders:
+            err("关联关系", task_id, f"任务引用了不存在的订单 {task.order_id}")
+        for predecessor_id in task.predecessor_task_ids:
+            if predecessor_id not in current_shop.tasks:
+                err("关联关系", task_id, f"前置任务 {predecessor_id} 不存在，该任务的后续工序将永远无法就绪")
+
+    # --- 数据完整性 + 约束条件：工序 ---
+    ops_without_machine = 0
+    for op_id, op in current_shop.operations.items():
+        if op.task_id not in current_shop.tasks:
+            err("关联关系", op_id, f"工序引用了不存在的任务 {op.task_id}")
+        if op.processing_time is None or float(op.processing_time) <= 0:
+            err("数据完整性", op_id, f"加工时长非法（{op.processing_time}），必须大于 0")
+        for predecessor_id in op.predecessor_ops:
+            if predecessor_id not in current_shop.operations:
+                err("关联关系", op_id, f"前置工序 {predecessor_id} 不存在，该工序将永远无法就绪（仿真会输出空排程）")
+        for predecessor_task_id in op.predecessor_tasks:
+            if predecessor_task_id not in current_shop.tasks:
+                err("关联关系", op_id, f"前置任务 {predecessor_task_id} 不存在，该工序将永远无法就绪")
+        if not current_shop.get_eligible_machines(op):
+            ops_without_machine += 1
+            if ops_without_machine <= 20:
+                err("约束条件", op_id, f"没有任何可用机器（工艺类型 {op.process_type}，指定机器 {op.eligible_machine_ids or '按类型匹配'}）")
+        for tooling_type in op.required_tooling_types:
+            if not current_shop.get_toolings_for_type(tooling_type):
+                err("约束条件", op_id, f"缺少所需工装类型 {tooling_type} 的任何实例")
+        for skill_id in op.required_personnel_skills:
+            if not current_shop.get_personnel_for_skill(skill_id):
+                err("约束条件", op_id, f"缺少具备技能 {skill_id} 的任何人员")
+    if ops_without_machine > 20:
+        err("约束条件", "operations", f"另有 {ops_without_machine - 20} 道工序同样没有可用机器（已省略明细）")
+
+    # --- 工序前驱环检测（有环则整条链永远无法就绪）---
+    color: dict[str, int] = {}
+    cycle_reported = False
+    for start_id in current_shop.operations:
+        if cycle_reported or color.get(start_id):
+            continue
+        stack = [(start_id, iter(current_shop.operations[start_id].predecessor_ops))]
+        color[start_id] = 1
+        while stack:
+            node_id, iterator = stack[-1]
+            advanced = False
+            for predecessor_id in iterator:
+                if predecessor_id not in current_shop.operations:
+                    continue
+                state = color.get(predecessor_id, 0)
+                if state == 1:
+                    err("关联关系", node_id, f"工序前驱存在循环依赖（涉及 {predecessor_id}），相关工序永远无法开工")
+                    cycle_reported = True
+                    stack.clear()
+                    advanced = True
+                    break
+                if state == 0:
+                    color[predecessor_id] = 1
+                    stack.append((predecessor_id, iter(current_shop.operations[predecessor_id].predecessor_ops)))
+                    advanced = True
+                    break
+            if not advanced and stack:
+                finished_id, _ = stack.pop()
+                color[finished_id] = 2
+
+    # --- 订单交期与结构 ---
+    for order_id, order in current_shop.orders.items():
+        if not order.task_ids:
+            warn("数据完整性", order_id, "订单下没有任何任务")
+        if math.isfinite(order.due_date) and order.due_date < order.release_time:
+            warn("约束条件", order_id, f"交期（{order.due_date:.1f}h）早于释放时间（{order.release_time:.1f}h），必然延误")
+
+    # --- 资源日历容量 ---
+    calendar_info = _ensure_shop_calendar_capacity(current_shop)
+    if calendar_info.get("final_days", 0) < calendar_info.get("required_days", 0):
+        err("约束条件", "calendar", f"资源班次日历（{calendar_info['final_days']} 天）无法覆盖预计排产跨度（{calendar_info['required_days']} 天），后段工序将无法安排")
+
+    status = "failed" if errors else ("warning" if warnings else "passed")
+    return {
+        "status": status,
+        "errors": errors,
+        "warnings": warnings,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "stats": {
+            "orders": len(current_shop.orders),
+            "tasks": len(current_shop.tasks),
+            "operations": len(current_shop.operations),
+            "machines": len(current_shop.machines),
+            "toolings": len(current_shop.toolings),
+            "personnel": len(current_shop.personnel),
+            "calendar": calendar_info,
+        },
+        "checked_at": datetime.now().astimezone().isoformat(),
+    }
+
+
+@app.get("/api/instance/validate")
+async def validate_instance():
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例，请先生成或导入")
+    validation = _validate_instance(current_shop)
+    logging.info(
+        "instance validation: status=%s errors=%d warnings=%d ops=%d",
+        validation["status"], validation["error_count"], validation["warning_count"],
+        len(current_shop.operations),
+    )
+    return validation
 
 
 def _estimate_graph_size(current_shop: ShopFloor) -> dict:
@@ -1703,31 +1837,71 @@ async def node_neighbors(node_id: str):
     return graph_store.get_node_neighbors(node_id)
 
 # === Simulate ===
+def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics) -> Optional[str]:
+    """当仿真结果异常（空排程 / 未覆盖全部工序）时，给出可读的原因诊断。"""
+    if analytics.feasible:
+        return None
+    scheduled = len(result.schedule or [])
+    hints: list[str] = []
+    if scheduled == 0:
+        hints.append("仿真没有排出任何工序，所有指标会显示为 0")
+    else:
+        hints.append(f"仅排出 {analytics.completed_operations}/{len(current_shop.operations)} 道工序，指标只反映部分排程")
+    dangling_ops = sum(
+        1 for op in current_shop.operations.values()
+        if any(p not in current_shop.operations for p in op.predecessor_ops)
+        or any(p not in current_shop.tasks for p in op.predecessor_tasks)
+    )
+    if dangling_ops:
+        hints.append(f"{dangling_ops} 道工序的前驱引用不存在，永远无法就绪")
+    no_machine_ops = sum(1 for op in current_shop.operations.values() if not current_shop.get_eligible_machines(op))
+    if no_machine_ops:
+        hints.append(f"{no_machine_ops} 道工序没有任何可用机器")
+    hints.append("请到“实例与约束”页运行数据校验查看完整错误明细")
+    return "；".join(hints)
+
+
 @app.post("/api/simulate")
 async def simulate(req: SimReq):
-    global last_result
-    if not shop: raise HTTPException(400, "请先生成实例")
+    global last_result, shop
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "请先生成实例")
+    shop = current_shop
     func = BUILTIN_RULES.get(req.rule_name, BUILTIN_RULES["ATC"])
-    sim = Simulator(shop, func)
+    sim = Simulator(current_shop, func)
     r = sim.run()
-    analytics = build_schedule_analytics(shop, r)
+    analytics = build_schedule_analytics(current_shop, r)
+    # 调试日志：确认计算真实执行，并输出关键中间变量
+    logging.info(
+        "simulate[%s]: scheduled_entries=%d completed_ops=%d/%d makespan=%.2f "
+        "total_tardiness=%.2f avg_net_available_utilization=%.4f feasible=%s events=%d wall=%.0fms",
+        req.rule_name, len(r.schedule), analytics.completed_operations, len(current_shop.operations),
+        analytics.objective_values.get("makespan", 0.0),
+        analytics.objective_values.get("total_tardiness", 0.0),
+        analytics.objective_values.get("avg_net_available_utilization", 0.0),
+        analytics.feasible, r.event_count, r.wall_time_ms,
+    )
+    diagnosis = _simulation_diagnosis(current_shop, r, analytics)
+    if diagnosis:
+        logging.warning("simulate[%s] infeasible: %s", req.rule_name, diagnosis)
     r._rule_name = req.rule_name
     last_result = r
     # Enrich gantt with order info
     gantt = []
     for e in r.schedule:
-        task = shop.tasks.get(e["task_id"])
-        order = shop.orders.get(task.order_id) if task else None
+        task = current_shop.tasks.get(e["task_id"])
+        order = current_shop.orders.get(task.order_id) if task else None
         gantt.append(
             _serialize_schedule_entry(
-                shop,
+                current_shop,
                 {
                     **e,
                     "order_id": order.id if order else "",
                     "order_name": order.name if order else "",
                     "priority": order.priority if order else 1,
                     "due_date": round(order.due_date, 3) if order else 0,
-                    "due_at": shop.time_label(order.due_date) if order else None,
+                    "due_at": current_shop.time_label(order.due_date) if order else None,
                     "is_tardy": (e["end"] > order.due_date) if order else False,
                     "is_main": task.is_main if task else False,
                 },
@@ -1736,19 +1910,20 @@ async def simulate(req: SimReq):
     metrics = r.to_dict()
     metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
     metrics["completed_operations"] = analytics.completed_operations
-    metrics["total_operations"] = len(shop.operations)
+    metrics["total_operations"] = len(current_shop.operations)
     metrics["feasible"] = analytics.feasible
-    return {"metrics": metrics, "gantt": gantt, "rule": req.rule_name}
+    return {"metrics": metrics, "gantt": gantt, "rule": req.rule_name, "diagnosis": diagnosis}
 
 @app.post("/api/simulate/compare")
 async def compare(rule_names: list[str] = None):
-    if not shop: raise HTTPException(400, "请先生成实例")
+    current_shop = _active_shop()
+    if current_shop is None: raise HTTPException(400, "请先生成实例")
     names = rule_names or get_all_rule_names()
     results = []
     for n in names:
         if n not in BUILTIN_RULES: continue
-        r = Simulator(shop, BUILTIN_RULES[n]).run()
-        analytics = build_schedule_analytics(shop, r)
+        r = Simulator(current_shop, BUILTIN_RULES[n]).run()
+        analytics = build_schedule_analytics(current_shop, r)
         metrics = r.to_dict()
         metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
         results.append({"rule": n, "metrics": metrics})

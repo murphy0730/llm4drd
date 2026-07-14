@@ -69,7 +69,8 @@ const REVIEW_KPI_KEYS = [
 ];
 
 const NAV_MAP = {
-  "scene-library": { page: "scene-library" },
+  // “当前实例”页面已移除；旧书签 hash 统一落到“新建与导入”。
+  "scene-library": { page: "new-scene" },
   "new-scene": { page: "new-scene" },
   dashboard: { page: "dashboard", requiresScene: true },
   insights: { page: "insights", insightTab: "structure", requiresScene: true },
@@ -96,12 +97,16 @@ const NAV_MAP = {
 };
 
 const app = {
-  currentPage: "scene-library",
-  currentNav: "scene-library",
+  currentPage: "new-scene",
+  currentNav: "new-scene",
   currentSceneId: null,
   currentScene: null,
   sceneHistory: [],
   instanceDetails: null,
+  validation: null,
+  validationBusy: false,
+  importBusy: false,
+  simBusy: false,
   instanceDb: null,
   downtimes: [],
   graphMeta: null,
@@ -227,11 +232,35 @@ const api = {
   generateInstance(payload) { return this.json("/instance/generate", "POST", payload); },
   getInstanceDetails() { return this.json("/instance/details"); },
   getInstanceDb() { return this.json("/instance/db"); },
-  async importExcel(file) {
-    const formData = new FormData();
-    formData.append("file", file);
-    return this.request("/instance/import-excel", { method: "POST", body: formData });
+  importExcel(file, onProgress) {
+    // 用 XHR 而非 fetch，才能拿到上传进度用于进度条展示。
+    return new Promise((resolve, reject) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${CONFIG.API_BASE}/instance/import-excel`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && typeof onProgress === "function") {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      };
+      xhr.onerror = () => reject(new Error("网络错误，文件未能上传到服务器"));
+      xhr.onload = () => {
+        let payload = null;
+        try { payload = JSON.parse(xhr.responseText); } catch (_) { /* 非 JSON 响应按原文处理 */ }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(payload ?? xhr.responseText);
+          return;
+        }
+        let message = xhr.responseText;
+        if (typeof payload?.detail === "string") message = payload.detail;
+        else if (Array.isArray(payload?.detail)) message = payload.detail.map((item) => item.msg || JSON.stringify(item)).join("；");
+        reject(new Error(message || `请求失败（HTTP ${xhr.status}）`));
+      };
+      xhr.send(formData);
+    });
   },
+  validateInstance() { return this.json("/instance/validate"); },
   downloadTemplate() { return this.request("/instance/template"); },
   exportCsv() { return this.request("/instance/csv"); },
   updateOrder(id, payload) { return this.json(`/instance/order/${id}`, "PUT", payload); },
@@ -251,7 +280,9 @@ const api = {
   buildGraph() { return this.json("/graph/build", "POST"); },
   getGraphBuildStatus(taskId) { return this.json(`/graph/status/${taskId}`); },
   getGraphMeta() { return this.json("/graph/meta"); },
-  getGraphNodes(limit = 60, offset = 0) { return this.json(`/graph/nodes?limit=${limit}&offset=${offset}`); },
+  getGraphNodes(limit = 60, offset = 0, nodeType = null) {
+    return this.json(`/graph/nodes?limit=${limit}&offset=${offset}${nodeType ? `&node_type=${encodeURIComponent(nodeType)}` : ""}`);
+  },
   getGraphEdges(limit = 80, offset = 0) { return this.json(`/graph/edges?limit=${limit}&offset=${offset}`); },
   simulate(ruleName) { return this.json("/simulate", "POST", { rule_name: ruleName }); },
   simulateReferenceSolutions(ruleNames, objectiveKeys) {
@@ -561,6 +592,25 @@ function toast(message, type = "info") {
   node.textContent = message;
   stack.appendChild(node);
   window.setTimeout(() => node.remove(), 3200);
+}
+
+function showErrorModal(title, message, detail = "") {
+  document.querySelector(".error-modal-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "error-modal-overlay";
+  overlay.innerHTML = `
+    <div class="error-modal" role="alertdialog" aria-modal="true" aria-labelledby="error-modal-title">
+      <h3 id="error-modal-title">${escapeHtml(title)}</h3>
+      <p>${escapeHtml(message || "未收到具体错误说明")}</p>
+      ${detail ? `<details><summary>查看技术详情</summary><pre>${escapeHtml(detail)}</pre></details>` : ""}
+      <div class="form-actions"><button class="btn btn-primary" type="button" data-modal-close>我知道了</button></div>
+    </div>
+  `;
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay || event.target.closest("[data-modal-close]")) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+  overlay.querySelector("[data-modal-close]")?.focus();
 }
 
 function downloadBlob(blob, filename) {
@@ -1381,11 +1431,11 @@ async function navigate(navKey, pushHash = true) {
   if (resolved.requiresScene) {
     const ready = await ensureSceneLoaded();
     if (!ready) {
-      app.currentNav = "scene-library";
-      app.currentPage = "scene-library";
-      setActiveNav("scene-library");
-      showPage("scene-library");
-      renderSceneLibrary();
+      toast("请先在“新建与导入”页生成或导入实例。", "warning");
+      app.currentNav = "new-scene";
+      app.currentPage = "new-scene";
+      setActiveNav("new-scene");
+      showPage("new-scene");
       return;
     }
   }
@@ -1447,64 +1497,6 @@ function renderSimpleTable(headers, rows, options = {}) {
         </tbody>
       </table>
       ${options.footer ? `<div class="table-footer">${options.footer}</div>` : ""}
-    </div>
-  `;
-}
-
-function renderSceneLibrary() {
-  const container = el("scene-library-content");
-  if (!container) return;
-  const summary = getSceneSummary();
-  const hasScene = !!app.currentScene;
-  const historyRows = asArray(app.sceneHistory);
-  container.innerHTML = `
-    <article class="surface-card executive-hero">
-      <div class="executive-hero-copy">
-        <span class="eyebrow">Instance overview</span>
-        <h3>${hasScene ? escapeHtml(app.currentScene.name || "\u5f53\u524d\u6d3b\u52a8\u5b9e\u4f8b") : "\u5f53\u524d\u6682\u65e0\u6d3b\u52a8\u5b9e\u4f8b"}</h3>
-        <p>${hasScene
-          ? "当前实例已可用于仿真、优化和方案评审。"
-          : "请先生成或导入实例，建立一个可分析的调度问题。"}
-        </p>
-      </div>
-      <div class="executive-hero-metrics">
-        <div><span>\u8ba2\u5355 / \u5de5\u5e8f</span><strong>${hasScene ? `${formatInt(summary.orders)} / ${formatInt(summary.operations)}` : "-"}</strong></div>
-        <div><span>\u8d44\u6e90\u89c4\u6a21</span><strong>${hasScene ? `${formatInt(summary.machines)} \u673a / ${formatInt(summary.toolings)} \u5de5\u88c5 / ${formatInt(summary.personnel)} \u4eba\u5458` : "-"}</strong></div>
-        <div><span>\u8ba1\u5212\u8d77\u70b9</span><strong>${hasScene ? formatDateTime(app.instanceDetails?.plan_start_at) : "-"}</strong></div>
-      </div>
-    </article>
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head">
-          <h3>\u5f53\u524d\u6d3b\u52a8\u5b9e\u4f8b</h3>
-          <p>确认当前正在分析的实例对象和规模。</p>
-        </div>
-        ${hasScene ? renderKeyValueGrid([
-          { label: "\u5b9e\u4f8b\u540d\u79f0", value: escapeHtml(app.currentScene.name || "\u5f53\u524d\u6d3b\u52a8\u5b9e\u4f8b") },
-          { label: "\u8ba2\u5355\u6570", value: formatInt(summary.orders) },
-          { label: "\u4efb\u52a1\u6570", value: formatInt(summary.tasks) },
-          { label: "\u5de5\u5e8f\u6570", value: formatInt(summary.operations) },
-          { label: "\u673a\u5668\u6570", value: formatInt(summary.machines) },
-          { label: "\u5de5\u88c5\u6570", value: formatInt(summary.toolings) },
-          { label: "\u4eba\u5458\u6570", value: formatInt(summary.personnel) },
-          { label: "\u81ea\u52a8\u65e5\u5386\u5929\u6570", value: `${formatInt(summary.calendar_days || 0)} \u5929` },
-        ]) : renderEmptyState("\u672a\u540c\u6b65\u5f53\u524d\u5b9e\u4f8b", "\u70b9\u51fb\u4e0a\u65b9\u201c\u540c\u6b65\u5f53\u524d\u5b9e\u4f8b\u201d\u6216\u8fdb\u5165\u201c\u65b0\u5efa\u573a\u666f\u201d\u540e\u751f\u6210\u4e00\u4e2a\u65b0\u5b9e\u4f8b\u3002")}
-      </article>
-      <article class="surface-card">
-        <div class="card-head">
-          <h3>最近实例摘要</h3>
-          <p>这里只记录规模和计划起点，不代表后端保存了可切换的实例副本。</p>
-        </div>
-        ${historyRows.length ? renderSimpleTable(
-          ["\u540d\u79f0", "\u8ba2\u5355 / \u5de5\u5e8f", "\u8d44\u6e90", "\u8bb0\u5f55\u65f6\u95f4"],
-          historyRows.slice(0, 8).map((item) => [
-            escapeHtml(item.name || "-"),
-            `${formatInt(item.orders)} / ${formatInt(item.operations)}`,
-            `${formatInt(item.machines || 0)} \u673a / ${formatInt(item.toolings || 0)} \u5de5\u88c5`,
-            formatDateTime(item.recordedAt),
-          ]),
-        ) : renderEmptyState("\u6682\u65e0\u5386\u53f2\u8bb0\u5f55", "\u540e\u7eed\u6bcf\u6b21\u751f\u6210\u6216\u540c\u6b65\u5b9e\u4f8b\u540e\uff0c\u8fd9\u91cc\u4f1a\u81ea\u52a8\u79ef\u7d2f\u6700\u8fd1\u7684\u573a\u666f\u8bb0\u5f55\u3002")}
-      </article>
     </div>
   `;
 }
@@ -3543,6 +3535,13 @@ function renderWorkflowStep3() {
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">打开完整仿真页</button>
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="graph">返回图谱视图</button>
       </div>
+      ${app.simResult && simMetrics.feasible === false ? `
+        <div class="sim-infeasible-banner" role="alert">
+          <strong>仿真结果不完整，下方指标不可用于决策</strong>
+          <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)} 道工序，请到“实例与约束”页运行数据校验。`)}</span>
+          <div class="form-actions"><button class="btn btn-secondary" type="button" data-nav-jump="config">去查看校验结果</button></div>
+        </div>
+      ` : ""}
       ${app.simResult ? renderKeyValueGrid([
         { label: "总延误", value: formatDurationHours(simMetrics.total_tardiness) },
         { label: "总周期", value: formatDurationHours(simMetrics.makespan) },
@@ -3752,6 +3751,58 @@ function renderWorkflow() {
   }
 }
 
+function renderValidationPanel() {
+  const validation = app.validation;
+  if (app.validationBusy) {
+    return `
+      <article class="surface-card validation-panel">
+        <div class="card-head"><h3>数据强校验</h3><p>正在对数据完整性、关联关系和约束条件做后台校验…</p></div>
+        <div class="import-progress-track indeterminate"><i></i></div>
+      </article>
+    `;
+  }
+  if (!validation) {
+    return `
+      <article class="surface-card validation-panel">
+        <div class="card-head"><h3>数据强校验</h3><p>导入或生成实例后会自动校验；也可以手动重新运行。</p></div>
+        <div class="form-actions"><button class="btn btn-primary" type="button" data-action="run-validation">运行数据校验</button></div>
+      </article>
+    `;
+  }
+  const failed = validation.status === "failed";
+  const tone = failed ? "danger" : validation.status === "warning" ? "warning" : "success";
+  const label = failed ? "校验未通过" : validation.status === "warning" ? "校验通过（有警告）" : "校验通过";
+  const issues = [...asArray(validation.errors), ...asArray(validation.warnings)];
+  return `
+    <article class="surface-card validation-panel ${tone}">
+      <div class="card-head">
+        <div><h3>数据强校验</h3><p>覆盖数据完整性、关联关系与约束条件；错误级问题会导致仿真/优化静默失败。</p></div>
+        ${statusChip(label, tone === "danger" ? "danger" : tone)}
+      </div>
+      ${renderKeyValueGrid([
+        { label: "错误", value: formatInt(validation.error_count || 0) },
+        { label: "警告", value: formatInt(validation.warning_count || 0) },
+        { label: "校验时间", value: formatDateTime(validation.checked_at) },
+        { label: "日历天数", value: `${formatInt(validation.stats?.calendar?.final_days || 0)} 天` },
+      ])}
+      ${issues.length ? renderSimpleTable(
+        ["级别", "类别", "实体", "问题明细"],
+        issues.slice(0, 50).map((item) => [
+          statusChip(item.severity === "error" ? "错误" : "警告", item.severity === "error" ? "danger" : "warning"),
+          escapeHtml(item.category || "-"),
+          escapeHtml(item.entity || "-"),
+          escapeHtml(item.message || "-"),
+        ]),
+        { footer: issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条。` : `共 ${issues.length} 条问题。` },
+      ) : '<div class="subtle-note">未发现脏数据或格式问题，可以进入仿真与优化。</div>'}
+      <div class="form-actions">
+        <button class="btn btn-ghost" type="button" data-action="run-validation">重新校验</button>
+        ${failed ? '<span class="subtle-note">请先修复上述错误（可在下方各标签页直接编辑数据），否则仿真指标会显示为 0。</span>' : ""}
+      </div>
+    </article>
+  `;
+}
+
 function renderConfigInstanceTab() {
   const summary = getSceneSummary();
   const readiness = [
@@ -3763,6 +3814,7 @@ function renderConfigInstanceTab() {
   ];
   const readyCount = readiness.filter((item) => item.ok).length;
   return `
+    ${renderValidationPanel()}
     <article class="surface-card readiness-panel">
       <div class="card-head">
         <div><h3>数据就绪检查</h3><p>在仿真前确认实例具备最小排产条件。</p></div>
@@ -5362,12 +5414,16 @@ function mountLegacyCytoscapeGraph() {
 async function renderCurrentPage() {
   ensureReviewSelection();
   updateShell();
-  if (app.currentPage === "scene-library") renderSceneLibrary();
   if (app.currentPage === "dashboard") renderDashboard();
   if (app.currentPage === "insights") renderInsights();
   if (app.currentPage === "workflow") renderWorkflow();
   if (app.currentPage === "review") renderReview();
-  if (app.currentPage === "config") renderConfig();
+  if (app.currentPage === "config") {
+    renderConfig();
+    if (app.configTab === "instance" && !app.validation && !app.validationBusy && app.currentScene) {
+      handleRunValidation(true);
+    }
+  }
   if (app.currentPage === "system") renderSystem();
   syncGraphBuildControls();
 }
@@ -5451,6 +5507,11 @@ async function pollOptimizeStatus() {
       updateShell();
       await renderCurrentPage();
       toast(`优化失败：${app.optimizeStatus?.error || app.optimizeStatus?.message || "未收到具体原因"}`, "error");
+      showErrorModal(
+        `优化失败${app.optimizeStatus?.error_type ? `（${app.optimizeStatus.error_type}）` : ""}`,
+        app.optimizeStatus?.error || app.optimizeStatus?.message || "后端未返回具体原因，请查看服务日志。",
+        app.optimizeStatus?.technical_detail || "",
+      );
       return;
     }
     if (["done", "completed", "success"].includes(lowered)) {
@@ -5480,6 +5541,7 @@ async function pollOptimizeStatus() {
     updateShell();
     await renderCurrentPage();
     toast(app.optimizeStatus.error, "error");
+    showErrorModal("无法获取优化进度", app.optimizeStatus.error, "请确认后端服务仍在运行，然后重新进入本页查看任务状态。");
   }
 }
 
@@ -5516,50 +5578,123 @@ function collectGeneratePayload() {
 
 async function handleGenerateInstance() {
   try {
-    await api.generateInstance(collectGeneratePayload());
+    const result = await api.generateInstance(collectGeneratePayload());
+    app.validation = result?.validation || null;
     await syncCurrentScene(true);
-    app.graphMeta = null;
-    app.graphNodes = [];
-    app.graphEdges = [];
-    stopGraphBuildPolling();
-    app.graphBuildTaskId = null;
-    app.graphBuildStatus = null;
-    resetGraphView({ preserveFilters: false });
-    app.simResult = null;
-    app.optimizeResult = null;
-    app.optimizeStatus = null;
-    app.optimizeTaskId = null;
-    app.referenceSolutions = [];
-    app.exactReference = null;
-    toast("实例已生成并加载。", "success");
-    await navigate("dashboard");
+    resetInstanceDerivedState();
+    toast("实例已生成并加载，请在“实例与约束”页确认校验结果。", "success");
+    app.configTab = "instance";
+    await navigate("config");
   } catch (error) {
     toast(`生成实例失败：${error.message}`, "warning");
   }
 }
 
+function setImportProgress(state) {
+  const panel = el("import-progress");
+  if (!panel) return;
+  if (!state) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  panel.classList.toggle("is-error", state.tone === "error");
+  panel.classList.toggle("is-success", state.tone === "success");
+  const label = el("import-progress-label");
+  const bar = el("import-progress-bar");
+  const note = el("import-progress-note");
+  if (label) label.textContent = state.label || "";
+  if (bar) bar.style.width = `${Math.max(0, Math.min(100, Number(state.percent || 0)))}%`;
+  if (note) note.textContent = state.note || "";
+  document.querySelectorAll('[data-action="trigger-import"], [data-action="generate-instance"]').forEach((button) => {
+    button.disabled = !!state.busy;
+    button.setAttribute("aria-busy", state.busy ? "true" : "false");
+  });
+}
+
+function resetInstanceDerivedState() {
+  app.graphMeta = null;
+  app.graphNodes = [];
+  app.graphEdges = [];
+  stopGraphBuildPolling();
+  app.graphBuildTaskId = null;
+  app.graphBuildStatus = null;
+  resetGraphView({ preserveFilters: false });
+  app.simResult = null;
+  app.optimizeResult = null;
+  app.optimizeStatus = null;
+  app.optimizeTaskId = null;
+  app.referenceSolutions = [];
+  app.exactReference = null;
+}
+
+async function handleRunValidation(silent = false) {
+  if (app.validationBusy) return;
+  app.validationBusy = true;
+  if (app.currentPage === "config") renderConfig();
+  try {
+    app.validation = await api.validateInstance();
+    if (!silent) {
+      const failed = app.validation.status === "failed";
+      toast(
+        failed ? `校验发现 ${formatInt(app.validation.error_count)} 个错误，请查看明细。` : "数据校验完成。",
+        failed ? "error" : "success",
+      );
+    }
+  } catch (error) {
+    if (!silent) toast(`数据校验失败：${error.message}`, "warning");
+  } finally {
+    app.validationBusy = false;
+    if (app.currentPage === "config") renderConfig();
+  }
+}
+
 async function handleImportFile(file) {
   if (!file) return;
+  if (app.importBusy) {
+    toast("正在导入中，请等待当前任务完成。", "warning");
+    return;
+  }
+  app.importBusy = true;
+  setImportProgress({ busy: true, percent: 0, label: "正在上传 Excel…", note: `文件：${file.name}` });
   try {
-    await api.importExcel(file);
+    const result = await api.importExcel(file, (percent) => {
+      setImportProgress({
+        busy: true,
+        percent: Math.min(90, percent * 0.9),
+        label: percent >= 100 ? "上传完成，正在解析并校验数据…" : `正在上传 Excel… ${percent}%`,
+        note: `文件：${file.name}`,
+      });
+    });
+    setImportProgress({ busy: true, percent: 95, label: "正在刷新实例数据…", note: "即将完成" });
+    app.validation = result?.validation || null;
     await syncCurrentScene(true);
-    app.graphMeta = null;
-    app.graphNodes = [];
-    app.graphEdges = [];
-    stopGraphBuildPolling();
-    app.graphBuildTaskId = null;
-    app.graphBuildStatus = null;
-    resetGraphView({ preserveFilters: false });
-    app.simResult = null;
-    app.optimizeResult = null;
-    app.optimizeStatus = null;
-    app.optimizeTaskId = null;
-    app.referenceSolutions = [];
-    app.exactReference = null;
-    toast("Excel 导入成功，当前实例已更新。", "success");
-    await navigate("dashboard");
+    resetInstanceDerivedState();
+    const validation = app.validation;
+    const failed = validation?.status === "failed";
+    setImportProgress({
+      busy: false,
+      percent: 100,
+      tone: failed ? "error" : "success",
+      label: failed ? "导入完成，但数据校验发现问题" : "导入成功",
+      note: failed
+        ? `发现 ${formatInt(validation.error_count)} 个错误、${formatInt(validation.warning_count)} 个警告，请在“实例与约束”页查看明细。`
+        : `已加载 ${formatInt(getSceneSummary().orders)} 个订单 / ${formatInt(getSceneSummary().operations)} 道工序。`,
+    });
+    if (failed) {
+      toast(`导入完成，但校验发现 ${formatInt(validation.error_count)} 个错误，请先修复数据。`, "error");
+    } else if (validation?.status === "warning") {
+      toast(`Excel 导入成功，但有 ${formatInt(validation.warning_count)} 条校验警告。`, "warning");
+    } else {
+      toast("Excel 导入成功，数据校验通过。", "success");
+    }
+    app.configTab = "instance";
+    await navigate("config");
   } catch (error) {
-    toast(`导入失败：${error.message}`, "warning");
+    setImportProgress({ busy: false, percent: 100, tone: "error", label: "导入失败", note: error.message });
+    toast(`导入失败：${error.message}`, "error");
+  } finally {
+    app.importBusy = false;
   }
 }
 
@@ -5567,9 +5702,20 @@ async function fetchGraphDataset(meta) {
   const nodeTotal = Math.min(meta?.total_nodes || 0, CONFIG.GRAPH_NODE_FETCH_LIMIT);
   const edgeTotal = Math.min(meta?.total_edges || 0, CONFIG.GRAPH_EDGE_FETCH_LIMIT);
 
+  // 大数据量下按类型分层采样：保证订单/任务/机器等每类节点都有代表，
+  // 否则前 N 行可能全是工序节点，资源边全部悬空、图谱呈现失败。
+  const typeCounts = meta?.node_type_counts || {};
   const nodeRequests = [];
-  for (let offset = 0; offset < nodeTotal; offset += CONFIG.GRAPH_NODE_BATCH_SIZE) {
-    nodeRequests.push(api.getGraphNodes(Math.min(CONFIG.GRAPH_NODE_BATCH_SIZE, nodeTotal - offset), offset));
+  if ((meta?.total_nodes || 0) > CONFIG.GRAPH_NODE_FETCH_LIMIT && Object.keys(typeCounts).length) {
+    const quotas = { order: 140, task: 200, operation: 280, machine: 120, tooling: 80, personnel: 80 };
+    GRAPH_NODE_ORDER.forEach((type) => {
+      const total = Number(typeCounts[type] || 0);
+      if (total > 0) nodeRequests.push(api.getGraphNodes(Math.min(quotas[type] || 100, total), 0, type));
+    });
+  } else {
+    for (let offset = 0; offset < nodeTotal; offset += CONFIG.GRAPH_NODE_BATCH_SIZE) {
+      nodeRequests.push(api.getGraphNodes(Math.min(CONFIG.GRAPH_NODE_BATCH_SIZE, nodeTotal - offset), offset));
+    }
   }
 
   const edgeRequests = [];
@@ -5720,14 +5866,44 @@ async function handleBuildGraph() {
   }
 }
 
+function syncSimulateControls() {
+  document.querySelectorAll('[data-action="run-simulate"]').forEach((button) => {
+    button.disabled = app.simBusy;
+    button.setAttribute("aria-busy", app.simBusy ? "true" : "false");
+    button.textContent = app.simBusy ? "仿真计算中…" : "运行仿真";
+  });
+}
+
 async function handleSimulate() {
+  if (app.simBusy) return;
+  app.simBusy = true;
+  syncSimulateControls();
   try {
     app.simRule = el("workflow-sim-rule")?.value || app.simRule;
     app.simResult = await api.simulate(app.simRule);
-    toast(`规则仿真已完成：${app.simRule}`, "success");
+    const metrics = app.simResult?.metrics || {};
+    // 调试输出：确认后端计算真实执行、关键中间值是否为 0
+    console.info("[simulate]", app.simRule, {
+      scheduled: asArray(app.simResult?.gantt).length,
+      completed_operations: metrics.completed_operations,
+      total_operations: metrics.total_operations,
+      makespan: metrics.makespan,
+      total_tardiness: metrics.total_tardiness,
+      avg_net_available_utilization: metrics.avg_net_available_utilization,
+      feasible: metrics.feasible,
+      diagnosis: app.simResult?.diagnosis,
+    });
+    if (app.simResult?.diagnosis) {
+      toast(`仿真完成，但结果不完整：${app.simResult.diagnosis}`, "error");
+    } else {
+      toast(`规则仿真已完成：${app.simRule}`, "success");
+    }
     await renderCurrentPage();
   } catch (error) {
-    toast(`运行仿真失败：${error.message}`, "warning");
+    toast(`运行仿真失败：${error.message}`, "error");
+  } finally {
+    app.simBusy = false;
+    syncSimulateControls();
   }
 }
 
@@ -5777,6 +5953,7 @@ async function handleStartOptimize() {
     };
     await renderCurrentPage();
     toast(`启动优化失败：${error.message}`, "error");
+    showErrorModal("启动优化失败", error.message);
   }
 }
 
@@ -6058,7 +6235,6 @@ async function refreshAll() {
 }
 
 async function handleAction(action, target) {
-  if (action === "goto-scene-library") return navigate("scene-library");
   if (action === "goto-new-scene") return navigate("new-scene");
   if (action === "goto-dashboard") return navigate("dashboard");
   if (action === "goto-review") return navigate("solution-review");
@@ -6130,6 +6306,7 @@ async function handleAction(action, target) {
     return;
   }
   if (action === "generate-instance") return handleGenerateInstance();
+  if (action === "run-validation") return handleRunValidation();
   if (action === "build-graph") return handleBuildGraph();
   if (action === "run-simulate") return handleSimulate();
   if (action === "start-hybrid-optimize") return handleStartOptimize();
@@ -6380,7 +6557,7 @@ function bindGlobalEvents() {
   });
 
   window.addEventListener("hashchange", async () => {
-    const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "scene-library");
+    const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
     await navigate(navKey, false);
   });
 }
@@ -6392,7 +6569,7 @@ async function init() {
   await loadCatalogs();
   await syncCurrentScene(true);
   if (app.currentScene) await loadExistingGraph();
-  const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "scene-library");
+  const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
   await navigate(navKey, false);
 }
 
