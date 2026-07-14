@@ -1576,45 +1576,45 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
     errors: list[dict] = []
     warnings: list[dict] = []
 
-    def err(category: str, entity: str, message: str):
-        errors.append({"severity": "error", "category": category, "entity": entity, "message": message})
+    def err(category: str, entity: str, message: str, sheet: str = "-"):
+        errors.append({"severity": "error", "category": category, "entity": entity, "message": message, "sheet": sheet})
 
-    def warn(category: str, entity: str, message: str):
-        warnings.append({"severity": "warning", "category": category, "entity": entity, "message": message})
+    def warn(category: str, entity: str, message: str, sheet: str = "-"):
+        warnings.append({"severity": "warning", "category": category, "entity": entity, "message": message, "sheet": sheet})
 
     # --- 关联关系：任务 → 订单 / 前置任务 ---
     for task_id, task in current_shop.tasks.items():
         if task.order_id not in current_shop.orders:
-            err("关联关系", task_id, f"任务引用了不存在的订单 {task.order_id}")
+            err("关联关系", task_id, f"任务引用了不存在的订单 {task.order_id}", sheet="tasks / orders")
         for predecessor_id in task.predecessor_task_ids:
             if predecessor_id not in current_shop.tasks:
-                err("关联关系", task_id, f"前置任务 {predecessor_id} 不存在，该任务的后续工序将永远无法就绪")
+                err("关联关系", task_id, f"前置任务 {predecessor_id} 不存在，该任务的后续工序将永远无法就绪", sheet="tasks")
 
     # --- 数据完整性 + 约束条件：工序 ---
     ops_without_machine = 0
     for op_id, op in current_shop.operations.items():
         if op.task_id not in current_shop.tasks:
-            err("关联关系", op_id, f"工序引用了不存在的任务 {op.task_id}")
+            err("关联关系", op_id, f"工序引用了不存在的任务 {op.task_id}", sheet="operations / tasks")
         if op.processing_time is None or float(op.processing_time) <= 0:
-            err("数据完整性", op_id, f"加工时长非法（{op.processing_time}），必须大于 0")
+            err("数据完整性", op_id, f"加工时长非法（{op.processing_time}），必须大于 0", sheet="operations")
         for predecessor_id in op.predecessor_ops:
             if predecessor_id not in current_shop.operations:
-                err("关联关系", op_id, f"前置工序 {predecessor_id} 不存在，该工序将永远无法就绪（仿真会输出空排程）")
+                err("关联关系", op_id, f"前置工序 {predecessor_id} 不存在，该工序将永远无法就绪（仿真会输出空排程）", sheet="operations")
         for predecessor_task_id in op.predecessor_tasks:
             if predecessor_task_id not in current_shop.tasks:
-                err("关联关系", op_id, f"前置任务 {predecessor_task_id} 不存在，该工序将永远无法就绪")
+                err("关联关系", op_id, f"前置任务 {predecessor_task_id} 不存在，该工序将永远无法就绪", sheet="operations / tasks")
         if not current_shop.get_eligible_machines(op):
             ops_without_machine += 1
             if ops_without_machine <= 20:
-                err("约束条件", op_id, f"没有任何可用机器（工艺类型 {op.process_type}，指定机器 {op.eligible_machine_ids or '按类型匹配'}）")
+                err("约束条件", op_id, f"没有任何可用机器（工艺类型 {op.process_type}，指定机器 {op.eligible_machine_ids or '按类型匹配'}）", sheet="operations / machines")
         for tooling_type in op.required_tooling_types:
             if not current_shop.get_toolings_for_type(tooling_type):
-                err("约束条件", op_id, f"缺少所需工装类型 {tooling_type} 的任何实例")
+                err("约束条件", op_id, f"缺少所需工装类型 {tooling_type} 的任何实例", sheet="operations / toolings")
         for skill_id in op.required_personnel_skills:
             if not current_shop.get_personnel_for_skill(skill_id):
-                err("约束条件", op_id, f"缺少具备技能 {skill_id} 的任何人员")
+                err("约束条件", op_id, f"缺少具备技能 {skill_id} 的任何人员", sheet="operations / personnel")
     if ops_without_machine > 20:
-        err("约束条件", "operations", f"另有 {ops_without_machine - 20} 道工序同样没有可用机器（已省略明细）")
+        err("约束条件", "operations", f"另有 {ops_without_machine - 20} 道工序同样没有可用机器（已省略明细）", sheet="operations / machines")
 
     # --- 工序前驱环检测（有环则整条链永远无法就绪）---
     color: dict[str, int] = {}
@@ -1632,7 +1632,7 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
                     continue
                 state = color.get(predecessor_id, 0)
                 if state == 1:
-                    err("关联关系", node_id, f"工序前驱存在循环依赖（涉及 {predecessor_id}），相关工序永远无法开工")
+                    err("关联关系", node_id, f"工序前驱存在循环依赖（涉及 {predecessor_id}），相关工序永远无法开工", sheet="operations")
                     cycle_reported = True
                     stack.clear()
                     advanced = True
@@ -1649,14 +1649,14 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
     # --- 订单交期与结构 ---
     for order_id, order in current_shop.orders.items():
         if not order.task_ids:
-            warn("数据完整性", order_id, "订单下没有任何任务")
+            warn("数据完整性", order_id, "订单下没有任何任务", sheet="orders / tasks")
         if math.isfinite(order.due_date) and order.due_date < order.release_time:
-            warn("约束条件", order_id, f"交期（{order.due_date:.1f}h）早于释放时间（{order.release_time:.1f}h），必然延误")
+            warn("约束条件", order_id, f"交期（{order.due_date:.1f}h）早于释放时间（{order.release_time:.1f}h），必然延误", sheet="orders")
 
     # --- 资源日历容量 ---
     calendar_info = _ensure_shop_calendar_capacity(current_shop)
     if calendar_info.get("final_days", 0) < calendar_info.get("required_days", 0):
-        err("约束条件", "calendar", f"资源班次日历（{calendar_info['final_days']} 天）无法覆盖预计排产跨度（{calendar_info['required_days']} 天），后段工序将无法安排")
+        err("约束条件", "calendar", f"资源班次日历（{calendar_info['final_days']} 天）无法覆盖预计排产跨度（{calendar_info['required_days']} 天），后段工序将无法安排", sheet="machines / personnel")
 
     status = "failed" if errors else ("warning" if warnings else "passed")
     return {
@@ -1690,6 +1690,58 @@ async def validate_instance():
         len(current_shop.operations),
     )
     return validation
+
+
+@app.get("/api/instance/validate/export")
+async def export_validation_excel():
+    """导出数据强校验的完整结果为 Excel（不受前端仅展示前 50 条的限制）。"""
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例，请先生成或导入")
+    validation = _validate_instance(current_shop)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "校验问题明细"
+    ws.append(["级别", "问题Sheet", "类别", "实体", "问题明细"])
+    for item in list(validation["errors"]) + list(validation["warnings"]):
+        ws.append([
+            "错误" if item.get("severity") == "error" else "警告",
+            item.get("sheet", "-"),
+            item.get("category", "-"),
+            item.get("entity", "-"),
+            item.get("message", "-"),
+        ])
+
+    ws_summary = wb.create_sheet("校验概要")
+    stats = validation.get("stats", {})
+    for key, value in [
+        ("校验状态", validation["status"]),
+        ("错误数", validation["error_count"]),
+        ("警告数", validation["warning_count"]),
+        ("校验时间", validation["checked_at"]),
+        ("订单数", stats.get("orders", 0)),
+        ("任务数", stats.get("tasks", 0)),
+        ("工序数", stats.get("operations", 0)),
+        ("机器数", stats.get("machines", 0)),
+        ("工装数", stats.get("toolings", 0)),
+        ("人员数", stats.get("personnel", 0)),
+    ]:
+        ws_summary.append([key, value])
+
+    for sheet in wb.worksheets:
+        for column_cells in sheet.columns:
+            length = max((len(str(cell.value)) for cell in column_cells if cell.value is not None), default=0)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(length + 2, 12), 80)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    filename = f"validation_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _estimate_graph_size(current_shop: ShopFloor) -> dict:

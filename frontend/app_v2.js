@@ -261,6 +261,7 @@ const api = {
     });
   },
   validateInstance() { return this.json("/instance/validate"); },
+  exportValidation() { return this.request("/instance/validate/export"); },
   downloadTemplate() { return this.request("/instance/template"); },
   exportCsv() { return this.request("/instance/csv"); },
   updateOrder(id, payload) { return this.json(`/instance/order/${id}`, "PUT", payload); },
@@ -3786,17 +3787,19 @@ function renderValidationPanel() {
         { label: "日历天数", value: `${formatInt(validation.stats?.calendar?.final_days || 0)} 天` },
       ])}
       ${issues.length ? renderSimpleTable(
-        ["级别", "类别", "实体", "问题明细"],
+        ["级别", "问题 Sheet", "类别", "实体", "问题明细"],
         issues.slice(0, 50).map((item) => [
           statusChip(item.severity === "error" ? "错误" : "警告", item.severity === "error" ? "danger" : "warning"),
+          escapeHtml(item.sheet || "-"),
           escapeHtml(item.category || "-"),
           escapeHtml(item.entity || "-"),
           escapeHtml(item.message || "-"),
         ]),
-        { footer: issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条。` : `共 ${issues.length} 条问题。` },
+        { footer: issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条，导出 Excel 可查看全部。` : `共 ${issues.length} 条问题。` },
       ) : '<div class="subtle-note">未发现脏数据或格式问题，可以进入仿真与优化。</div>'}
       <div class="form-actions">
         <button class="btn btn-ghost" type="button" data-action="run-validation">重新校验</button>
+        ${issues.length ? '<button class="btn btn-ghost" type="button" data-action="export-validation">导出校验结果 Excel</button>' : ""}
         ${failed ? '<span class="subtle-note">请先修复上述错误（可在下方各标签页直接编辑数据），否则仿真指标会显示为 0。</span>' : ""}
       </div>
     </article>
@@ -6307,6 +6310,12 @@ async function handleAction(action, target) {
   }
   if (action === "generate-instance") return handleGenerateInstance();
   if (action === "run-validation") return handleRunValidation();
+  if (action === "export-validation") {
+    const blob = await api.exportValidation();
+    downloadBlob(blob, `validation_result_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`);
+    toast("校验结果 Excel 已导出。", "success");
+    return;
+  }
   if (action === "build-graph") return handleBuildGraph();
   if (action === "run-simulate") return handleSimulate();
   if (action === "start-hybrid-optimize") return handleStartOptimize();
