@@ -75,6 +75,7 @@ class Simulator:
         # 避免被反复评估或把资源锁死在无穷远）
         self._unschedulable_ops: set[str] = set()
         self._pdr_error_logged = False
+        self._op_dispatch_type_ids: dict[str, set[str]] = {}
 
     def _init_runtime_caches(self, shop: ShopFloor) -> None:
         self._eligible_machine_ids = {}
@@ -92,8 +93,16 @@ class Simulator:
         self._unschedulable_ops = set()
         self._pdr_error_logged = False
 
+        self._op_dispatch_type_ids = {}
         for op_id, op in shop.operations.items():
-            self._eligible_machine_ids[op_id] = {machine.id for machine in shop.get_eligible_machines(op)}
+            eligible_machines = shop.get_eligible_machines(op)
+            self._eligible_machine_ids[op_id] = {machine.id for machine in eligible_machines}
+            # 派工桶必须按"可用机台的实际类型"建立：工序显式指定 eligible_machine_ids 时，
+            # 机台类型可能不等于工序的 process_type——若仍按 process_type 建桶，
+            # 指定机台所在类型的机器永远扫描不到该工序，导致其被永久饿死
+            # （表现为"前驱已完成但抢不到资源"，且与派工规则无关）。
+            dispatch_types = {machine.type_id for machine in eligible_machines}
+            self._op_dispatch_type_ids[op_id] = dispatch_types or {op.process_type}
             self._tooling_candidates[op_id] = {
                 tooling_type: list(shop.get_toolings_for_type(tooling_type))
                 for tooling_type in op.required_tooling_types
@@ -145,7 +154,10 @@ class Simulator:
                 if op and op.status == OpStatus.PENDING and self._is_op_ready(op):
                     if self._release_time_cache.get(op.id, shop.get_operation_release_time(op)) <= now:
                         self._mark_ready(op, ready_ops)
-                        self._trigger_idle_dispatches(shop, event_queue, now, process_type=op.process_type)
+                        self._trigger_idle_dispatches(
+                            shop, event_queue, now,
+                            process_types=self._op_dispatch_type_ids.get(op.id, {op.process_type}),
+                        )
 
             elif event.event_type == "dispatch":
                 machine = shop.machines.get(event.data["machine_id"])
@@ -296,7 +308,9 @@ class Simulator:
                         if next_op and next_op.status == OpStatus.PENDING and self._is_op_ready(next_op):
                             self._queue_release_or_ready(shop, next_op, ready_ops, event_queue)
                             if next_op.status == OpStatus.READY:
-                                newly_ready_types.add(next_op.process_type)
+                                newly_ready_types.update(
+                                    self._op_dispatch_type_ids.get(next_op.id, {next_op.process_type})
+                                )
 
                 productive_duration = event.data.get("productive_duration", 0.0)
                 per_resource_work = productive_duration
@@ -308,8 +322,8 @@ class Simulator:
 
                 if machine:
                     self._schedule_dispatch(event_queue, machine.id, now)
-                    for process_type in newly_ready_types:
-                        self._trigger_idle_dispatches(shop, event_queue, now, process_type=process_type)
+                    if newly_ready_types:
+                        self._trigger_idle_dispatches(shop, event_queue, now, process_types=newly_ready_types)
 
             if completed_ops >= len(shop.operations):
                 break
@@ -435,13 +449,15 @@ class Simulator:
     def _mark_ready(self, op: Operation, ready_ops: set[str]) -> None:
         op.status = OpStatus.READY
         ready_ops.add(op.id)
-        self._ready_by_type.setdefault(op.process_type, set()).add(op.id)
+        for type_id in self._op_dispatch_type_ids.get(op.id, {op.process_type}):
+            self._ready_by_type.setdefault(type_id, set()).add(op.id)
 
     def _discard_ready(self, op_id: str, process_type: str, ready_ops: set[str]) -> None:
         ready_ops.discard(op_id)
-        bucket = self._ready_by_type.get(process_type)
-        if bucket is not None:
-            bucket.discard(op_id)
+        for type_id in self._op_dispatch_type_ids.get(op_id, {process_type}):
+            bucket = self._ready_by_type.get(type_id)
+            if bucket is not None:
+                bucket.discard(op_id)
 
     def _is_op_ready(self, op: Operation) -> bool:
         for predecessor_id in op.predecessor_ops:
@@ -473,12 +489,12 @@ class Simulator:
         shop: ShopFloor,
         event_queue: list[Event],
         now: float,
-        process_type: str | None = None,
+        process_types: set[str] | None = None,
     ) -> None:
         for machine in shop.machines.values():
             if machine.state != ResourceState.IDLE:
                 continue
-            if process_type and machine.type_id != process_type:
+            if process_types and machine.type_id not in process_types:
                 continue
             self._schedule_dispatch(event_queue, machine.id, now)
 

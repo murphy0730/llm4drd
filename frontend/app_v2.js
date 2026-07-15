@@ -368,9 +368,23 @@ function renderInfeasibleDetail(detail) {
         ${examples}
       </li>`;
   }).join("");
+  const bottlenecks = Array.isArray(detail.bottlenecks) ? detail.bottlenecks : [];
+  const bottleneckBlock = bottlenecks.length ? `
+    <div class="sim-bottleneck-block">
+      <div class="sim-bottleneck-title">瓶颈工序 TOP（其未排导致最多下游受阻，优先增加机台/班次）</div>
+      <ol class="sim-bottleneck-list">
+        ${bottlenecks.map((item) => `
+          <li>
+            <strong>${escapeHtml(item.op_name || item.op_id)}</strong>（${escapeHtml(item.op_id)}）：
+            工艺 ${escapeHtml(item.process_type || "-")}，可用机器 ${formatInt(item.eligible_machine_count)} 台，
+            加工 ${item.processing_time}h，阻塞下游 <strong>${formatInt(item.blocked_downstream)}</strong> 道工序
+          </li>`).join("")}
+      </ol>
+    </div>` : "";
   return `
     <details class="sim-infeasible-detail">
       <summary>展开逐工序根因分类（${detail.reasons.length} 类，未排 ${formatInt(detail.unscheduled)} 道）</summary>
+      ${bottleneckBlock}
       <ul class="sim-reason-list">${rows}</ul>
       <p class="sim-reason-tip">先处理标记为“根因”的项；“级联”类工序会在上游根因修复后自动恢复。</p>
     </details>`;

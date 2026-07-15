@@ -2016,10 +2016,12 @@ def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics) 
 
     buckets: dict[str, list[str]] = {}
     hint_ids: dict[str, set[str]] = {}
+    category_by_op: dict[str, str] = {}
 
     def _add(category: str, op: Operation, missing: Optional[list[str]] = None) -> None:
         label = op.name or op.id
         buckets.setdefault(category, []).append(f"{label}({op.id})")
+        category_by_op[op.id] = category
         for token in missing or []:
             hint_ids.setdefault(category, set()).add(str(token))
 
@@ -2109,7 +2111,92 @@ def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics) 
         "scheduled": analytics.completed_operations,
         "unscheduled": total_ops - analytics.completed_operations,
         "reasons": reasons,
+        "bottlenecks": _bottleneck_root_ops(current_shop, completed_op_ids, category_by_op),
     }
+
+
+def _bottleneck_root_ops(
+    current_shop: ShopFloor,
+    completed_op_ids: set[str],
+    category_by_op: dict[str, str],
+    top_n: int = 5,
+) -> list[dict]:
+    """找出"卡住最多下游"的根因工序。
+
+    在未完成工序的依赖子图上做拓扑传播：每道被阻塞工序继承其未完成前驱的
+    根因标签（集合上限 6 个防爆炸），最终统计每个根因工序传递性阻塞的下游
+    工序数。机器少、占用久、又卡在链条上游的工序会自然排到最前——这类工序
+    是真正的排产瓶颈，应优先增加可用机台/班次或拆分工时。
+    """
+    unscheduled_ids = {
+        op_id for op_id in current_shop.operations
+        if op_id not in completed_op_ids
+    }
+    if not unscheduled_ids:
+        return []
+    root_ids = {op_id for op_id, cat in category_by_op.items() if cat != "blocked_by_predecessor"}
+    if not root_ids:
+        return []
+
+    # 未完成工序按任务分组（任务级前驱：前驱任务的每道未完成工序都会卡住后继）
+    task_unscheduled: dict[str, list[str]] = {}
+    for op_id in unscheduled_ids:
+        op = current_shop.operations[op_id]
+        task_unscheduled.setdefault(op.task_id, []).append(op_id)
+
+    dependents: dict[str, list[str]] = {}
+    indegree: dict[str, int] = {op_id: 0 for op_id in unscheduled_ids}
+    for op_id in unscheduled_ids:
+        op = current_shop.operations[op_id]
+        blocking_preds: set[str] = {
+            pred for pred in op.predecessor_ops if pred in unscheduled_ids
+        }
+        for task_id in op.predecessor_tasks:
+            blocking_preds.update(task_unscheduled.get(task_id, []))
+        blocking_preds.discard(op_id)
+        for pred in blocking_preds:
+            dependents.setdefault(pred, []).append(op_id)
+            indegree[op_id] += 1
+
+    # Kahn 拓扑传播根因标签（有环的残留节点直接跳过，环本身属于数据校验问题）
+    MAX_LABELS = 6
+    labels: dict[str, set[str]] = {op_id: ({op_id} if op_id in root_ids else set()) for op_id in unscheduled_ids}
+    impact: dict[str, int] = {root: 0 for root in root_ids}
+    queue = [op_id for op_id, degree in indegree.items() if degree == 0]
+    while queue:
+        current = queue.pop()
+        current_labels = labels[current]
+        for dependent in dependents.get(current, []):
+            dep_labels = labels[dependent]
+            if len(dep_labels) < MAX_LABELS:
+                dep_labels.update(list(current_labels)[: MAX_LABELS - len(dep_labels)])
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                queue.append(dependent)
+    for op_id in unscheduled_ids:
+        if op_id in root_ids:
+            continue
+        for root in labels[op_id]:
+            if root in impact:
+                impact[root] += 1
+
+    ranked = sorted(root_ids, key=lambda op_id: impact.get(op_id, 0), reverse=True)[:top_n]
+    payload: list[dict] = []
+    for op_id in ranked:
+        op = current_shop.operations[op_id]
+        machines = current_shop.get_eligible_machines(op)
+        payload.append({
+            "op_id": op_id,
+            "op_name": op.name or op_id,
+            "process_type": op.process_type,
+            "category": category_by_op.get(op_id, ""),
+            "eligible_machine_count": len(machines),
+            "eligible_machine_ids": [machine.id for machine in machines][:6],
+            "processing_time": round(float(op.processing_time or 0.0), 2),
+            "blocked_downstream": impact.get(op_id, 0),
+        })
+    payload = [item for item in payload if item["blocked_downstream"] > 0] or payload[:1]
+    return payload
 
 
 def _format_infeasible_detail(diag: dict, rule_name: str) -> str:
@@ -2131,6 +2218,16 @@ def _format_infeasible_detail(diag: dict, rule_name: str) -> str:
         lines.append("  （未识别到明确的结构性根因，请到“实例与约束”页运行数据校验查看完整错误明细）")
     else:
         lines.append("  提示：先处理带 ★ 的根因；“级联受阻”类工序会在上游根因修复后自动恢复。")
+    bottlenecks = diag.get("bottlenecks") or []
+    if bottlenecks:
+        lines.append("  瓶颈工序 TOP（其未排导致最多下游工序受阻，优先增加机台/班次或核查约束）：")
+        for rank, item in enumerate(bottlenecks, 1):
+            label, _ = _INFEASIBLE_REASON_LABELS.get(item.get("category", ""), (item.get("category", ""), True))
+            lines.append(
+                f"    {rank}. {item['op_name']}({item['op_id']})：工艺 {item['process_type']}，"
+                f"可用机器 {item['eligible_machine_count']} 台，加工 {item['processing_time']}h，"
+                f"阻塞下游 {item['blocked_downstream']} 道工序；根因：{label}"
+            )
     return "\n".join(lines)
 
 
