@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import heapq
+import logging
+import math
 import time as wall_time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -28,6 +30,9 @@ class SimResult:
     critical_utilization: float = 0.0
     total_wait_time: float = 0.0
     avg_wait_time: float = 0.0
+    scheduled_operations: int = 0
+    total_operations: int = 0
+    feasible: bool = True
     schedule: list = field(default_factory=list)
     wall_time_ms: float = 0.0
     event_count: int = 0
@@ -66,6 +71,10 @@ class Simulator:
         self._completed_ops: set[str] = set()
         self._completed_tasks: set[str] = set()
         self._task_remaining_ops: dict[str, int] = {}
+        # 因资源日历耗尽等原因永远排不出的工序（保持 READY 状态但不再参与派工，
+        # 避免被反复评估或把资源锁死在无穷远）
+        self._unschedulable_ops: set[str] = set()
+        self._pdr_error_logged = False
 
     def _init_runtime_caches(self, shop: ShopFloor) -> None:
         self._eligible_machine_ids = {}
@@ -80,6 +89,8 @@ class Simulator:
         self._completed_ops = set()
         self._completed_tasks = set()
         self._task_remaining_ops = {task_id: len(task.operations) for task_id, task in shop.tasks.items()}
+        self._unschedulable_ops = set()
+        self._pdr_error_logged = False
 
         for op_id, op in shop.operations.items():
             self._eligible_machine_ids[op_id] = {machine.id for machine in shop.get_eligible_machines(op)}
@@ -178,7 +189,12 @@ class Simulator:
                     features = self._features(op, task, order, machine, shop, now)
                     try:
                         score = self.pdr(op, machine, features, shop)
-                    except Exception:
+                        if not isinstance(score, (int, float)) or not math.isfinite(score):
+                            score = 0.0
+                    except Exception as exc:
+                        if not self._pdr_error_logged:
+                            self._pdr_error_logged = True
+                            logging.warning("simulator: dispatch rule raised %s: %s (falling back to score=0)", type(exc).__name__, exc)
                         score = 0.0
                     tie_break = op.work_remaining
                     candidate = (score, -tie_break, op.id, op, toolings, people)
@@ -195,6 +211,22 @@ class Simulator:
                 start_time = _joint_next_available_time(resources, now)
                 productive_duration = op.work_remaining
                 end_time = _joint_compute_effective_end(resources, start_time, productive_duration)
+
+                if not (math.isfinite(start_time) and math.isfinite(end_time)):
+                    # 资源日历在工序完成前耗尽（班次覆盖不到 / 停机吃满），该工序无法排出。
+                    # 绝不能带着 inf 去占用资源——那会把机器/工装/人员永久锁死、并让
+                    # makespan 等指标变成 inf。这里将其挂起（保持 READY 但退出派工池），
+                    # 并立刻重新触发派工评估剩余候选工序。
+                    self._discard_ready(op.id, op.process_type, ready_ops)
+                    if op.id not in self._unschedulable_ops:
+                        self._unschedulable_ops.add(op.id)
+                        logging.warning(
+                            "simulator: op %s cannot finish within resource calendars "
+                            "(start=%s, end=%s), parked as unschedulable",
+                            op.id, start_time, end_time,
+                        )
+                    self._schedule_dispatch(event_queue, machine.id, now)
+                    continue
 
                 op.status = OpStatus.PROCESSING
                 op.remaining_processing_time = productive_duration
@@ -337,7 +369,19 @@ class Simulator:
             productive_duration = op.remaining_processing_time if op.remaining_processing_time is not None else op.processing_time
             productive_duration = max(0.001, productive_duration)
             start_time = op.start_time if op.start_time is not None else 0.0
+            if not math.isfinite(start_time):
+                start_time = 0.0
             end_time = op.end_time if op.end_time is not None else _joint_compute_effective_end(resources, 0.0, productive_duration)
+            if not math.isfinite(end_time):
+                # 在制工序的资源日历排不下剩余工时（或导入数据异常）——退化为
+                # “从起点连续加工”估算完工时间，避免 op_done 事件排在无穷远、
+                # 把资源永久锁死。
+                end_time = start_time + productive_duration
+                logging.warning(
+                    "simulator: in-progress op %s has non-finite end within resource calendars, "
+                    "falling back to start+duration (%.3f)",
+                    op.id, end_time,
+                )
             op.remaining_processing_time = productive_duration
             op.start_time = start_time
             op.end_time = end_time
@@ -603,24 +647,52 @@ class Simulator:
         result.wall_time_ms = round(elapsed_seconds * 1000, 1)
         result.event_count = event_count
         result.total_jobs = len(shop.operations)
+        result.total_operations = len(shop.operations)
+        result.scheduled_operations = len(self._completed_ops)
+        result.feasible = len(self._completed_ops) >= len(shop.operations)
+
+        # 先取已排出部分的实际最大完工时间，作为未完成任务的惩罚基准。
+        # 注意必须看排程条目而非任务完成时间——部分排程下可能没有任何任务
+        # 完整完成，但工序已经占到了某个时刻。
+        partial_max_end = 0.0
+        for entry in schedule:
+            entry_end = entry.get("end")
+            if isinstance(entry_end, (int, float)) and math.isfinite(entry_end):
+                partial_max_end = max(partial_max_end, float(entry_end))
+        for task in shop.tasks.values():
+            if task.completion_time is not None and math.isfinite(task.completion_time):
+                partial_max_end = max(partial_max_end, task.completion_time)
+
+        # 未完成任务不能直接跳过：那会让"排得越少指标越好"，误导 Pareto/NSGA2/规则进化
+        # 的支配比较。与 objectives.build_schedule_analytics 同口径：把未完成任务的
+        # 完工时间按 partial_max_end + 剩余工时 估算（悲观惩罚），保证部分排程永远
+        # 不会优于同等条件下的完整排程。
+        task_completion: dict[str, float] = {}
+        for task_id, task in shop.tasks.items():
+            completion = task.completion_time
+            if completion is None or not math.isfinite(completion):
+                if partial_max_end <= 0:
+                    completion = task.due_date if math.isfinite(task.due_date) else 0.0
+                else:
+                    completion = partial_max_end + max(task.remaining_time, 0.0)
+            task_completion[task_id] = completion
 
         tardiness_list: list[float] = []
         flowtime_list: list[float] = []
         wait_list: list[float] = []
         max_end = 0.0
 
-        for task in shop.tasks.values():
-            if task.completion_time is None:
-                continue
-            tardiness = max(0.0, task.completion_time - task.due_date)
+        for task_id, task in shop.tasks.items():
+            completion = task_completion[task_id]
+            tardiness = max(0.0, completion - task.due_date)
             tardiness_list.append(tardiness)
             if tardiness > 0:
                 result.tardy_job_count += 1
-            flowtime = task.completion_time - task.release_time
+            flowtime = completion - task.release_time
             flowtime_list.append(flowtime)
             productive = sum(op.processing_time for op in task.operations)
             wait_list.append(max(0.0, flowtime - productive))
-            max_end = max(max_end, task.completion_time)
+            max_end = max(max_end, completion)
 
         result.makespan = max_end
         result.total_tardiness = sum(tardiness_list)
@@ -634,10 +706,10 @@ class Simulator:
             if not order.main_task_id or order.main_task_id not in shop.tasks:
                 continue
             result.total_main_orders += 1
-            main_task = shop.tasks[order.main_task_id]
-            if main_task.completion_time is not None and main_task.completion_time > order.due_date:
+            main_completion = task_completion.get(order.main_task_id)
+            if main_completion is not None and main_completion > order.due_date:
                 result.main_order_tardy_count += 1
-                result.main_order_tardy_total_time += main_task.completion_time - order.due_date
+                result.main_order_tardy_total_time += main_completion - order.due_date
         result.main_order_tardy_ratio = (
             result.main_order_tardy_count / result.total_main_orders
             if result.total_main_orders
