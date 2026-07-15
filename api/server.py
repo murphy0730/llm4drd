@@ -35,6 +35,7 @@ if os.path.isdir(FRONT):
 
 shop: Optional[ShopFloor] = None
 last_result = None
+last_sim_payload = None
 last_engine: Optional[EvolutionEngine] = None
 inst_store = InstanceStore()
 graph_store = GraphStore()
@@ -1804,6 +1805,142 @@ async def export_validation_excel():
     )
 
 
+def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
+    """把一次仿真结果（/api/simulate 返回的 payload）导出为多 sheet 的 Excel。"""
+    gantt = payload.get("gantt") or []
+    metrics = payload.get("metrics") or {}
+    rule = payload.get("rule") or "-"
+    diagnosis = payload.get("diagnosis")
+    diagnosis_detail = payload.get("diagnosis_detail")
+    scheduled_op_ids = {str(e.get("op_id")) for e in gantt}
+
+    wb = openpyxl.Workbook()
+
+    # Sheet 1: 排程结果（甘特明细）
+    ws = wb.active
+    ws.title = "排程结果"
+    headers = [
+        "工序ID", "任务ID", "订单ID", "订单名称", "机器ID", "工序类型",
+        "开始(小时)", "开始时间", "结束(小时)", "结束时间", "时长(小时)",
+        "状态", "优先级", "交期", "是否延误", "是否主订单",
+    ]
+    ws.append(headers)
+    for e in sorted(gantt, key=lambda x: (x.get("start") or 0)):
+        ws.append([
+            e.get("op_id", ""),
+            e.get("task_id", ""),
+            e.get("order_id", ""),
+            e.get("order_name", ""),
+            e.get("machine_id", ""),
+            e.get("process_type", ""),
+            e.get("start"),
+            e.get("start_at"),
+            e.get("end"),
+            e.get("end_at"),
+            e.get("duration"),
+            e.get("status") or "completed",
+            e.get("priority", ""),
+            e.get("due_at"),
+            "是" if e.get("is_tardy") else "否",
+            "是" if e.get("is_main") else "否",
+        ])
+
+    # Sheet 2: 关键指标
+    ws_metrics = wb.create_sheet("关键指标")
+    ws_metrics.append(["指标", "数值"])
+    metric_order = [
+        ("规则", rule),
+        ("可行性 feasible", metrics.get("feasible")),
+        ("完成工序 / 总工序", f'{metrics.get("completed_operations")} / {metrics.get("total_operations")}'),
+        ("总周期 makespan(小时)", metrics.get("makespan")),
+        ("总延误 total_tardiness(小时)", metrics.get("total_tardiness")),
+        ("平均延误 avg_tardiness(小时)", metrics.get("avg_tardiness")),
+        ("最大延误 max_tardiness(小时)", metrics.get("max_tardiness")),
+        ("延误订单数", metrics.get("tardy_job_count")),
+        ("平均流程时间 avg_flowtime(小时)", metrics.get("avg_flowtime")),
+        ("总等待时间 total_wait_time(小时)", metrics.get("total_wait_time")),
+        ("平均等待时间 avg_wait_time(小时)", metrics.get("avg_wait_time")),
+        ("净可用利用率 avg_net_available_utilization", metrics.get("avg_net_available_utilization")),
+        ("关键资源净可用利用率 critical_net_available_utilization", metrics.get("critical_net_available_utilization")),
+        ("平均利用率 avg_utilization", metrics.get("avg_utilization")),
+        ("关键资源利用率 critical_utilization", metrics.get("critical_utilization")),
+        ("主订单延误数 main_order_tardy_count", metrics.get("main_order_tardy_count")),
+        ("主订单延误总时长 main_order_tardy_total_time(小时)", metrics.get("main_order_tardy_total_time")),
+        ("主订单延误比例 main_order_tardy_ratio", metrics.get("main_order_tardy_ratio")),
+        ("总主订单数 total_main_orders", metrics.get("total_main_orders")),
+    ]
+    for key, value in metric_order:
+        ws_metrics.append([key, value])
+    known = {k for k, _ in metric_order}
+    for key, value in metrics.items():
+        if key not in known and not isinstance(value, (dict, list)):
+            ws_metrics.append([key, value])
+
+    # Sheet 3: 延误明细
+    ws_tardy = wb.create_sheet("延误明细")
+    ws_tardy.append(["订单ID", "订单名称", "工序ID", "机器ID", "结束时间", "交期", "超出(小时)"])
+    for e in sorted(gantt, key=lambda x: (x.get("end") or 0), reverse=True):
+        if e.get("is_tardy"):
+            due = e.get("due_date")
+            end = e.get("end")
+            over = round(end - due, 3) if isinstance(end, (int, float)) and isinstance(due, (int, float)) else ""
+            ws_tardy.append([
+                e.get("order_id", ""), e.get("order_name", ""), e.get("op_id", ""),
+                e.get("machine_id", ""), e.get("end_at"), e.get("due_at"), over,
+            ])
+
+    # Sheet 4: 诊断与未完成工序
+    ws_diag = wb.create_sheet("诊断")
+    if diagnosis:
+        ws_diag.append(["仿真诊断", diagnosis])
+        ws_diag.append([])
+    if diagnosis_detail:
+        if isinstance(diagnosis_detail, dict):
+            for k, v in diagnosis_detail.items():
+                ws_diag.append([str(k), str(v)])
+        else:
+            ws_diag.append([str(diagnosis_detail)])
+    if shop is not None:
+        unscheduled = [op for op in shop.operations.values() if str(op.id) not in scheduled_op_ids]
+        if unscheduled:
+            ws_diag.append([])
+            ws_diag.append(["未完成工序数", len(unscheduled)])
+            ws_diag.append(["工序ID", "任务ID", "工序类型", "状态"])
+            for op in unscheduled:
+                ws_diag.append([op.id, op.task_id, op.process_type, getattr(op, "status", "")])
+    if ws_diag.max_row == 1 and ws_diag.cell(1, 1).value is None:
+        ws_diag.append(["无", "本次仿真结果完整，无诊断信息"])
+
+    for sheet in wb.worksheets:
+        for column_cells in sheet.columns:
+            length = max((len(str(cell.value)) for cell in column_cells if cell.value is not None), default=0)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(length + 2, 12), 80)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+@app.post("/api/simulate/export-excel")
+async def export_sim_excel():
+    """导出最近一次仿真结果为 Excel（供用户下载）。"""
+    current_shop = _active_shop()
+    if last_sim_payload is None:
+        raise HTTPException(400, "尚未运行仿真，无法导出。请先在仿真与洞察中运行一次规则仿真。")
+    try:
+        data = _build_sim_export_excel(last_sim_payload, current_shop)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("sim export excel failed")
+        raise HTTPException(500, f"导出 Excel 失败：{exc}")
+    rule = last_sim_payload.get("rule") or "sim"
+    filename = f"sim_result_{rule}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _estimate_graph_size(current_shop: ShopFloor) -> dict:
     node_count = (
         len(current_shop.orders) + len(current_shop.tasks) + len(current_shop.operations)
@@ -2258,7 +2395,7 @@ def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics)
 
 @app.post("/api/simulate")
 async def simulate(req: SimReq):
-    global last_result, shop
+    global last_result, last_sim_payload, shop
     current_shop = _active_shop()
     if current_shop is None:
         raise HTTPException(400, "请先生成实例")
@@ -2314,13 +2451,15 @@ async def simulate(req: SimReq):
     metrics["completed_operations"] = analytics.completed_operations
     metrics["total_operations"] = len(current_shop.operations)
     metrics["feasible"] = analytics.feasible
-    return _json_safe({
+    payload = _json_safe({
         "metrics": metrics,
         "gantt": gantt,
         "rule": req.rule_name,
         "diagnosis": diagnosis,
         "diagnosis_detail": diagnosis_detail,
     })
+    last_sim_payload = payload
+    return payload
 
 @app.post("/api/simulate/compare")
 async def compare(rule_names: list[str] = None):

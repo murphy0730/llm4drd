@@ -287,6 +287,7 @@ const api = {
   getGraphEdges(limit = 80, offset = 0) { return this.json(`/graph/edges?limit=${limit}&offset=${offset}`); },
   getGraphOrder(orderId) { return this.json(`/graph/order/${encodeURIComponent(orderId)}`); },
   simulate(ruleName) { return this.json("/simulate", "POST", { rule_name: ruleName }); },
+  exportSimExcel() { return this.request("/simulate/export-excel"); },
   simulateReferenceSolutions(ruleNames, objectiveKeys) {
     return this.json("/simulate/reference-solutions", "POST", {
       rule_names: ruleNames,
@@ -5977,6 +5978,7 @@ function renderSimStatusInner(status) {
       </div>
       ${track}
       <p class="import-progress-note" id="sim-status-note">${escapeHtml(status.message || "")}</p>
+      ${app.simResult && !isRunning ? `<div class="form-actions" style="margin-top:10px"><button class="btn btn-secondary" type="button" data-action="export-sim-excel">导出仿真结果 Excel</button></div>` : ""}
     </article>`;
 }
 
@@ -6452,6 +6454,16 @@ async function handleAction(action, target) {
     const blob = await api.exportValidation();
     downloadBlob(blob, `validation_result_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`);
     toast("校验结果 Excel 已导出。", "success");
+    return;
+  }
+  if (action === "export-sim-excel") {
+    try {
+      const blob = await api.exportSimExcel();
+      downloadBlob(blob, `sim_result_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`);
+      toast("仿真结果 Excel 已开始下载。", "success");
+    } catch (error) {
+      toast(`导出失败：${error.message}`, "error");
+    }
     return;
   }
   if (action === "build-graph") return handleBuildGraph();
