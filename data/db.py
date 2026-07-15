@@ -592,7 +592,7 @@ class InstanceStore:
 
     def update_machine(self, machine_id: str, data: dict):
         with get_db(self.db_path) as conn:
-            conn.execute("UPDATE inst_machines SET machine_name=?, type_id=?, shifts=? WHERE machine_id=?", (data["machine_name"], data["type_id"], data.get("shifts", ""), machine_id))
+            conn.execute("UPDATE inst_machines SET machine_name=?, type_id=?, shifts=? WHERE machine_id=?", (data["machine_name"], data["type_id"], normalize_shifts_field(data.get("shifts", "")), machine_id))
 
     def build_shopfloor(self):
         from ..core.models import Machine, MachineType, Operation, Order, Personnel, ShopFloor, Task, Tooling, ToolingType
@@ -725,6 +725,45 @@ def _parse_shifts(raw: str):
         if len(parts) == 3:
             shifts.append(Shift(day=int(float(parts[0])), start_hour=float(parts[1]), hours=float(parts[2])))
     return shifts
+
+
+def shifts_to_payload(raw) -> list[dict]:
+    """把存储的 "day/start/hours;..." 字符串解析为结构化数组，供前端展示 / 编辑。
+
+    数据库里班次是紧凑字符串（如 "0/0/1;0/3/9.5;..."），但前端"机器维护"页把该字段
+    当作 JSON 数组渲染（asArray + JSON.stringify），字符串会被 asArray 视为非数组而显示成
+    []。这里统一转成 [{day, start_hour, hours}, ...]，让展示与编辑拿到真实数据。
+    """
+    return [
+        {"day": shift.day, "start_hour": shift.start_hour, "hours": shift.hours}
+        for shift in _parse_shifts(raw if isinstance(raw, str) else "")
+    ]
+
+
+def normalize_shifts_field(value) -> str:
+    """把前端回传的班次（结构化数组或已是规范字符串）统一转成存储用的 "day/start/hours;..." 字符串。
+
+    前端保存机器时会 JSON.parse 文本框内容并回传数组；若直接写入 TEXT 列会得到无法被
+    _parse_shifts 识别的内容（甚至绑定报错）。这里做归一化，保证与导入格式一致。
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        segments = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            day = item.get("day")
+            start_hour = item.get("start_hour", item.get("start"))
+            hours = item.get("hours")
+            if day is None or start_hour is None or hours is None:
+                continue
+            try:
+                segments.append(f"{int(float(day))}/{float(start_hour)}/{float(hours)}")
+            except (TypeError, ValueError):
+                continue
+        return ";".join(segments)
+    return ""
 
 
 def _split_ids(raw: str) -> list[str]:
