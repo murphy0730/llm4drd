@@ -242,10 +242,19 @@ def _serialize_schedule_entry(current_shop: ShopFloor, entry: dict) -> dict:
     payload = dict(entry)
     start_value = entry.get("start")
     end_value = entry.get("end")
-    if start_value is not None:
+    # 仿真不可行时，部分工序的 start/end 可能是 inf（资源日历容量不足等），
+    # 这里做有限性校验，避免 time_label -> timedelta(hours=inf) 抛 OverflowError，
+    # 同时把 inf 数值也置为 None，防止 JSON 输出 Infinity 污染前端。
+    if start_value is not None and math.isfinite(float(start_value)):
         payload["start_at"] = current_shop.time_label(start_value)
-    if end_value is not None:
+    else:
+        payload["start"] = None
+        payload["start_at"] = None
+    if end_value is not None and math.isfinite(float(end_value)):
         payload["end_at"] = current_shop.time_label(end_value)
+    else:
+        payload["end"] = None
+        payload["end_at"] = None
     return payload
 
 

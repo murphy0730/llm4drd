@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, time, timedelta
 from typing import Any
 
@@ -39,7 +40,11 @@ def isoformat_or_none(value: datetime | None) -> str | None:
 def offset_hours_to_datetime(plan_start: datetime, offset_hours: float | None) -> datetime | None:
     if offset_hours is None:
         return None
-    return ensure_aware(plan_start) + timedelta(hours=float(offset_hours))
+    hours = float(offset_hours)
+    if not math.isfinite(hours):
+        # 非有限值（inf/nan）无法换算成具体时刻，返回 None 以避免 timedelta 抛 OverflowError
+        return None
+    return ensure_aware(plan_start) + timedelta(hours=hours)
 
 
 def datetime_to_offset_hours(plan_start: datetime, value: datetime | str | int | float | None) -> float | None:
