@@ -348,6 +348,34 @@ function formatDurationHours(value, digits = 1) {
   return `${Number(value).toFixed(digits)}h`;
 }
 
+// 渲染仿真不可行的逐工序根因明细（可展开），数据来自 /api/simulate 的 diagnosis_detail
+function renderInfeasibleDetail(detail) {
+  if (!detail || !Array.isArray(detail.reasons) || detail.reasons.length === 0) return "";
+  const rows = detail.reasons.map((reason) => {
+    const marker = reason.is_root
+      ? `<span class="sim-reason-tag sim-reason-tag--root">根因</span>`
+      : `<span class="sim-reason-tag sim-reason-tag--derived">级联</span>`;
+    const ids = Array.isArray(reason.hint_ids) && reason.hint_ids.length
+      ? `<div class="sim-reason-ids">涉及：${escapeHtml(reason.hint_ids.join("、"))}</div>`
+      : "";
+    const examples = Array.isArray(reason.examples) && reason.examples.length
+      ? `<div class="sim-reason-examples">示例工序：${escapeHtml(reason.examples.join("，"))}</div>`
+      : "";
+    return `
+      <li class="sim-reason ${reason.is_root ? "sim-reason--root" : "sim-reason--derived"}">
+        <div class="sim-reason-head">${marker}<span class="sim-reason-label">${escapeHtml(reason.label || reason.category || "未知原因")}</span><span class="sim-reason-count">${formatInt(reason.count)} 道工序</span></div>
+        ${ids}
+        ${examples}
+      </li>`;
+  }).join("");
+  return `
+    <details class="sim-infeasible-detail">
+      <summary>展开逐工序根因分类（${detail.reasons.length} 类，未排 ${formatInt(detail.unscheduled)} 道）</summary>
+      <ul class="sim-reason-list">${rows}</ul>
+      <p class="sim-reason-tip">先处理标记为“根因”的项；“级联”类工序会在上游根因修复后自动恢复。</p>
+    </details>`;
+}
+
 function formatDurationSeconds(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   if (Number(value) < 60) return `${Number(value).toFixed(1)}s`;
@@ -3539,6 +3567,7 @@ function renderWorkflowStep3() {
         <div class="sim-infeasible-banner" role="alert">
           <strong>仿真结果不完整，下方指标不可用于决策</strong>
           <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)} 道工序，请到“实例与约束”页运行数据校验。`)}</span>
+          ${renderInfeasibleDetail(app.simResult.diagnosis_detail)}
           <div class="form-actions"><button class="btn btn-secondary" type="button" data-nav-jump="config">去查看校验结果</button></div>
         </div>
       ` : ""}

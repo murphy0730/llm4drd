@@ -1648,6 +1648,29 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
     if ops_without_machine > 20:
         err("约束条件", "operations", f"另有 {ops_without_machine - 20} 道工序同样没有可用机器（已省略明细）", sheet="operations / machines")
 
+    # --- 资源日历可用性：某类资源有实例、但全部没有任何可用工作窗口 ---
+    # （班次可能都落在计划起点之前，或被停机完全占满；仿真会因此永远排不出相关工序。
+    #   "完全没有实例" 的情况已在上面的按工序检查里覆盖，这里只查 "有实例但排不了班"。）
+    used_process_types = {op.process_type for op in current_shop.operations.values()}
+    for process_type in sorted(used_process_types):
+        machines = current_shop.get_machines_for_type(process_type)
+        if machines and all(not _resource_has_calendar(machine) for machine in machines):
+            err("约束条件", process_type, f"工艺类型 {process_type} 的全部机器都没有任何可用排班窗口（班次可能都落在计划起点之前或被停机占满），相关工序无法开工", sheet="machines")
+
+    used_tooling_types: set[str] = set()
+    used_skills: set[str] = set()
+    for op in current_shop.operations.values():
+        used_tooling_types.update(op.required_tooling_types)
+        used_skills.update(op.required_personnel_skills)
+    for tooling_type in sorted(used_tooling_types):
+        toolings = current_shop.get_toolings_for_type(tooling_type)
+        if toolings and all(not _resource_has_calendar(tooling) for tooling in toolings):
+            err("约束条件", tooling_type, f"工装类型 {tooling_type} 的全部实例都没有任何可用排班窗口，需要该工装的工序无法开工", sheet="toolings")
+    for skill_id in sorted(used_skills):
+        people = current_shop.get_personnel_for_skill(skill_id)
+        if people and all(not _resource_has_calendar(person) for person in people):
+            err("约束条件", skill_id, f"技能 {skill_id} 的全部人员都没有任何可用排班窗口，需要该技能的工序无法开工", sheet="personnel")
+
     # --- 工序前驱环检测（有环则整条链永远无法就绪）---
     color: dict[str, int] = {}
     cycle_reported = False
@@ -2153,13 +2176,14 @@ async def simulate(req: SimReq):
         analytics.feasible, r.event_count, r.wall_time_ms,
     )
     diagnosis = None
+    diagnosis_detail = None
     if not analytics.feasible:
-        diag = _diagnose_infeasible(current_shop, r, analytics)
-        diagnosis = _diagnosis_oneline(diag, len(r.schedule or []))
+        diagnosis_detail = _diagnose_infeasible(current_shop, r, analytics)
+        diagnosis = _diagnosis_oneline(diagnosis_detail, len(r.schedule or []))
         # 后台打印逐工序根因分类，方便定位具体的不可行原因
         logging.warning(
             "simulate[%s] infeasible:\n%s",
-            req.rule_name, _format_infeasible_detail(diag, req.rule_name),
+            req.rule_name, _format_infeasible_detail(diagnosis_detail, req.rule_name),
         )
     r._rule_name = req.rule_name
     last_result = r
@@ -2188,7 +2212,13 @@ async def simulate(req: SimReq):
     metrics["completed_operations"] = analytics.completed_operations
     metrics["total_operations"] = len(current_shop.operations)
     metrics["feasible"] = analytics.feasible
-    return _json_safe({"metrics": metrics, "gantt": gantt, "rule": req.rule_name, "diagnosis": diagnosis})
+    return _json_safe({
+        "metrics": metrics,
+        "gantt": gantt,
+        "rule": req.rule_name,
+        "diagnosis": diagnosis,
+        "diagnosis_detail": diagnosis_detail,
+    })
 
 @app.post("/api/simulate/compare")
 async def compare(rule_names: list[str] = None):
