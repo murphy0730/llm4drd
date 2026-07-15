@@ -2116,6 +2116,7 @@ _INFEASIBLE_REASON_LABELS: dict[str, tuple[str, bool]] = {
     "release_inf": ("工序投放时间为无穷大（订单/任务 release_time 异常）", True),
     "starved": ("前驱已完成但始终抢不到资源（资源竞争 / 日历产能不足）", True),
     "calendar_exhausted": ("已就绪但资源日历覆盖不到工序所需工时（机器/工装/人员某类日历太短），被仿真器挂起", True),
+    "dependency_cycle": ("依赖环：工序/任务前驱互相矛盾，环内工序永远无法就绪（需打断环）", True),
     "blocked_by_predecessor": ("被上游未完成工序阻塞（级联受阻，非根因）", False),
 }
 
@@ -2214,8 +2215,34 @@ def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics,
         for token in missing or []:
             hint_ids.setdefault(category, set()).add(str(token))
 
+    # 0. 依赖环(仿真前 SCC 检测，来自 SimResult.dependency_cycles) —— 环内工序互相
+    #    阻塞、永远无法就绪。必须在所有其他根因之前判定：否则环内工序的前驱"都未
+    #    完成"，会被误归为"级联受阻"，掩盖真因(互相矛盾的前驱关系)。任务级环与工序
+    #    级环修复方向不同(改任务令前驱 / 改 predecessor_ops)，需区分上报。
+    cycle_by_op: dict[str, dict] = {}
+    for _cyc in getattr(result, "dependency_cycles", []) or []:
+        for _oid in _cyc.get("ops", []):
+            cycle_by_op[_oid] = _cyc
+    _CYCLE_KIND_LABEL = {
+        "task": "任务级前驱互锁(改任务令 predecessor_tasks)",
+        "op": "工序级前驱环(改 predecessor_ops)",
+        "mixed": "混合前驱环(任务+工序前驱)",
+    }
+
     for op in current_shop.operations.values():
         if op.id in completed_op_ids:
+            continue
+
+        # 0. 依赖环内工序 —— 最优先根因，永远无法就绪
+        _cyc = cycle_by_op.get(op.id)
+        if _cyc is not None:
+            _kind = _cyc.get("kind", "op")
+            _hints = [_CYCLE_KIND_LABEL.get(_kind, _kind)]
+            if _kind in ("task", "mixed"):
+                _hints.append("涉事任务:" + ";".join(_cyc.get("tasks", [])[:6]))
+            if _kind in ("op", "mixed"):
+                _hints.append("涉事工序:" + ";".join(_cyc.get("ops", [])[:6]))
+            _add("dependency_cycle", op, _hints)
             continue
 
         # 1. 前驱引用断链：引用了不存在的工序 / 任务
@@ -2330,7 +2357,8 @@ def _bottleneck_root_ops(
     }
     if not unscheduled_ids:
         return []
-    root_ids = {op_id for op_id, cat in category_by_op.items() if cat != "blocked_by_predecessor"}
+    root_ids = {op_id for op_id, cat in category_by_op.items()
+                if cat not in ("blocked_by_predecessor", "dependency_cycle")}
     if not root_ids:
         return []
 

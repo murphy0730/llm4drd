@@ -184,11 +184,31 @@ def analyze_structural(shop) -> dict:
         sizes = sorted((len(c) for c in cyclic), reverse=True)
         print(f"      环大小(降序): {sizes[:20]}")
         c0 = max(cyclic, key=len)
+        c0_set = set(c0)
         print(f"      最大环含 {len(c0)} 道工序，示例:")
         for oid in c0[:15]:
             op = shop.operations[oid]
-            in_comp = [p for p in op.predecessor_ops if p in set(c0)]
-            print(f"        {oid}  指向环内前驱: {in_comp[:6]}")
+            in_comp_ops = [p for p in op.predecessor_ops if p in c0_set]
+            # 任务前驱展开后落在环内的——这才是"工序前驱为空却仍在环里"的真正来源
+            in_comp_tasks = []
+            for t in op.predecessor_tasks:
+                hit = [po for po in task_op_ids.get(t, []) if po in c0_set and po != oid]
+                if hit:
+                    preview = ",".join(hit[:4]) + ("..." if len(hit) > 4 else "")
+                    in_comp_tasks.append(f"{t}->[{preview}]")
+            parts = [f"工序前驱(环内): {in_comp_ops[:6]}"]
+            if in_comp_tasks:
+                parts.append(f"任务前驱(展开落环内): {in_comp_tasks[:4]}")
+            print(f"        {oid}  " + " | ".join(parts))
+        # 统计本环的边来源构成，帮用户判断是工序级还是任务级互锁
+        op_edges = task_edges = 0
+        for oid in c0:
+            op_obj = shop.operations[oid]
+            op_edges += sum(1 for p in op_obj.predecessor_ops if p in c0_set and p != oid)
+            for t in op_obj.predecessor_tasks:
+                task_edges += sum(1 for po in task_op_ids.get(t, []) if po in c0_set and po != oid)
+        print(f"      [本环边构成] 工序级前驱边 {op_edges} 条 / 任务前驱展开边 {task_edges} 条"
+              f"  -> {'任务级前驱互锁(数据里去掉互相矛盾的任务前驱)' if task_edges and not op_edges else '含工序级前驱(核查 predecessor_ops)'}")
     return {
         "dangling_ops": len(dangling_ops),
         "dangling_tasks": len(dangling_tasks),

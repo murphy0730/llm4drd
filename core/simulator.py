@@ -5,12 +5,68 @@ import heapq
 import logging
 import math
 import time as wall_time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable
 
 from .models import OpStatus, Operation, ResourceState, ShopFloor
 
 PDRFunc = Callable
+
+
+def _iterative_tarjan_scc(nodes, adj):
+    """迭代式 Tarjan 强连通分量，避免大实例递归爆栈。
+
+    adj: dict[node -> 可迭代的前驱节点]。返回 list[list[node]]，其中长度>1
+    或含自环的单节点分量即为依赖环。
+    """
+    index_counter = [0]
+    index: dict = {}
+    lowlink: dict = {}
+    on_stack: dict = {}
+    stack: list = []
+    result: list = []
+    for start in nodes:
+        if start in index:
+            continue
+        work = [(start, 0)]
+        while work:
+            v, pi = work[-1]
+            if pi == 0:
+                index[v] = index_counter[0]
+                lowlink[v] = index_counter[0]
+                index_counter[0] += 1
+                stack.append(v)
+                on_stack[v] = True
+            recurse = False
+            neighbors = list(adj[v])
+            i = pi
+            while i < len(neighbors):
+                w = neighbors[i]
+                if w not in index:
+                    work[-1] = (v, i + 1)
+                    work.append((w, 0))
+                    recurse = True
+                    break
+                elif on_stack.get(w):
+                    lowlink[v] = min(lowlink[v], index[w])
+                i += 1
+            if recurse:
+                continue
+            if lowlink[v] == index[v]:
+                comp = []
+                while True:
+                    w = stack.pop()
+                    on_stack[w] = False
+                    comp.append(w)
+                    if w == v:
+                        break
+                result.append(comp)
+            work.pop()
+            if work:
+                u = work[-1][0]
+                lowlink[u] = min(lowlink[u], lowlink[v])
+    return result
 
 
 @dataclass
@@ -36,6 +92,9 @@ class SimResult:
     schedule: list = field(default_factory=list)
     wall_time_ms: float = 0.0
     event_count: int = 0
+    # 依赖环明细(仿真前 SCC 检测): [{"kind":"task"/"op"/"mixed","size":N,"ops":[...],"tasks":[...]}]
+    # 有环时 feasible=False——环内工序互相阻塞、永远无法就绪，与"资源日历排不下"是两类不同问题。
+    dependency_cycles: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +135,8 @@ class Simulator:
         self._unschedulable_ops: set[str] = set()
         self._pdr_error_logged = False
         self._op_dispatch_type_ids: dict[str, set[str]] = {}
+        # 仿真前检测出的依赖环(任务级前驱互锁/工序级前驱环/混合)，由 _compute_kpi 写入 SimResult
+        self._dependency_cycles: list = []
 
     def _init_runtime_caches(self, shop: ShopFloor) -> None:
         self._eligible_machine_ids = {}
@@ -92,6 +153,7 @@ class Simulator:
         self._task_remaining_ops = {task_id: len(task.operations) for task_id, task in shop.tasks.items()}
         self._unschedulable_ops = set()
         self._pdr_error_logged = False
+        self._dependency_cycles = []
 
         self._op_dispatch_type_ids = {}
         for op_id, op in shop.operations.items():
@@ -117,11 +179,69 @@ class Simulator:
             for predecessor_task_id in op.predecessor_tasks:
                 self._dependent_ops_by_task.setdefault(predecessor_task_id, []).append(op_id)
 
+    def _detect_dependency_cycles(self, shop: ShopFloor) -> list[dict]:
+        """仿真前用 Tarjan SCC 检测依赖环，并区分环类型。
+
+        工序就绪需 predecessor_ops 全完成 + predecessor_tasks 全完成(任务完成=
+        该任务所有工序完成)。故依赖图边 = 工序前驱 + 任务前驱展开为该任务全部工序。
+        SCC(长度>1 或自环) 即依赖环。按环内边来源区分:
+          - op   : 仅工序级前驱(predecessor_ops)闭合——改 predecessor_ops 打断
+          - task : 仅任务前驱(predecessor_tasks)展开闭合——改任务令前驱打断
+          - mixed: 两者都有
+        返回 [{"kind","size","ops","tasks"}, ...]，按 size 降序。
+        """
+        task_op_ids: dict[str, list[str]] = defaultdict(list)
+        for op in shop.operations.values():
+            task_op_ids[op.task_id].append(op.id)
+
+        adj: dict[str, set[str]] = {op.id: set() for op in shop.operations.values()}
+        for op in shop.operations.values():
+            for p in op.predecessor_ops:
+                if p in adj and p != op.id:
+                    adj[op.id].add(p)
+            for t in op.predecessor_tasks:
+                for po in task_op_ids.get(t, []):
+                    if po in adj and po != op.id:
+                        adj[op.id].add(po)
+
+        sccs = _iterative_tarjan_scc(list(adj.keys()), adj)
+        cycles: list[dict] = []
+        for comp in sccs:
+            if len(comp) <= 1:
+                nid = comp[0] if comp else None
+                if nid and nid in adj.get(nid, set()):
+                    comp = [nid]
+                else:
+                    continue
+            comp_set = set(comp)
+            op_edges = 0
+            task_edges = 0
+            for oid in comp:
+                op_obj = shop.operations[oid]
+                op_edges += sum(1 for p in op_obj.predecessor_ops if p in comp_set and p != oid)
+                for t in op_obj.predecessor_tasks:
+                    task_edges += sum(1 for po in task_op_ids.get(t, []) if po in comp_set and po != oid)
+            if op_edges and task_edges:
+                kind = "mixed"
+            elif task_edges:
+                kind = "task"
+            else:
+                kind = "op"
+            cycles.append({
+                "kind": kind,
+                "size": len(comp),
+                "ops": sorted(comp),
+                "tasks": sorted({shop.operations[oid].task_id for oid in comp}),
+            })
+        cycles.sort(key=lambda c: c["size"], reverse=True)
+        return cycles
+
     def run(self, max_time: float = 999999) -> SimResult:
         started_at = wall_time.time()
         shop = copy.deepcopy(self.orig_shop)
         shop.build_indexes()
         self._init_runtime_caches(shop)
+        self._dependency_cycles = self._detect_dependency_cycles(shop)
 
         event_queue: list[Event] = []
         ready_ops: set[str] = set()
@@ -666,6 +786,11 @@ class Simulator:
         result.total_operations = len(shop.operations)
         result.scheduled_operations = len(self._completed_ops)
         result.feasible = len(self._completed_ops) >= len(shop.operations)
+        result.dependency_cycles = self._dependency_cycles
+        if self._dependency_cycles:
+            # 有依赖环(任务级前驱互锁/工序级前驱环)时，环内工序永远无法就绪；
+            # 即便环外工序全排完，整体仍不可行——显式置 False 以区分于"资源日历排不下"。
+            result.feasible = False
 
         # 先取已排出部分的实际最大完工时间，作为未完成任务的惩罚基准。
         # 注意必须看排程条目而非任务完成时间——部分排程下可能没有任何任务
