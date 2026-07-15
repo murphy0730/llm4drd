@@ -710,6 +710,23 @@ def _build_exact_reference_solution(
     }
 
 
+def _json_safe(value: Any) -> Any:
+    """递归地将 inf/-inf/nan 等非 JSON 合规的浮点值替换为 None。
+
+    不可行排程会产生 makespan=inf、total_tardiness=inf 等指标，
+    starlette 默认的 json.dumps 无法序列化这些值，会抛出
+    "Out of range float values are not JSON compliant: inf" 并返回 500。
+    前端已将 null 渲染为 "-"，因此此处统一转换为 None。
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _active_shop() -> Optional[ShopFloor]:
     if inst_store.has_data():
         current_shop = inst_store.build_shopfloor()
@@ -1997,7 +2014,7 @@ async def simulate(req: SimReq):
     metrics["completed_operations"] = analytics.completed_operations
     metrics["total_operations"] = len(current_shop.operations)
     metrics["feasible"] = analytics.feasible
-    return {"metrics": metrics, "gantt": gantt, "rule": req.rule_name, "diagnosis": diagnosis}
+    return _json_safe({"metrics": metrics, "gantt": gantt, "rule": req.rule_name, "diagnosis": diagnosis})
 
 @app.post("/api/simulate/compare")
 async def compare(rule_names: list[str] = None):
@@ -2013,7 +2030,7 @@ async def compare(rule_names: list[str] = None):
         metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
         results.append({"rule": n, "metrics": metrics})
     results.sort(key=lambda x: x["metrics"]["total_tardiness"])
-    return {"comparison": results}
+    return _json_safe({"comparison": results})
 
 
 @app.post("/api/simulate/reference-solutions")
