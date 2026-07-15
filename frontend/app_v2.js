@@ -1380,17 +1380,12 @@ function updateShell() {
   el("topbar-scene-meta").textContent = hasScene
     ? `${summary.orders || 0} 单 / ${summary.operations || 0} 工序`
     : "请新建或导入实例";
-  el("topbar-orders-ops").textContent = hasScene ? `${summary.orders || 0} / ${summary.operations || 0}` : "-";
-  el("topbar-resources").textContent = hasScene
-    ? `${summary.machines || 0} 机 / ${summary.toolings || 0} 工装 / ${summary.personnel || 0} 人员`
-    : "-";
-  el("topbar-opt-status").textContent = optimizeIsRunning()
-    ? "优化进行中"
-    : ["error", "failed"].includes(String(app.optimizeStatus?.status || "").toLowerCase())
-      ? "优化失败"
-    : app.optimizeResult
-      ? "优化已完成"
-      : "未启动";
+  el("topbar-orders").textContent = hasScene ? formatInt(summary.orders) : "-";
+  el("topbar-tasks").textContent = hasScene ? formatInt(summary.tasks) : "-";
+  el("topbar-operations").textContent = hasScene ? formatInt(summary.operations) : "-";
+  el("topbar-machines").textContent = hasScene ? formatInt(summary.machines) : "-";
+  el("topbar-toolings").textContent = hasScene ? formatInt(summary.toolings) : "-";
+  el("topbar-personnel").textContent = hasScene ? formatInt(summary.personnel) : "-";
 
   el("panel-scene-name").textContent = hasScene ? app.currentScene.name : "未加载";
   el("panel-orders").textContent = hasScene ? formatInt(summary.orders) : "-";

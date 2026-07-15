@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>LLM4DRD 智能调度决策中枢</title>
-  <link rel="stylesheet" href="/static/app_v2.css?v=20260714-20">
+  <link rel="stylesheet" href="/static/app_v2.css?v=20260714-21">
   <link rel="stylesheet" href="/static/design-system.css?v=20260713-2">
 </head>
 <body>
@@ -32,23 +32,12 @@
       </div>
 
       <div class="topbar-status">
-        <div class="status-box">
-          <span>订单 / 工序</span>
-          <strong id="topbar-orders-ops">-</strong>
-        </div>
-        <div class="status-box">
-          <span>资源</span>
-          <strong id="topbar-resources">-</strong>
-        </div>
-        <div class="status-box">
-          <span>优化状态</span>
-          <strong id="topbar-opt-status">未启动</strong>
-        </div>
-      </div>
-
-      <div class="topbar-actions">
-        <button class="btn btn-ghost" type="button" data-action="refresh-all">刷新</button>
-        <button class="btn btn-ghost" type="button" data-action="toggle-help">帮助</button>
+        <div class="status-box"><span>订单</span><strong id="topbar-orders">-</strong></div>
+        <div class="status-box"><span>任务令</span><strong id="topbar-tasks">-</strong></div>
+        <div class="status-box"><span>工序</span><strong id="topbar-operations">-</strong></div>
+        <div class="status-box"><span>机器</span><strong id="topbar-machines">-</strong></div>
+        <div class="status-box"><span>工装</span><strong id="topbar-toolings">-</strong></div>
+        <div class="status-box"><span>人员</span><strong id="topbar-personnel">-</strong></div>
       </div>
     </header>
 
@@ -311,6 +300,6 @@
   <script src="/static/vendor/cytoscape.min.js?v=3.30.4"></script>
   <script src="/static/vendor/dagre.min.js?v=0.8.5"></script>
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
-  <script src="/static/app_v2.js?v=20260714-29"></script>
+  <script src="/static/app_v2.js?v=20260714-30"></script>
 </body>
 </html>
