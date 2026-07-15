@@ -76,7 +76,7 @@ const NAV_MAP = {
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
   workflow: { page: "workflow", workflowStep: 1, requiresScene: true },
   graph: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
-  simulate: { page: "workflow", workflowStep: 3, workflowFocus: "simulate", requiresScene: true },
+  simulate: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
   "optimize-config": { page: "workflow", workflowStep: 4, requiresScene: true },
   "optimize-launch": { page: "workflow", workflowStep: 4, requiresScene: true },
   "pareto-library": { page: "review", reviewTab: "library", requiresScene: true },
@@ -3372,24 +3372,6 @@ function renderInsights() {
   `;
 }
 
-function renderWorkflowRail() {
-  const rail = el("workflow-rail");
-  const steps = [
-    { step: 1, title: "问题设计", desc: "生成或导入实例" },
-    { step: 2, title: "约束校准", desc: "订单、工序、资源、停机与在制状态" },
-    { step: 3, title: "结构与仿真", desc: "图谱构建 + 基线仿真" },
-    { step: 4, title: "多目标优化", desc: "NSGA-III + ALNS" },
-    { step: 5, title: "方案评审", desc: "比较、AI 推荐、导出" },
-  ];
-  rail.innerHTML = steps.map((item) => `
-    <button class="workflow-step ${item.step === app.workflowStep ? "active" : item.step < app.workflowStep ? "done" : ""}" type="button" data-action="goto-workflow-step" data-step="${item.step}">
-      <strong>STEP ${item.step}</strong>
-      <span>${escapeHtml(item.title)}</span>
-      <small>${escapeHtml(item.desc)}</small>
-    </button>
-  `).join("");
-}
-
 function renderWorkflowStep1() {
   return `
     <div class="two-column">
@@ -3675,26 +3657,6 @@ function renderWorkflowStep5() {
 }
 
 function renderWorkflow() {
-  const page = el("page-workflow");
-  const heading = page?.querySelector(".page-header h2");
-  const description = page?.querySelector(".page-header p");
-  if (heading) {
-    heading.textContent = app.workflowStep === 3
-      ? "仿真与洞察"
-      : app.workflowStep === 4
-        ? "优化求解"
-        : app.workflowStep === 5
-          ? "方案评审"
-          : "调度工作台";
-  }
-  if (description) {
-    description.textContent = app.workflowStep === 3
-      ? "用基线排程验证实例，并定位结构、资源与瓶颈问题。"
-      : app.workflowStep === 4
-        ? "配置业务目标与计算预算，生成多目标候选方案。"
-        : "按照业务步骤完成实例准备、约束校验与方案决策。";
-  }
-  renderWorkflowRail();
   const container = el("workflow-content");
   let html = "";
   if (app.workflowStep === 1) html = renderWorkflowStep1();
