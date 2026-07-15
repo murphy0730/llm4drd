@@ -18,7 +18,7 @@ from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
-from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore
+from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore, shifts_to_payload
 from ..data.template_builder import build_instance_template_bytes
 from ..knowledge.graph import HeterogeneousGraph
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
@@ -1306,6 +1306,11 @@ async def get_instance_from_db():
     if not inst_store.has_data():
         raise HTTPException(400, "数据库中无实例数据")
     data = inst_store.load_all()
+    # 班次在库里是紧凑字符串（"day/start/hours;..."），前端"机器维护"页按 JSON 数组渲染，
+    # 这里统一解析成结构化数组，避免文本框显示成空的 []。
+    for resource_key in ("machines", "toolings", "personnel"):
+        for row in data.get(resource_key, []):
+            row["shifts"] = shifts_to_payload(row.get("shifts"))
     # 构建 shop 并返回概览
     if not shop:
         shop = inst_store.build_shopfloor()
