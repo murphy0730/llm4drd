@@ -75,11 +75,6 @@ const NAV_MAP = {
   "bottleneck-analysis": { page: "insights", insightTab: "bottleneck", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
   workflow: { page: "workflow", workflowStep: 1, requiresScene: true },
-  config: { page: "config", configTab: "instance", requiresScene: true },
-  "instance-setup": { page: "config", configTab: "instance", requiresScene: true },
-  "order-maintenance": { page: "config", configTab: "orders", requiresScene: true },
-  "resource-maintenance": { page: "config", configTab: "resources", requiresScene: true },
-  "downtime-management": { page: "config", configTab: "downtime", requiresScene: true },
   graph: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
   simulate: { page: "workflow", workflowStep: 3, workflowFocus: "simulate", requiresScene: true },
   "optimize-config": { page: "workflow", workflowStep: 4, requiresScene: true },
@@ -129,7 +124,6 @@ const app = {
   llmConfig: null,
   health: null,
   insightTab: "structure",
-  configTab: "instance",
   systemTab: "llm",
   reviewTab: "library",
   workflowStep: 1,
@@ -164,7 +158,6 @@ const app = {
   },
   sidebarExpanded: {
     insights: false,
-    config: false,
     optimize: false,
   },
 };
@@ -185,7 +178,6 @@ function defaultGraphView() {
 
 const SIDEBAR_GROUPS = {
   insights: ["insights", "structure-analysis", "resource-analysis", "bottleneck-analysis", "solution-review"],
-  config: ["config", "instance-setup", "order-maintenance", "resource-maintenance", "downtime-management", "graph", "simulate", "workflow"],
   optimize: ["optimize-config", "optimize-launch", "pareto-library", "exact-reference", "ai-review"],
 };
 
@@ -1358,7 +1350,7 @@ function syncSidebarHierarchy() {
     const navKey = parent.dataset.nav;
     const submenu = parent.nextElementSibling?.classList.contains("nav-submenu") ? parent.nextElementSibling : null;
     if (!submenu) return;
-    const groupKey = navKey === "insights" ? "insights" : navKey === "config" ? "config" : "optimize";
+    const groupKey = navKey === "insights" ? "insights" : "optimize";
     const activeInGroup = SIDEBAR_GROUPS[groupKey]?.includes(app.currentNav);
     const expanded = !!app.sidebarExpanded[groupKey] || activeInGroup;
     submenu.classList.toggle("is-collapsed", !expanded);
@@ -1411,7 +1403,6 @@ async function navigate(navKey, pushHash = true) {
   if (navGroup) expandSidebarGroup(navGroup, true);
   if (resolved.insightTab) app.insightTab = resolved.insightTab;
   if (resolved.reviewTab) app.reviewTab = resolved.reviewTab;
-  if (resolved.configTab) app.configTab = resolved.configTab;
   if (resolved.systemTab) app.systemTab = resolved.systemTab;
   if (resolved.workflowStep) app.workflowStep = resolved.workflowStep;
   if (resolved.workflowFocus) app.workflowFocus = resolved.workflowFocus;
@@ -1474,8 +1465,8 @@ function renderDashboard() {
   const selected = getSelectedReviewCandidate();
   const objectiveKeys = app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys || [];
   const flowSteps = [
-    { index: "01", label: "实例准备", done: !!app.currentScene, nav: "config" },
-    { index: "02", label: "约束校验", done: Number(summary.operations || 0) > 0 && Number(summary.machines || 0) > 0, nav: "config" },
+    { index: "01", label: "实例准备", done: !!app.currentScene, nav: "new-scene" },
+    { index: "02", label: "约束校验", done: Number(summary.operations || 0) > 0 && Number(summary.machines || 0) > 0, nav: "new-scene" },
     { index: "03", label: "基线仿真", done: !!app.simResult, nav: "simulate" },
     { index: "04", label: "优化求解", done: !!app.optimizeResult, nav: "optimize-launch" },
     { index: "05", label: "方案评审", done: !!selected, nav: "solution-review" },
@@ -3505,7 +3496,7 @@ function renderWorkflowStep3() {
         <div class="sim-infeasible-banner" role="alert">
           <strong>仿真结果不完整，下方指标不可用于决策</strong>
           <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)} 道工序，请到“实例与约束”页运行数据校验。`)}</span>
-          <div class="form-actions"><button class="btn btn-secondary" type="button" data-nav-jump="config">去查看校验结果</button></div>
+          <div class="form-actions"><button class="btn btn-secondary" type="button" data-nav-jump="new-scene">去查看校验结果</button></div>
         </div>
       ` : ""}
       ${app.simResult ? renderKeyValueGrid([
@@ -3769,267 +3760,6 @@ function renderValidationPanel() {
       </div>
     </article>
   `;
-}
-
-function renderConfigInstanceTab() {
-  const summary = getSceneSummary();
-  const readiness = [
-    { label: "订单与任务", ok: Number(summary.orders || 0) > 0 && Number(summary.tasks || 0) > 0, hint: "至少包含一个订单和任务" },
-    { label: "工序结构", ok: Number(summary.operations || 0) > 0, hint: "至少包含一道可排工序" },
-    { label: "生产资源", ok: Number(summary.machines || 0) > 0, hint: "至少配置一台机器" },
-    { label: "计划时间", ok: !!app.instanceDetails?.plan_start_at, hint: "已设置计划起点" },
-    { label: "资源日历", ok: Number(summary.calendar_days || 0) > 0, hint: "班次日历可覆盖排产跨度" },
-  ];
-  const readyCount = readiness.filter((item) => item.ok).length;
-  return `
-    ${renderValidationPanel()}
-    <article class="surface-card readiness-panel">
-      <div class="card-head">
-        <div><h3>数据就绪检查</h3><p>在仿真前确认实例具备最小排产条件。</p></div>
-        ${statusChip(`${readyCount} / ${readiness.length} 通过`, readyCount === readiness.length ? "success" : "warning")}
-      </div>
-      <div class="readiness-list">
-        ${readiness.map((item) => `
-          <div class="readiness-item ${item.ok ? "passed" : "blocked"}">
-            <span>${item.ok ? "✓" : "!"}</span>
-            <strong>${item.label}</strong>
-            <small>${item.hint}</small>
-          </div>
-        `).join("")}
-      </div>
-      <div class="form-actions">
-        <button class="btn btn-primary" type="button" data-nav-jump="simulate" ${readyCount === readiness.length ? "" : "disabled"}>运行基线仿真</button>
-        ${readyCount === readiness.length ? "" : '<span class="subtle-note">完成缺失项目后即可进入仿真。</span>'}
-      </div>
-    </article>
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>当前实例摘要</h3><p>用于确认当前实例是否已经可用于仿真与优化。</p></div>
-        ${renderKeyValueGrid([
-          { label: "订单", value: formatInt(summary.orders) },
-          { label: "任务", value: formatInt(summary.tasks) },
-          { label: "工序", value: formatInt(summary.operations) },
-          { label: "机器", value: formatInt(summary.machines) },
-          { label: "工装", value: formatInt(summary.toolings) },
-          { label: "人员", value: formatInt(summary.personnel) },
-          { label: "计划起点", value: formatDateTime(app.instanceDetails?.plan_start_at) },
-          { label: "自动日历天数", value: `${formatInt(summary.calendar_days || 0)} 天` },
-        ])}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>快捷动作</h3><p>新建、导入或导出当前实例数据。</p></div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" data-nav-jump="new-scene">新建或导入</button>
-          <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
-          <button class="btn btn-ghost" type="button" data-action="export-csv">导出 CSV</button>
-        </div>
-      </article>
-    </div>
-  `;
-}
-
-function renderConfigOrdersTab() {
-  const orders = asArray(app.instanceDb?.orders).slice(0, CONFIG.TABLE_LIMIT);
-  const tasks = asArray(app.instanceDb?.tasks).slice(0, CONFIG.TABLE_LIMIT);
-  return `
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>订单维护</h3><p>支持维护 release / due / priority，便于现场校准订单承诺。</p></div>
-        ${orders.length ? `
-          <div class="table-shell">
-            <table>
-              <thead><tr><th>订单</th><th>优先级</th><th>释放时间</th><th>交期</th><th></th></tr></thead>
-              <tbody>
-                ${orders.map((item) => `
-                  <tr data-order-id="${escapeHtml(item.order_id)}">
-                    <td>${escapeHtml(item.order_id)}</td>
-                    <td><input data-field="priority" type="number" value="${item.priority ?? 1}"></td>
-                    <td><input data-field="release_time" type="datetime-local" value="${toFlexibleDateTimeLocal(item.release_at || item.release_time)}"></td>
-                    <td><input data-field="due_date" type="datetime-local" value="${toFlexibleDateTimeLocal(item.due_at || item.due_date)}"></td>
-                    <td><button class="btn btn-ghost" type="button" data-action="save-order" data-id="${escapeHtml(item.order_id)}">保存</button></td>
-                  </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          </div>
-        ` : renderEmptyState("暂无订单数据", "请先生成或导入实例。")}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>任务维护</h3><p>任务层交期可默认继承订单交期，也支持在这里校准。</p></div>
-        ${tasks.length ? `
-          <div class="table-shell">
-            <table>
-              <thead><tr><th>任务</th><th>订单</th><th>释放时间</th><th>交期</th><th></th></tr></thead>
-              <tbody>
-                ${tasks.map((item) => `
-                  <tr data-task-id="${escapeHtml(item.task_id)}">
-                    <td>${escapeHtml(item.task_id)}</td>
-                    <td>${escapeHtml(item.order_id || "-")}</td>
-                    <td><input data-field="release_time" type="datetime-local" value="${toFlexibleDateTimeLocal(item.release_at || item.release_time)}"></td>
-                    <td><input data-field="due_date" type="datetime-local" value="${toFlexibleDateTimeLocal(item.due_at || item.due_date)}"></td>
-                    <td><button class="btn btn-ghost" type="button" data-action="save-task" data-id="${escapeHtml(item.task_id)}">保存</button></td>
-                  </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          </div>
-        ` : renderEmptyState("暂无任务数据", "请先生成或导入实例。")}
-      </article>
-    </div>
-  `;
-}
-
-function renderConfigOperationsTab() {
-  const ops = asArray(app.instanceDb?.operations).slice(0, CONFIG.TABLE_LIMIT);
-  const machineIds = asArray(app.instanceDb?.machines).map((item) => item.machine_id);
-  return `
-    <article class="surface-card">
-      <div class="card-head">
-        <h3>工序与初始在制状态</h3>
-        <p>这里重点维护已完成 / 进行中 / 未来排产三类初始状态，以及进行中工序的资源占用到时刻。</p>
-      </div>
-      ${ops.length ? `
-        <div class="table-shell">
-          <table>
-            <thead>
-              <tr>
-                <th>工序</th><th>任务</th><th>状态</th><th>开始</th><th>结束 / 占用到</th><th>剩余工时</th><th>机器</th><th>工装</th><th>人员</th><th></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${ops.map((item) => `
-                <tr data-op-id="${escapeHtml(item.op_id)}">
-                  <td>${escapeHtml(item.op_id)}</td>
-                  <td>${escapeHtml(item.task_id || "-")}</td>
-                  <td>
-                    <select data-field="initial_status">
-                      <option value="">未设置</option>
-                      <option value="completed" ${item.initial_status === "completed" ? "selected" : ""}>已完成</option>
-                      <option value="processing" ${item.initial_status === "processing" ? "selected" : ""}>进行中</option>
-                      <option value="ready" ${item.initial_status === "ready" ? "selected" : ""}>未来排产</option>
-                    </select>
-                  </td>
-                  <td><input data-field="initial_start_time" type="datetime-local" value="${offsetToDateTimeLocal(item.initial_start_time)}"></td>
-                  <td><input data-field="initial_end_time" type="datetime-local" value="${offsetToDateTimeLocal(item.initial_end_time)}"></td>
-                  <td><input data-field="initial_remaining_processing_time" type="number" step="0.1" value="${item.initial_remaining_processing_time ?? ""}"></td>
-                  <td>
-                    <select data-field="initial_assigned_machine_id">
-                      <option value="">未分配</option>
-                      ${machineIds.map((machineId) => `<option value="${escapeHtml(machineId)}" ${item.initial_assigned_machine_id === machineId ? "selected" : ""}>${escapeHtml(machineId)}</option>`).join("")}
-                    </select>
-                  </td>
-                  <td><input data-field="initial_assigned_tooling_ids" type="text" value="${escapeHtml(asArray(item.initial_assigned_tooling_ids).join(","))}"></td>
-                  <td><input data-field="initial_assigned_personnel_ids" type="text" value="${escapeHtml(asArray(item.initial_assigned_personnel_ids).join(","))}"></td>
-                  <td><button class="btn btn-ghost" type="button" data-action="save-operation" data-id="${escapeHtml(item.op_id)}">保存</button></td>
-                </tr>
-              `).join("")}
-            </tbody>
-          </table>
-        </div>
-      ` : renderEmptyState("暂无工序数据", "请先生成或导入实例。")}
-    </article>
-  `;
-}
-
-function renderConfigResourcesTab() {
-  const machines = asArray(app.instanceDb?.machines).slice(0, CONFIG.TABLE_LIMIT);
-  const toolings = asArray(app.instanceDb?.toolings);
-  const personnel = asArray(app.instanceDb?.personnel);
-  return `
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>机器维护</h3><p>机器支持修改名称、类型和班次 JSON。复杂批量调整建议走 Excel。</p></div>
-        ${machines.length ? `
-          <div class="table-shell">
-            <table>
-              <thead><tr><th>机器</th><th>名称</th><th>类型</th><th>班次 JSON</th><th></th></tr></thead>
-              <tbody>
-                ${machines.map((item) => `
-                  <tr data-machine-id="${escapeHtml(item.machine_id)}">
-                    <td>${escapeHtml(item.machine_id)}</td>
-                    <td><input data-field="machine_name" type="text" value="${escapeHtml(item.machine_name || "")}"></td>
-                    <td><input data-field="type_id" type="text" value="${escapeHtml(item.type_id || "")}"></td>
-                    <td><textarea data-field="shifts" rows="3">${escapeHtml(JSON.stringify(asArray(item.shifts), null, 2))}</textarea></td>
-                    <td><button class="btn btn-ghost" type="button" data-action="save-machine" data-id="${escapeHtml(item.machine_id)}">保存</button></td>
-                  </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          </div>
-        ` : renderEmptyState("暂无机器数据", "请先生成或导入实例。")}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>工装 / 人员概览</h3><p>当前版本支持展示，批量维护建议走模板导入，避免前端编辑过于臃肿。</p></div>
-        ${renderSimpleTable(
-          ["类别", "数量", "说明"],
-          [
-            ["工装", formatInt(toolings.length), "可在模板中维护类型、数量和分配"],
-            ["人员", formatInt(personnel.length), "可在模板中维护技能、班次和初始占用"],
-          ],
-        )}
-      </article>
-    </div>
-  `;
-}
-
-function renderConfigDowntimeTab() {
-  const downtimeRows = asArray(app.downtimes).slice(0, CONFIG.TABLE_LIMIT);
-  const machineIds = asArray(app.instanceDb?.machines).map((item) => item.machine_id);
-  return `
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>新增停机</h3><p>同时支持计划停机与非计划停机，时间用真实日期时间录入。</p></div>
-        <div class="form-grid">
-          <label><span>机器</span><select id="downtime-machine">${machineIds.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("")}</select></label>
-          <label><span>类型</span><select id="downtime-type"><option value="planned">计划停机</option><option value="unplanned">非计划停机</option></select></label>
-          <label><span>开始时间</span><input id="downtime-start" type="datetime-local"></label>
-          <label><span>结束时间</span><input id="downtime-end" type="datetime-local"></label>
-        </div>
-        <div class="form-actions"><button class="btn btn-primary" type="button" data-action="add-downtime">新增停机</button></div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>停机记录</h3><p>支持修改和删除，变更后建议再跑一次规则仿真验证。</p></div>
-        ${downtimeRows.length ? `
-          <div class="table-shell">
-            <table>
-              <thead><tr><th>机器</th><th>类型</th><th>开始</th><th>结束</th><th></th></tr></thead>
-              <tbody>
-                ${downtimeRows.map((item) => `
-                  <tr data-downtime-id="${escapeHtml(item.id)}">
-                    <td>${escapeHtml(item.machine_id || "-")}</td>
-                    <td>
-                      <select data-field="downtime_type">
-                        <option value="planned" ${item.downtime_type === "planned" ? "selected" : ""}>计划停机</option>
-                        <option value="unplanned" ${item.downtime_type === "unplanned" ? "selected" : ""}>非计划停机</option>
-                      </select>
-                    </td>
-                    <td><input data-field="start_time" type="datetime-local" value="${toFlexibleDateTimeLocal(item.start_at || item.start_time)}"></td>
-                    <td><input data-field="end_time" type="datetime-local" value="${toFlexibleDateTimeLocal(item.end_at || item.end_time)}"></td>
-                    <td>
-                      <div class="inline-actions">
-                        <button class="btn btn-ghost" type="button" data-action="save-downtime" data-id="${escapeHtml(item.id)}">保存</button>
-                        <button class="btn btn-ghost danger" type="button" data-action="delete-downtime" data-id="${escapeHtml(item.id)}">删除</button>
-                      </div>
-                    </td>
-                  </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          </div>
-        ` : renderEmptyState("暂无停机记录", "可以先在左侧表单新增计划停机或非计划停机。")}
-      </article>
-    </div>
-  `;
-}
-
-function renderConfig() {
-  const container = el("config-content");
-  syncTabButtons("data-config-tab", app.configTab);
-  if (app.configTab === "instance") container.innerHTML = renderConfigInstanceTab();
-  if (app.configTab === "orders") container.innerHTML = renderConfigOrdersTab();
-  if (app.configTab === "operations") container.innerHTML = renderConfigOperationsTab();
-  if (app.configTab === "resources") container.innerHTML = renderConfigResourcesTab();
-  if (app.configTab === "downtime") container.innerHTML = renderConfigDowntimeTab();
 }
 
 function renderCandidateCards(candidates) {
@@ -5425,12 +5155,6 @@ async function renderCurrentPage() {
   if (app.currentPage === "insights") renderInsights();
   if (app.currentPage === "workflow") renderWorkflow();
   if (app.currentPage === "review") renderReview();
-  if (app.currentPage === "config") {
-    renderConfig();
-    if (app.configTab === "instance" && !app.validation && !app.validationBusy && app.currentScene) {
-      handleRunValidation(true);
-    }
-  }
   if (app.currentPage === "system") renderSystem();
   syncGraphBuildControls();
 }
@@ -5603,7 +5327,6 @@ function resetInstanceDerivedState() {
 async function handleRunValidation(silent = false) {
   if (app.validationBusy) return;
   app.validationBusy = true;
-  if (app.currentPage === "config") renderConfig();
   try {
     app.validation = await api.validateInstance();
     if (!silent) {
@@ -5617,7 +5340,6 @@ async function handleRunValidation(silent = false) {
     if (!silent) toast(`数据校验失败：${error.message}`, "warning");
   } finally {
     app.validationBusy = false;
-    if (app.currentPage === "config") renderConfig();
   }
 }
 
@@ -6036,135 +5758,6 @@ async function handleAiAction(mode) {
   }
 }
 
-async function handleSaveOrder(id) {
-  const row = document.querySelector(`tr[data-order-id="${CSS.escape(id)}"]`);
-  if (!row) return;
-  const payload = {
-    priority: Number(row.querySelector('[data-field="priority"]').value || 1),
-    release_time: row.querySelector('[data-field="release_time"]').value || null,
-    due_date: row.querySelector('[data-field="due_date"]').value || null,
-  };
-  try {
-    await api.updateOrder(id, payload);
-    await syncCurrentScene(true);
-    toast(`订单 ${id} 已保存。`, "success");
-    renderConfig();
-  } catch (error) {
-    toast(`保存订单失败：${error.message}`, "warning");
-  }
-}
-
-async function handleSaveTask(id) {
-  const row = document.querySelector(`tr[data-task-id="${CSS.escape(id)}"]`);
-  if (!row) return;
-  const payload = {
-    release_time: row.querySelector('[data-field="release_time"]').value || null,
-    due_date: row.querySelector('[data-field="due_date"]').value || null,
-  };
-  try {
-    await api.updateTask(id, payload);
-    await syncCurrentScene(true);
-    toast(`任务 ${id} 已保存。`, "success");
-    renderConfig();
-  } catch (error) {
-    toast(`保存任务失败：${error.message}`, "warning");
-  }
-}
-
-async function handleSaveOperation(id) {
-  const row = document.querySelector(`tr[data-op-id="${CSS.escape(id)}"]`);
-  if (!row) return;
-  const payload = {
-    initial_status: row.querySelector('[data-field="initial_status"]').value || null,
-    initial_start_time: row.querySelector('[data-field="initial_start_time"]').value || null,
-    initial_end_time: row.querySelector('[data-field="initial_end_time"]').value || null,
-    initial_remaining_processing_time: row.querySelector('[data-field="initial_remaining_processing_time"]').value || null,
-    initial_assigned_machine_id: row.querySelector('[data-field="initial_assigned_machine_id"]').value || null,
-    initial_assigned_tooling_ids: row.querySelector('[data-field="initial_assigned_tooling_ids"]').value
-      ? row.querySelector('[data-field="initial_assigned_tooling_ids"]').value.split(",").map((item) => item.trim()).filter(Boolean)
-      : [],
-    initial_assigned_personnel_ids: row.querySelector('[data-field="initial_assigned_personnel_ids"]').value
-      ? row.querySelector('[data-field="initial_assigned_personnel_ids"]').value.split(",").map((item) => item.trim()).filter(Boolean)
-      : [],
-  };
-  try {
-    await api.updateOperation(id, payload);
-    await syncCurrentScene(true);
-    toast(`工序 ${id} 已保存。`, "success");
-    renderConfig();
-  } catch (error) {
-    toast(`保存工序失败：${error.message}`, "warning");
-  }
-}
-
-async function handleSaveMachine(id) {
-  const row = document.querySelector(`tr[data-machine-id="${CSS.escape(id)}"]`);
-  if (!row) return;
-  let shifts;
-  try {
-    shifts = JSON.parse(row.querySelector('[data-field="shifts"]').value || "[]");
-  } catch {
-    toast(`机器 ${id} 的班次 JSON 解析失败。`, "warning");
-    return;
-  }
-  try {
-    await api.updateMachine(id, {
-      machine_name: row.querySelector('[data-field="machine_name"]').value || null,
-      type_id: row.querySelector('[data-field="type_id"]').value || null,
-      shifts,
-    });
-    await syncCurrentScene(true);
-    toast(`机器 ${id} 已保存。`, "success");
-    renderConfig();
-  } catch (error) {
-    toast(`保存机器失败：${error.message}`, "warning");
-  }
-}
-
-async function handleAddDowntime() {
-  try {
-    await api.addDowntime({
-      machine_id: el("downtime-machine").value,
-      downtime_type: el("downtime-type").value,
-      start_time: el("downtime-start").value,
-      end_time: el("downtime-end").value,
-    });
-    await syncCurrentScene(true);
-    toast("停机已新增。", "success");
-    renderConfig();
-  } catch (error) {
-    toast(`新增停机失败：${error.message}`, "warning");
-  }
-}
-
-async function handleSaveDowntime(id) {
-  const row = document.querySelector(`tr[data-downtime-id="${CSS.escape(id)}"]`);
-  if (!row) return;
-  try {
-    await api.updateDowntime(id, {
-      downtime_type: row.querySelector('[data-field="downtime_type"]').value,
-      start_time: row.querySelector('[data-field="start_time"]').value,
-      end_time: row.querySelector('[data-field="end_time"]').value,
-    });
-    await syncCurrentScene(true);
-    toast("停机已保存。", "success");
-    renderConfig();
-  } catch (error) {
-    toast(`保存停机失败：${error.message}`, "warning");
-  }
-}
-
-async function handleDeleteDowntime(id) {
-  try {
-    await api.deleteDowntime(id);
-    await syncCurrentScene(true);
-    toast("停机已删除。", "success");
-    renderConfig();
-  } catch (error) {
-    toast(`删除停机失败：${error.message}`, "warning");
-  }
-}
-
 async function handleSaveLlmConfig() {
   try {
     await api.setLlmConfig({
@@ -6306,13 +5899,6 @@ async function handleAction(action, target) {
   if (action === "ai-compare") return handleAiAction("compare");
   if (action === "ai-recommend") return handleAiAction("recommend");
   if (action === "ai-ask") return handleAiAction("ask");
-  if (action === "save-order") return handleSaveOrder(target.dataset.id);
-  if (action === "save-task") return handleSaveTask(target.dataset.id);
-  if (action === "save-operation") return handleSaveOperation(target.dataset.id);
-  if (action === "save-machine") return handleSaveMachine(target.dataset.id);
-  if (action === "add-downtime") return handleAddDowntime();
-  if (action === "save-downtime") return handleSaveDowntime(target.dataset.id);
-  if (action === "delete-downtime") return handleDeleteDowntime(target.dataset.id);
   if (action === "save-llm-config") return handleSaveLlmConfig();
   if (action === "test-llm-config") return handleTestLlmConfig();
   if (action === "goto-workflow-step") {
@@ -6368,13 +5954,6 @@ function bindGlobalEvents() {
       renderInsights();
       return;
     }
-    const configTabTarget = event.target.closest("[data-config-tab]");
-    if (configTabTarget) {
-      event.preventDefault();
-      app.configTab = configTabTarget.dataset.configTab;
-      renderConfig();
-      return;
-    }
     const reviewTabTarget = event.target.closest("[data-review-tab]");
     if (reviewTabTarget) {
       event.preventDefault();
@@ -6393,7 +5972,7 @@ function bindGlobalEvents() {
     if (navParentTarget) {
       event.preventDefault();
       const navKey = navParentTarget.dataset.nav;
-      const groupKey = navKey === "insights" ? "insights" : navKey === "config" ? "config" : "optimize";
+      const groupKey = navKey === "insights" ? "insights" : "optimize";
       if (app.currentNav === navKey) {
         const nextExpanded = !app.sidebarExpanded[groupKey];
         expandSidebarGroup(groupKey, nextExpanded);
