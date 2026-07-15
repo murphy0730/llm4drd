@@ -3572,18 +3572,6 @@ function renderWorkflowStep4() {
   const result = app.optimizeResult;
   const recommendedBudget = refreshOptimizeBudgetRecommendation({ preserveManual: true });
   return `
-    <article class="surface-card decision-band">
-      <div>
-        <span class="eyebrow">Optimization Control</span>
-        <h3>预算、目标与搜索深度统一收口在这一页</h3>
-        <p>先确认主目标，再按当前规模采用系统推荐预算。前期负责广搜，后期负责精修，最后统一回到方案评审。</p>
-      </div>
-      <div class="decision-band-stats">
-        <div><span>主目标数</span><strong>${formatInt(asArray(app.optimizeForm.objectiveKeys).length)}</strong></div>
-        <div><span>推荐预算</span><strong>${formatInt(recommendedBudget)}s</strong></div>
-        <div><span>目标方案</span><strong>${formatInt(app.optimizeForm.targetSolutionCount)}</strong></div>
-      </div>
-    </article>
     <article class="surface-card">
       <div class="card-head"><h3>多目标优化配置</h3><p>前期做近似广搜，后期做精确精修，最终重算 Pareto 前沿。</p></div>
       ${renderObjectiveSelectors()}
