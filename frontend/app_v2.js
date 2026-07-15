@@ -118,6 +118,8 @@ const app = {
   graphOrderOptions: [],
   graphView: defaultGraphView(),
   simResult: null,
+  simStatus: null,
+  simElapsedTimer: null,
   simRule: "ATC",
   referenceSolutions: [],
   optimizeTaskId: null,
@@ -336,6 +338,12 @@ function formatNumber(value, digits = 1) {
 function formatInt(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return Number(value).toLocaleString("zh-CN");
+}
+
+function formatDurationMs(ms) {
+  const value = Number(ms) || 0;
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(2)}s`;
 }
 
 function formatPercent(value, digits = 1) {
@@ -3577,6 +3585,7 @@ function renderWorkflowStep3() {
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">打开完整仿真页</button>
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="graph">返回图谱视图</button>
       </div>
+      <div id="sim-status">${renderSimStatusInner(app.simStatus)}</div>
       ${app.simResult && simMetrics.feasible === false ? `
         <div class="sim-infeasible-banner" role="alert">
           <strong>仿真结果不完整，下方指标不可用于决策</strong>
@@ -5945,15 +5954,68 @@ function syncSimulateControls() {
   });
 }
 
+// 仿真运行状态区：运行中显示进度条 + 实时计时，完成/失败/不完整都明确留在界面上，
+// 不再只依赖一闪而过的 toast，避免用户“没有任何反应、不知道成败”。
+function renderSimStatusInner(status) {
+  if (!status || status.phase === "idle") return "";
+  const isRunning = status.phase === "running";
+  const cls = isRunning ? "" : status.phase === "done" ? "is-success" : status.phase === "done-warn" ? "is-warning" : "is-error";
+  const icon = isRunning
+    ? `<span class="import-spinner"></span>`
+    : status.phase === "done" ? `<span class="sim-status-icon">✓</span>`
+    : status.phase === "done-warn" ? `<span class="sim-status-icon">⚠</span>`
+    : `<span class="sim-status-icon">✗</span>`;
+  const title = isRunning ? "仿真运行中" : status.phase === "done" ? "仿真完成" : status.phase === "done-warn" ? "仿真完成（结果不完整）" : "仿真失败";
+  const elapsed = `<span class="sim-elapsed" id="sim-elapsed">${formatDurationMs(status.elapsedMs || 0)}</span>`;
+  const track = `<div class="import-progress-track ${isRunning ? "indeterminate" : ""}"><i${isRunning ? "" : ' style="width:100%"'}></i></div>`;
+  return `
+    <article class="import-progress ${cls}">
+      <div class="import-progress-head">
+        ${icon}
+        <strong>${title}</strong>
+        ${elapsed}
+      </div>
+      ${track}
+      <p class="import-progress-note" id="sim-status-note">${escapeHtml(status.message || "")}</p>
+    </article>`;
+}
+
+function paintSimStatus() {
+  const node = el("sim-status");
+  if (!node) return;
+  node.innerHTML = renderSimStatusInner(app.simStatus);
+  node.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+}
+
 async function handleSimulate() {
   if (app.simBusy) return;
   app.simBusy = true;
+  const startedAt = Date.now();
+  app.simStatus = {
+    phase: "running",
+    message: `正在运行规则仿真（${app.simRule}）：提交请求并初始化排程上下文…`,
+    elapsedMs: 0,
+  };
   syncSimulateControls();
+  paintSimStatus();
+  const stageTimer = window.setInterval(() => {
+    if (app.simStatus && app.simStatus.phase === "running") {
+      app.simStatus.elapsedMs = Date.now() - startedAt;
+      const span = el("sim-elapsed");
+      if (span) span.textContent = formatDurationMs(app.simStatus.elapsedMs);
+    }
+  }, 300);
+  app.simElapsedTimer = stageTimer;
   try {
     app.simRule = el("workflow-sim-rule")?.value || app.simRule;
+    app.simStatus.message = `规则引擎计算中（${app.simRule}）…`;
+    const note = el("sim-status-note");
+    if (note) note.textContent = app.simStatus.message;
     app.simResult = await api.simulate(app.simRule);
-    const metrics = app.simResult?.metrics || {};
+    const elapsedMs = Date.now() - startedAt;
+    const diagnosis = app.simResult?.diagnosis;
     // 调试输出：确认后端计算真实执行、关键中间值是否为 0
+    const metrics = app.simResult?.metrics || {};
     console.info("[simulate]", app.simRule, {
       scheduled: asArray(app.simResult?.gantt).length,
       completed_operations: metrics.completed_operations,
@@ -5962,17 +6024,25 @@ async function handleSimulate() {
       total_tardiness: metrics.total_tardiness,
       avg_net_available_utilization: metrics.avg_net_available_utilization,
       feasible: metrics.feasible,
-      diagnosis: app.simResult?.diagnosis,
+      diagnosis,
     });
-    if (app.simResult?.diagnosis) {
-      toast(`仿真完成，但结果不完整：${app.simResult.diagnosis}`, "error");
-    } else {
-      toast(`规则仿真已完成：${app.simRule}`, "success");
-    }
+    app.simStatus = diagnosis
+      ? { phase: "done-warn", message: `仿真完成，但结果不完整：${diagnosis}`, elapsedMs }
+      : { phase: "done", message: `规则仿真已完成（${app.simRule}），耗时 ${formatDurationMs(elapsedMs)}。`, elapsedMs };
+    if (diagnosis) toast(`仿真完成，但结果不完整：${diagnosis}`, "error");
+    else toast(`规则仿真已完成：${app.simRule}`, "success");
     await renderCurrentPage();
   } catch (error) {
+    app.simStatus = {
+      phase: "error",
+      message: `运行仿真失败：${error.message}。请确认已生成/导入实例，或查看浏览器控制台与后端日志。`,
+      elapsedMs: Date.now() - startedAt,
+    };
     toast(`运行仿真失败：${error.message}`, "error");
+    await renderCurrentPage();
   } finally {
+    window.clearInterval(stageTimer);
+    app.simElapsedTimer = null;
     app.simBusy = false;
     syncSimulateControls();
   }

@@ -2164,6 +2164,31 @@ a {
   color: var(--ink-soft, #5b6c7c);
 }
 
+.import-progress.is-warning {
+  border-color: #b76800;
+  background: rgba(183, 104, 0, 0.07);
+}
+
+.import-progress.is-warning .import-progress-track i { background: #b76800; }
+
+.sim-status-icon {
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1;
+  flex: none;
+}
+
+.import-progress.is-success .sim-status-icon { color: var(--success); }
+.import-progress.is-warning .sim-status-icon { color: #b76800; }
+.import-progress.is-error .sim-status-icon { color: var(--danger); }
+
+.sim-elapsed {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft, #5b6c7c);
+  font-size: 12px;
+}
+
 /* === 数据强校验面板（阶段二） === */
 .validation-panel.danger { border-color: var(--danger); }
 .validation-panel.warning { border-color: #b76800; }
