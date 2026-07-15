@@ -191,6 +191,57 @@ class DirtyScheduleEntryTests(unittest.TestCase):
         self.assertTrue(math.isfinite(analytics.objective_values["total_tardiness"]))
 
 
+class CrossTypeEligibleMachineTests(unittest.TestCase):
+    """工序显式指定的机台类型 ≠ process_type 时不得被饿死。
+
+    派工桶原按 op.process_type 建立，而机器只扫描自己类型的桶——
+    指定机台跨类型的工序会永远无人问津（表现为与规则无关的
+    "前驱已完成但抢不到资源"）。
+    """
+
+    def _shop_with_cross_type_op(self):
+        op1 = Operation(
+            id="op1", task_id="T1", name="op1",
+            process_type="X",                 # 没有任何 X 类型机器
+            processing_time=2.0,
+            eligible_machine_ids=["M1"],      # 但显式指定了 A 类型的 M1
+        )
+        op2 = Operation(
+            id="op2", task_id="T1", name="op2",
+            process_type="A",                 # 类型匹配的机器存在(M1)
+            processing_time=2.0,
+            eligible_machine_ids=["M2"],      # 但只允许 B 类型的 M2
+        )
+        task = Task(id="T1", order_id="O1", name="T1", due_date=100.0, operations=[op1, op2])
+        shop = ShopFloor(
+            machine_types={"A": MachineType("A", "A"), "B": MachineType("B", "B")},
+            machines={
+                "M1": Machine(id="M1", name="M1", type_id="A", shifts=_full_calendar()),
+                "M2": Machine(id="M2", name="M2", type_id="B", shifts=_full_calendar()),
+            },
+            orders={"O1": Order(id="O1", due_date=100.0, task_ids=["T1"], main_task_id="T1")},
+            tasks={"T1": task},
+            operations={"op1": op1, "op2": op2},
+            plan_start_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        )
+        shop.build_indexes()
+        return shop
+
+    def test_cross_type_eligible_ops_are_scheduled(self):
+        result = Simulator(self._shop_with_cross_type_op(), BUILTIN_RULES["ATC"]).run()
+        self.assertTrue(result.feasible, "跨类型指定机台的工序被饿死")
+        self.assertEqual(len(result.schedule), 2)
+        by_op = {entry["op_id"]: entry["machine_id"] for entry in result.schedule}
+        self.assertEqual(by_op["op1"], "M1")
+        self.assertEqual(by_op["op2"], "M2")
+
+    def test_rule_independence(self):
+        # 该场景对任何规则都必须可行（此前所有规则都饿死同一批工序）
+        for rule_name, rule in BUILTIN_RULES.items():
+            result = Simulator(self._shop_with_cross_type_op(), rule).run()
+            self.assertTrue(result.feasible, f"{rule_name} 下跨类型工序被饿死")
+
+
 class ExactSolverInfDueTests(unittest.TestCase):
     """无交期任务（due_date=inf）不得让 exact 求解器 OverflowError。"""
 
