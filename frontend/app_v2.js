@@ -5341,6 +5341,11 @@ async function handleRunValidation(silent = false) {
   } finally {
     app.validationBusy = false;
   }
+  // Re-render validation panel on new-scene page after validation completes
+  if (app.currentPage === "new-scene") {
+    const box = el("new-scene-validation");
+    if (box) box.innerHTML = app.currentScene ? renderValidationPanel() : "";
+  }
 }
 
 async function handleImportFile(file) {
