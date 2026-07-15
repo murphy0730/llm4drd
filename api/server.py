@@ -710,6 +710,23 @@ def _build_exact_reference_solution(
     }
 
 
+def _json_safe(value: Any) -> Any:
+    """递归地将 inf/-inf/nan 等非 JSON 合规的浮点值替换为 None。
+
+    不可行排程会产生 makespan=inf、total_tardiness=inf 等指标，
+    starlette 默认的 json.dumps 无法序列化这些值，会抛出
+    "Out of range float values are not JSON compliant: inf" 并返回 500。
+    前端已将 null 渲染为 "-"，因此此处统一转换为 None。
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _active_shop() -> Optional[ShopFloor]:
     if inst_store.has_data():
         current_shop = inst_store.build_shopfloor()
@@ -1631,6 +1648,29 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
     if ops_without_machine > 20:
         err("约束条件", "operations", f"另有 {ops_without_machine - 20} 道工序同样没有可用机器（已省略明细）", sheet="operations / machines")
 
+    # --- 资源日历可用性：某类资源有实例、但全部没有任何可用工作窗口 ---
+    # （班次可能都落在计划起点之前，或被停机完全占满；仿真会因此永远排不出相关工序。
+    #   "完全没有实例" 的情况已在上面的按工序检查里覆盖，这里只查 "有实例但排不了班"。）
+    used_process_types = {op.process_type for op in current_shop.operations.values()}
+    for process_type in sorted(used_process_types):
+        machines = current_shop.get_machines_for_type(process_type)
+        if machines and all(not _resource_has_calendar(machine) for machine in machines):
+            err("约束条件", process_type, f"工艺类型 {process_type} 的全部机器都没有任何可用排班窗口（班次可能都落在计划起点之前或被停机占满），相关工序无法开工", sheet="machines")
+
+    used_tooling_types: set[str] = set()
+    used_skills: set[str] = set()
+    for op in current_shop.operations.values():
+        used_tooling_types.update(op.required_tooling_types)
+        used_skills.update(op.required_personnel_skills)
+    for tooling_type in sorted(used_tooling_types):
+        toolings = current_shop.get_toolings_for_type(tooling_type)
+        if toolings and all(not _resource_has_calendar(tooling) for tooling in toolings):
+            err("约束条件", tooling_type, f"工装类型 {tooling_type} 的全部实例都没有任何可用排班窗口，需要该工装的工序无法开工", sheet="toolings")
+    for skill_id in sorted(used_skills):
+        people = current_shop.get_personnel_for_skill(skill_id)
+        if people and all(not _resource_has_calendar(person) for person in people):
+            err("约束条件", skill_id, f"技能 {skill_id} 的全部人员都没有任何可用排班窗口，需要该技能的工序无法开工", sheet="personnel")
+
     # --- 工序前驱环检测（有环则整条链永远无法就绪）---
     color: dict[str, int] = {}
     cycle_reported = False
@@ -1922,28 +1962,196 @@ async def node_neighbors(node_id: str):
     return graph_store.get_node_neighbors(node_id)
 
 # === Simulate ===
-def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics) -> Optional[str]:
-    """当仿真结果异常（空排程 / 未覆盖全部工序）时，给出可读的原因诊断。"""
-    if analytics.feasible:
-        return None
-    scheduled = len(result.schedule or [])
+# 未排程工序的根因分类：category -> (可读标签, 是否为可直接排查的根因)
+_INFEASIBLE_REASON_LABELS: dict[str, tuple[str, bool]] = {
+    "dangling": ("前驱工序/任务引用不存在（数据断链），永远无法就绪", True),
+    "no_machine": ("没有匹配的机器类型，无法分配设备", True),
+    "no_tooling": ("所需工装类型没有任何实例", True),
+    "no_personnel": ("所需人员技能没有任何实例", True),
+    "machine_no_calendar": ("所有匹配机器都没有可用排班日历（工作日历为空）", True),
+    "tooling_no_calendar": ("所需工装全部没有可用排班日历", True),
+    "personnel_no_calendar": ("所需人员全部没有可用排班日历", True),
+    "release_inf": ("工序投放时间为无穷大（订单/任务 release_time 异常）", True),
+    "starved": ("前驱已完成但始终抢不到资源（资源竞争 / 日历产能不足）", True),
+    "blocked_by_predecessor": ("被上游未完成工序阻塞（级联受阻，非根因）", False),
+}
+
+
+def _resource_has_calendar(resource) -> bool:
+    """资源在计划起点之后是否存在任何可用工作窗口。"""
+    try:
+        return resource.next_available_time(0.0) != float("inf")
+    except Exception:
+        return True
+
+
+def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics) -> dict:
+    """对不可行 / 部分排程的仿真结果逐工序做根因分析。
+
+    返回结构化诊断：
+    {
+      "total": 总工序数, "scheduled": 已完成工序数, "unscheduled": 未完成工序数,
+      "reasons": [{"category", "label", "is_root", "count", "examples":[...], "hint_ids":[...]}...]
+    }
+    每道未完成工序按优先级归入唯一一个根因分类，便于定位真正需要调整的数据。
+    """
+    schedule = result.schedule or []
+    total_ops = len(current_shop.operations)
+
+    completed_op_ids: set[str] = {e.get("op_id") for e in schedule if e.get("op_id")}
+    completed_op_ids.update(op.id for op in current_shop.operations.values() if op.status == OpStatus.COMPLETED)
+
+    task_op_ids: dict[str, list[str]] = {}
+    for op in current_shop.operations.values():
+        task_op_ids.setdefault(op.task_id, []).append(op.id)
+    completed_task_ids = {
+        task_id for task_id, op_ids in task_op_ids.items()
+        if op_ids and all(op_id in completed_op_ids for op_id in op_ids)
+    }
+
+    buckets: dict[str, list[str]] = {}
+    hint_ids: dict[str, set[str]] = {}
+
+    def _add(category: str, op: Operation, missing: Optional[list[str]] = None) -> None:
+        label = op.name or op.id
+        buckets.setdefault(category, []).append(f"{label}({op.id})")
+        for token in missing or []:
+            hint_ids.setdefault(category, set()).add(str(token))
+
+    for op in current_shop.operations.values():
+        if op.id in completed_op_ids:
+            continue
+
+        # 1. 前驱引用断链：引用了不存在的工序 / 任务
+        dangling = [p for p in op.predecessor_ops if p not in current_shop.operations]
+        dangling += [p for p in op.predecessor_tasks if p not in current_shop.tasks]
+        if dangling:
+            _add("dangling", op, dangling)
+            continue
+
+        # 2. 没有任何匹配机器（工序类型 / 指定机器都不存在）
+        machines = current_shop.get_eligible_machines(op)
+        if not machines:
+            _add("no_machine", op, [op.process_type])
+            continue
+
+        # 3. 所需工装类型没有任何实例
+        missing_tool = [t for t in op.required_tooling_types if not current_shop.get_toolings_for_type(t)]
+        if missing_tool:
+            _add("no_tooling", op, missing_tool)
+            continue
+
+        # 4. 所需人员技能没有任何实例
+        missing_skill = [s for s in op.required_personnel_skills if not current_shop.get_personnel_for_skill(s)]
+        if missing_skill:
+            _add("no_personnel", op, missing_skill)
+            continue
+
+        # 5. 所有匹配机器都没有可用排班日历
+        if all(not _resource_has_calendar(m) for m in machines):
+            _add("machine_no_calendar", op, [op.process_type])
+            continue
+
+        # 6. 某个所需工装类型的全部实例都没有可用排班日历
+        tool_no_cal = [
+            t for t in op.required_tooling_types
+            if all(not _resource_has_calendar(x) for x in current_shop.get_toolings_for_type(t))
+        ]
+        if tool_no_cal:
+            _add("tooling_no_calendar", op, tool_no_cal)
+            continue
+
+        # 7. 某个所需技能的全部人员都没有可用排班日历
+        person_no_cal = [
+            s for s in op.required_personnel_skills
+            if all(not _resource_has_calendar(x) for x in current_shop.get_personnel_for_skill(s))
+        ]
+        if person_no_cal:
+            _add("personnel_no_calendar", op, person_no_cal)
+            continue
+
+        # 8. 投放时间无穷大
+        if current_shop.get_operation_release_time(op) == float("inf"):
+            _add("release_inf", op)
+            continue
+
+        # 9. 前驱未完成 —— 级联受阻（受害者，真正根因在上游）
+        blocked_pre = [p for p in op.predecessor_ops if p not in completed_op_ids]
+        blocked_pre += [p for p in op.predecessor_tasks if p not in completed_task_ids]
+        if blocked_pre:
+            _add("blocked_by_predecessor", op, blocked_pre)
+            continue
+
+        # 10. 前驱都完成、资源类型也齐全，但始终没排上 —— 资源竞争 / 日历产能不足
+        _add("starved", op)
+
+    reasons: list[dict] = []
+    for category, examples in buckets.items():
+        label, is_root = _INFEASIBLE_REASON_LABELS.get(category, (category, True))
+        reasons.append({
+            "category": category,
+            "label": label,
+            "is_root": is_root,
+            "count": len(examples),
+            "examples": examples[:8],
+            "hint_ids": sorted(hint_ids.get(category, set()))[:12],
+        })
+    # 根因优先、数量多的排前面
+    reasons.sort(key=lambda r: (not r["is_root"], -r["count"]))
+
+    return {
+        "total": total_ops,
+        "scheduled": analytics.completed_operations,
+        "unscheduled": total_ops - analytics.completed_operations,
+        "reasons": reasons,
+    }
+
+
+def _format_infeasible_detail(diag: dict, rule_name: str) -> str:
+    """把结构化诊断渲染成多行文本，供后台日志打印，方便逐条排查。"""
+    lines: list[str] = []
+    lines.append(
+        f"仿真[{rule_name}] 不可行：仅完成 {diag['scheduled']}/{diag['total']} 道工序，"
+        f"未排 {diag['unscheduled']} 道。逐工序根因分类如下（★=可直接排查的根因）："
+    )
+    for idx, reason in enumerate(diag["reasons"], 1):
+        marker = "★" if reason["is_root"] else "·"
+        line = f"  {marker} [{idx}] {reason['label']}：{reason['count']} 道工序"
+        if reason["hint_ids"]:
+            line += f"；涉及: {', '.join(reason['hint_ids'])}"
+        if reason["examples"]:
+            line += f"；示例工序: {', '.join(reason['examples'])}"
+        lines.append(line)
+    if not diag["reasons"]:
+        lines.append("  （未识别到明确的结构性根因，请到“实例与约束”页运行数据校验查看完整错误明细）")
+    else:
+        lines.append("  提示：先处理带 ★ 的根因；“级联受阻”类工序会在上游根因修复后自动恢复。")
+    return "\n".join(lines)
+
+
+def _diagnosis_oneline(diag: dict, scheduled_entries: int) -> str:
+    """从结构化诊断生成一行摘要（供前端 banner / toast 展示）。"""
     hints: list[str] = []
-    if scheduled == 0:
+    if scheduled_entries == 0:
         hints.append("仿真没有排出任何工序，所有指标会显示为 0")
     else:
-        hints.append(f"仅排出 {analytics.completed_operations}/{len(current_shop.operations)} 道工序，指标只反映部分排程")
-    dangling_ops = sum(
-        1 for op in current_shop.operations.values()
-        if any(p not in current_shop.operations for p in op.predecessor_ops)
-        or any(p not in current_shop.tasks for p in op.predecessor_tasks)
-    )
-    if dangling_ops:
-        hints.append(f"{dangling_ops} 道工序的前驱引用不存在，永远无法就绪")
-    no_machine_ops = sum(1 for op in current_shop.operations.values() if not current_shop.get_eligible_machines(op))
-    if no_machine_ops:
-        hints.append(f"{no_machine_ops} 道工序没有任何可用机器")
-    hints.append("请到“实例与约束”页运行数据校验查看完整错误明细")
+        hints.append(f"仅排出 {diag['scheduled']}/{diag['total']} 道工序，指标只反映部分排程")
+    # 优先展示排名靠前的 2 个根因，附数量
+    for reason in [r for r in diag["reasons"] if r["is_root"]][:2]:
+        detail = reason["label"]
+        if reason["hint_ids"]:
+            detail += f"（{', '.join(reason['hint_ids'][:5])}）"
+        hints.append(f"{reason['count']} 道工序：{detail}")
+    hints.append("完整根因分类见后台日志；或到“实例与约束”页运行数据校验查看明细")
     return "；".join(hints)
+
+
+def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics) -> Optional[str]:
+    """当仿真结果异常（空排程 / 未覆盖全部工序）时，给出可读的一行原因诊断（供前端展示）。"""
+    if analytics.feasible:
+        return None
+    diag = _diagnose_infeasible(current_shop, result, analytics)
+    return _diagnosis_oneline(diag, len(result.schedule or []))
 
 
 @app.post("/api/simulate")
@@ -1967,9 +2175,16 @@ async def simulate(req: SimReq):
         analytics.objective_values.get("avg_net_available_utilization", 0.0),
         analytics.feasible, r.event_count, r.wall_time_ms,
     )
-    diagnosis = _simulation_diagnosis(current_shop, r, analytics)
-    if diagnosis:
-        logging.warning("simulate[%s] infeasible: %s", req.rule_name, diagnosis)
+    diagnosis = None
+    diagnosis_detail = None
+    if not analytics.feasible:
+        diagnosis_detail = _diagnose_infeasible(current_shop, r, analytics)
+        diagnosis = _diagnosis_oneline(diagnosis_detail, len(r.schedule or []))
+        # 后台打印逐工序根因分类，方便定位具体的不可行原因
+        logging.warning(
+            "simulate[%s] infeasible:\n%s",
+            req.rule_name, _format_infeasible_detail(diagnosis_detail, req.rule_name),
+        )
     r._rule_name = req.rule_name
     last_result = r
     # Enrich gantt with order info
@@ -1997,7 +2212,13 @@ async def simulate(req: SimReq):
     metrics["completed_operations"] = analytics.completed_operations
     metrics["total_operations"] = len(current_shop.operations)
     metrics["feasible"] = analytics.feasible
-    return {"metrics": metrics, "gantt": gantt, "rule": req.rule_name, "diagnosis": diagnosis}
+    return _json_safe({
+        "metrics": metrics,
+        "gantt": gantt,
+        "rule": req.rule_name,
+        "diagnosis": diagnosis,
+        "diagnosis_detail": diagnosis_detail,
+    })
 
 @app.post("/api/simulate/compare")
 async def compare(rule_names: list[str] = None):
@@ -2013,7 +2234,7 @@ async def compare(rule_names: list[str] = None):
         metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
         results.append({"rule": n, "metrics": metrics})
     results.sort(key=lambda x: x["metrics"]["total_tardiness"])
-    return {"comparison": results}
+    return _json_safe({"comparison": results})
 
 
 @app.post("/api/simulate/reference-solutions")
