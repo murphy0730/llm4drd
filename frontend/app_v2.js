@@ -5416,6 +5416,11 @@ function mountLegacyCytoscapeGraph() {
 async function renderCurrentPage() {
   ensureReviewSelection();
   updateShell();
+  if (app.currentPage === "new-scene") {
+    const box = el("new-scene-validation");
+    if (box) box.innerHTML = app.currentScene ? renderValidationPanel() : "";
+    if (!app.validation && !app.validationBusy && app.currentScene) handleRunValidation(true);
+  }
   if (app.currentPage === "dashboard") renderDashboard();
   if (app.currentPage === "insights") renderInsights();
   if (app.currentPage === "workflow") renderWorkflow();
@@ -5554,44 +5559,6 @@ function startOptimizePolling() {
   }, CONFIG.OPT_POLL_MS);
 }
 
-function collectGeneratePayload() {
-  const tasksMin = Math.max(1, Number(el("gen-tasks-min")?.value || 2));
-  const tasksMax = Math.max(tasksMin, Number(el("gen-tasks-max")?.value || 5));
-  const opsMin = Math.max(1, Number(el("gen-ops-min")?.value || 2));
-  const opsMax = Math.max(opsMin, Number(el("gen-ops-max")?.value || 5));
-  return {
-    num_orders: Number(el("gen-orders").value || 12),
-    tasks_per_order_min: tasksMin,
-    tasks_per_order_max: tasksMax,
-    ops_per_task_min: opsMin,
-    ops_per_task_max: opsMax,
-    machines_per_type: Number(el("gen-machines").value || 3),
-    toolings_per_type: Number(el("gen-toolings").value || 1),
-    personnel_per_skill: Number(el("gen-personnel").value || 1),
-    due_date_factor: Number(el("gen-due-factor").value || 1.5),
-    arrival_spread: Number(el("gen-arrival-spread").value || 0),
-    day_shift_hours: Number(el("gen-day-shift-hours").value || 10),
-    night_shift_hours: Number(el("gen-night-shift-hours").value || 8),
-    maintenance_prob: Number(el("gen-maintenance-prob").value || 0.05),
-    seed: Number(el("gen-seed").value || 42),
-    plan_start_at: el("gen-start-time").value || null,
-  };
-}
-
-async function handleGenerateInstance() {
-  try {
-    const result = await api.generateInstance(collectGeneratePayload());
-    app.validation = result?.validation || null;
-    await syncCurrentScene(true);
-    resetInstanceDerivedState();
-    toast("实例已生成并加载，请在“实例与约束”页确认校验结果。", "success");
-    app.configTab = "instance";
-    await navigate("config");
-  } catch (error) {
-    toast(`生成实例失败：${error.message}`, "warning");
-  }
-}
-
 function setImportProgress(state) {
   const panel = el("import-progress");
   if (!panel) return;
@@ -5608,7 +5575,7 @@ function setImportProgress(state) {
   if (label) label.textContent = state.label || "";
   if (bar) bar.style.width = `${Math.max(0, Math.min(100, Number(state.percent || 0)))}%`;
   if (note) note.textContent = state.note || "";
-  document.querySelectorAll('[data-action="trigger-import"], [data-action="generate-instance"]').forEach((button) => {
+  document.querySelectorAll('[data-action="trigger-import"]').forEach((button) => {
     button.disabled = !!state.busy;
     button.setAttribute("aria-busy", state.busy ? "true" : "false");
   });
@@ -5683,7 +5650,7 @@ async function handleImportFile(file) {
       tone: failed ? "error" : "success",
       label: failed ? "导入完成，但数据校验发现问题" : "导入成功",
       note: failed
-        ? `发现 ${formatInt(validation.error_count)} 个错误、${formatInt(validation.warning_count)} 个警告，请在“实例与约束”页查看明细。`
+        ? `发现 ${formatInt(validation.error_count)} 个错误、${formatInt(validation.warning_count)} 个警告，校验结果已在本页显示。`
         : `已加载 ${formatInt(getSceneSummary().orders)} 个订单 / ${formatInt(getSceneSummary().operations)} 道工序。`,
     });
     if (failed) {
@@ -5693,8 +5660,8 @@ async function handleImportFile(file) {
     } else {
       toast("Excel 导入成功，数据校验通过。", "success");
     }
-    app.configTab = "instance";
-    await navigate("config");
+    if (app.currentPage !== "new-scene") await navigate("new-scene");
+    else await renderCurrentPage();
   } catch (error) {
     setImportProgress({ busy: false, percent: 100, tone: "error", label: "导入失败", note: error.message });
     toast(`导入失败：${error.message}`, "error");
@@ -6282,10 +6249,6 @@ async function handleAction(action, target) {
     await syncCurrentScene();
     return renderCurrentPage();
   }
-  if (action === "fill-now-start") {
-    el("gen-start-time").value = toDateTimeLocalValue(new Date().toISOString());
-    return;
-  }
   if (action === "trigger-import") return el("import-file").click();
   if (action === "download-template") {
     const blob = await api.downloadTemplate();
@@ -6299,7 +6262,6 @@ async function handleAction(action, target) {
     toast("CSV 已导出。", "success");
     return;
   }
-  if (action === "generate-instance") return handleGenerateInstance();
   if (action === "run-validation") return handleRunValidation();
   if (action === "export-validation") {
     const blob = await api.exportValidation();
@@ -6560,7 +6522,6 @@ function bindGlobalEvents() {
 
 async function init() {
   loadSceneHistory();
-  el("gen-start-time").value = toDateTimeLocalValue(new Date().toISOString());
   bindGlobalEvents();
   await loadCatalogs();
   await syncCurrentScene(true);

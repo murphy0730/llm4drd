@@ -62,78 +62,38 @@
 
       <main class="main-stage">
         <section class="page active" id="page-new-scene">
-          <div class="page-header">
-            <div>
-              <span class="eyebrow">Create</span>
-              <h2>数据导入</h2>
-              <p>通过参数生成或 Excel 导入构建调度实例，这是调度流程的第一步。</p>
-            </div>
-            <div class="page-header-actions">
-              <button class="btn btn-ghost" type="button" data-action="sync-current-scene">同步当前实例</button>
-            </div>
-          </div>
           <div class="page-body">
-            <div class="two-column">
-              <article class="surface-card">
-                <div class="card-head">
-                  <h3>快速生成</h3>
-                  <p>用于联调、演示和算法快速验证。</p>
-                </div>
-                <form class="form-grid" id="form-generate-v2">
-                  <label><span>订单数量</span><input id="gen-orders" type="number" min="1" value="12"></label>
-                  <label><span>每单任务最少数</span><input id="gen-tasks-min" type="number" min="1" value="2"></label>
-                  <label><span>每单任务最多数</span><input id="gen-tasks-max" type="number" min="1" value="5"></label>
-                  <label><span>每任务工序最少数</span><input id="gen-ops-min" type="number" min="1" value="2"></label>
-                  <label><span>每任务工序最多数</span><input id="gen-ops-max" type="number" min="1" value="5"></label>
-                  <label><span>每类机器台数</span><input id="gen-machines" type="number" min="1" value="3"></label>
-                  <label><span>每类工装数量</span><input id="gen-toolings" type="number" min="1" value="1"></label>
-                  <label><span>每类人员数量</span><input id="gen-personnel" type="number" min="1" value="1"></label>
-                  <label><span>交期系数</span><input id="gen-due-factor" type="number" min="0.5" step="0.1" value="1.5"></label>
-                  <label><span>到达离散度</span><input id="gen-arrival-spread" type="number" min="0" step="0.1" value="0"></label>
-                  <label><span>白班时长</span><input id="gen-day-shift-hours" type="number" min="1" step="0.5" value="10"></label>
-                  <label><span>夜班时长</span><input id="gen-night-shift-hours" type="number" min="0" step="0.5" value="8"></label>
-                  <label><span>维护概率</span><input id="gen-maintenance-prob" type="number" min="0" max="1" step="0.01" value="0.05"></label>
-                  <label><span>随机种子</span><input id="gen-seed" type="number" value="42"></label>
-                  <label class="span-2"><span>计划起点时间</span><input id="gen-start-time" type="datetime-local"></label>
-                  <div class="form-actions span-2">
-                    <button class="btn btn-primary" type="button" data-action="generate-instance">生成实例</button>
-                    <button class="btn btn-ghost" type="button" data-action="fill-now-start">使用当前时间</button>
-                  </div>
-                </form>
-              </article>
-
-              <article class="surface-card">
-                <div class="card-head">
-                  <h3>导入与模板</h3>
-                  <p>用于接入真实业务数据、工艺结构和初始在制状态。</p>
-                </div>
-                <div class="upload-panel">
-                  <div class="upload-dropzone">
-                    <strong>拖入 Excel 或点击选择文件</strong>
-                    <span>支持 planning_context / orders / tasks / operations / machines / toolings / personnel / downtimes / initial_state</span>
-                    <input id="import-file" type="file" accept=".xlsx,.xls,.xlsm" hidden>
-                    <div class="upload-actions">
-                      <button class="btn btn-primary" type="button" data-action="trigger-import">选择 Excel</button>
-                      <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
-                    </div>
-                  </div>
-                  <div class="import-progress" id="import-progress" hidden aria-live="polite">
-                    <div class="import-progress-head">
-                      <span class="import-spinner" aria-hidden="true"></span>
-                      <strong id="import-progress-label">正在上传 Excel…</strong>
-                    </div>
-                    <div class="import-progress-track"><i id="import-progress-bar" style="width:0%"></i></div>
-                    <p class="import-progress-note" id="import-progress-note">请勿关闭页面，导入完成后会自动跳转到“实例与约束”查看校验结果。</p>
+            <article class="surface-card">
+              <div class="card-head">
+                <h3>导入与模板</h3>
+                <p>用于接入真实业务数据、工艺结构和初始在制状态。</p>
+              </div>
+              <div class="upload-panel">
+                <div class="upload-dropzone">
+                  <strong>拖入 Excel 或点击选择文件</strong>
+                  <span>支持 planning_context / orders / tasks / operations / machines / toolings / personnel / downtimes / initial_state</span>
+                  <input id="import-file" type="file" accept=".xlsx,.xls,.xlsm" hidden>
+                  <div class="upload-actions">
+                    <button class="btn btn-primary" type="button" data-action="trigger-import">选择 Excel</button>
+                    <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
                   </div>
                 </div>
-                <div class="hint-list">
-                  <div>模板已包含工装、人员、停机和初始在制状态字段。</div>
-                  <div>任务层交期可留空，默认继承订单交期。</div>
-                  <div>任务数和工序数范围会直接影响生成实例的复杂度与最终工序规模。</div>
-                  <div>排产跨度天数由后端自动估算，并在不足时自动扩展。</div>
+                <div class="import-progress" id="import-progress" hidden aria-live="polite">
+                  <div class="import-progress-head">
+                    <span class="import-spinner" aria-hidden="true"></span>
+                    <strong id="import-progress-label">正在上传 Excel…</strong>
+                  </div>
+                  <div class="import-progress-track"><i id="import-progress-bar" style="width:0%"></i></div>
+                  <p class="import-progress-note" id="import-progress-note">请勿关闭页面，导入完成后会在本页显示数据强校验结果。</p>
                 </div>
-              </article>
-            </div>
+              </div>
+              <div class="hint-list">
+                <div>模板已包含工装、人员、停机和初始在制状态字段。</div>
+                <div>任务层交期可留空，默认继承订单交期。</div>
+                <div>排产跨度天数由后端自动估算，并在不足时自动扩展。</div>
+              </div>
+            </article>
+            <div id="new-scene-validation"></div>
           </div>
         </section>
 
@@ -251,6 +211,6 @@
   <script src="/static/vendor/cytoscape.min.js?v=3.30.4"></script>
   <script src="/static/vendor/dagre.min.js?v=0.8.5"></script>
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
-  <script src="/static/app_v2.js?v=20260714-31"></script>
+  <script src="/static/app_v2.js?v=20260714-32"></script>
 </body>
 </html>
