@@ -29,7 +29,6 @@
   --radius-lg: 8px;
   --topbar-h: 56px;
   --sidebar-w: 224px;
-  --context-w: 300px;
   --font: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
   --font-display: "Geist", "PingFang SC", "HarmonyOS Sans SC", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -154,8 +153,6 @@ body {
 }
 .status-box span { font-size: 10px; color: var(--text-faint); }
 .status-box strong { font-family: var(--font-mono); font-size: 11.5px; }
-
-.workspace { grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--context-w); }
 
 .sidebar {
   padding: 20px 12px 14px;
