@@ -69,10 +69,6 @@ const NAV_MAP = {
   "scene-library": { page: "new-scene" },
   "new-scene": { page: "new-scene" },
   dashboard: { page: "dashboard", requiresScene: true },
-  insights: { page: "insights", insightTab: "structure", requiresScene: true },
-  "structure-analysis": { page: "insights", insightTab: "structure", requiresScene: true },
-  "resource-analysis": { page: "insights", insightTab: "resource", requiresScene: true },
-  "bottleneck-analysis": { page: "insights", insightTab: "bottleneck", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
   workflow: { page: "workflow", workflowStep: 1, requiresScene: true },
   graph: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
@@ -123,7 +119,6 @@ const app = {
   exactObjectiveCatalog: [],
   llmConfig: null,
   health: null,
-  insightTab: "structure",
   systemTab: "llm",
   reviewTab: "library",
   workflowStep: 1,
@@ -157,7 +152,6 @@ const app = {
     weights: {},
   },
   sidebarExpanded: {
-    insights: false,
     optimize: false,
   },
 };
@@ -177,7 +171,6 @@ function defaultGraphView() {
 }
 
 const SIDEBAR_GROUPS = {
-  insights: ["insights", "structure-analysis", "resource-analysis", "bottleneck-analysis", "solution-review"],
   optimize: ["optimize-config", "optimize-launch", "pareto-library", "exact-reference", "ai-review"],
 };
 
@@ -1347,10 +1340,9 @@ function expandSidebarGroup(groupKey, expanded = true) {
 
 function syncSidebarHierarchy() {
   document.querySelectorAll(".nav-parent").forEach((parent) => {
-    const navKey = parent.dataset.nav;
     const submenu = parent.nextElementSibling?.classList.contains("nav-submenu") ? parent.nextElementSibling : null;
     if (!submenu) return;
-    const groupKey = navKey === "insights" ? "insights" : "optimize";
+    const groupKey = "optimize";
     const activeInGroup = SIDEBAR_GROUPS[groupKey]?.includes(app.currentNav);
     const expanded = !!app.sidebarExpanded[groupKey] || activeInGroup;
     submenu.classList.toggle("is-collapsed", !expanded);
@@ -1401,7 +1393,6 @@ async function navigate(navKey, pushHash = true) {
   app.currentPage = resolved.page;
   const navGroup = groupForNav(navKey);
   if (navGroup) expandSidebarGroup(navGroup, true);
-  if (resolved.insightTab) app.insightTab = resolved.insightTab;
   if (resolved.reviewTab) app.reviewTab = resolved.reviewTab;
   if (resolved.systemTab) app.systemTab = resolved.systemTab;
   if (resolved.workflowStep) app.workflowStep = resolved.workflowStep;
@@ -2603,151 +2594,6 @@ function renderInteractiveGraph() {
   `;
 }
 
-function mountInteractiveGraph() {
-  const svg = document.querySelector("[data-graph-canvas]");
-  if (!svg || svg.dataset.bound === "1") return;
-  svg.dataset.bound = "1";
-
-  const getSvgScale = () => {
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    return {
-      x: viewBox.width / Math.max(rect.width, 1),
-      y: viewBox.height / Math.max(rect.height, 1),
-    };
-  };
-
-  const root = svg.closest(".graph-workbench") || document;
-  const hoverPreview = root.querySelector("#graph-hover-preview");
-  applyGraphViewportState(root);
-  applyGraphNodePositions(root);
-
-  const updateHoverPreview = (nodeEl) => {
-    if (!hoverPreview) return;
-    if (!nodeEl) {
-      const selected = Array.from(root.querySelectorAll("[data-graph-node]"))
-        .find((node) => node.dataset.graphNode === (app.selectedGraphNodeId || ""));
-      if (selected) {
-        hoverPreview.textContent = `当前选中：${selected.dataset.nodeTypeLabel || "-"} / ${selected.dataset.nodeLabel || "-"} / 关联关系 ${selected.dataset.nodeDegree || "0"}`;
-      } else {
-        hoverPreview.textContent = "悬浮节点可快速预览其类型、标签和关系数，点击后会在右侧锁定完整详情。";
-      }
-      return;
-    }
-    hoverPreview.textContent = `悬浮预览：${nodeEl.dataset.nodeTypeLabel || "-"} / ${nodeEl.dataset.nodeLabel || "-"} / 关联关系 ${nodeEl.dataset.nodeDegree || "0"}`;
-  };
-
-  root.querySelectorAll("[data-graph-node]").forEach((nodeEl) => {
-    if (nodeEl.dataset.interactiveBound === "1") return;
-    nodeEl.dataset.interactiveBound = "1";
-    nodeEl.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
-      app.selectedGraphNodeId = nodeEl.dataset.graphNode || nodeEl.dataset.id || null;
-      renderInsights();
-    });
-    nodeEl.addEventListener("pointerenter", () => updateHoverPreview(nodeEl));
-  });
-
-  let drag = null;
-  let dragMoved = false;
-
-  svg.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    const mouseX = ((event.clientX - rect.left) / Math.max(rect.width, 1)) * viewBox.width;
-    const mouseY = ((event.clientY - rect.top) / Math.max(rect.height, 1)) * viewBox.height;
-    const currentZoom = app.graphView.zoom;
-    const nextZoom = Math.max(0.45, Math.min(2.4, currentZoom * (event.deltaY < 0 ? 1.12 : 0.88)));
-    const ratio = nextZoom / currentZoom;
-    app.graphView.panX = mouseX - (mouseX - app.graphView.panX) * ratio;
-    app.graphView.panY = mouseY - (mouseY - app.graphView.panY) * ratio;
-    app.graphView.zoom = nextZoom;
-    applyGraphViewportState(root);
-  }, { passive: false });
-
-  svg.addEventListener("pointerdown", (event) => {
-    const nodeEl = event.target.closest("[data-graph-node]");
-    const scales = getSvgScale();
-    if (nodeEl) {
-      const id = nodeEl.dataset.graphNode;
-      const origin = app.graphView.positions[id];
-      if (!origin) return;
-      drag = {
-        type: "node",
-        id,
-        startX: event.clientX,
-        startY: event.clientY,
-        origin: { ...origin },
-        scales,
-      };
-      dragMoved = false;
-      svg.classList.add("dragging-node");
-    } else {
-      drag = {
-        type: "pan",
-        startX: event.clientX,
-        startY: event.clientY,
-        originPanX: app.graphView.panX,
-        originPanY: app.graphView.panY,
-        scales,
-      };
-      dragMoved = false;
-      svg.classList.add("panning");
-    }
-    svg.setPointerCapture(event.pointerId);
-  });
-
-  svg.addEventListener("pointermove", (event) => {
-    if (!drag) return;
-    if (drag.type === "pan") {
-      if (Math.abs(event.clientX - drag.startX) > 2 || Math.abs(event.clientY - drag.startY) > 2) dragMoved = true;
-      app.graphView.panX = drag.originPanX + (event.clientX - drag.startX) * drag.scales.x;
-      app.graphView.panY = drag.originPanY + (event.clientY - drag.startY) * drag.scales.y;
-      applyGraphViewportState(root);
-      return;
-    }
-    const position = app.graphView.positions[drag.id];
-    if (!position) return;
-    if (Math.abs(event.clientX - drag.startX) > 2 || Math.abs(event.clientY - drag.startY) > 2) dragMoved = true;
-    position.x = drag.origin.x + ((event.clientX - drag.startX) * drag.scales.x) / app.graphView.zoom;
-    position.y = drag.origin.y + ((event.clientY - drag.startY) * drag.scales.y) / app.graphView.zoom;
-    applyGraphNodePositions(root);
-  });
-
-  const release = (event) => {
-    if (!drag) return;
-    if (dragMoved) app.graphSuppressClickUntil = Date.now() + 180;
-    drag = null;
-    dragMoved = false;
-    svg.classList.remove("panning");
-    svg.classList.remove("dragging-node");
-    if (event?.pointerId != null && svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId);
-  };
-
-  svg.addEventListener("pointerup", release);
-  svg.addEventListener("pointercancel", release);
-  svg.addEventListener("pointerleave", (event) => {
-    if (drag?.type === "pan") release(event);
-    updateHoverPreview(null);
-  });
-
-  svg.addEventListener("click", (event) => {
-    const nodeEl = event.target.closest("[data-graph-node]");
-    if (!nodeEl) return;
-    if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
-    app.selectedGraphNodeId = nodeEl.dataset.graphNode || nodeEl.dataset.id || null;
-    renderInsights();
-  });
-
-  svg.addEventListener("pointermove", (event) => {
-    const nodeEl = event.target.closest("[data-graph-node]");
-    updateHoverPreview(nodeEl || null);
-  });
-}
-
 function renderInteractiveGraph() {
   const graph = buildGraphViewModel();
   if (!graph || !graph.visibleNodes.length) {
@@ -3153,225 +2999,6 @@ function renderInteractiveGraph() {
   `;
 }
 
-function renderInsights() {
-  const container = el("insights-content");
-  syncTabButtons("data-insight-tab", app.insightTab);
-  const summary = getSceneSummary();
-
-  if (!app.graphMeta) {
-    container.innerHTML = renderGraphBuildStatus() + renderEmptyState(
-      "尚未构建图谱",
-      "先构建异构图后，这里会显示结构、资源和瓶颈洞察。",
-      '<button class="btn btn-primary" type="button" data-action="build-graph">立即构建图谱</button>',
-    );
-    return;
-  }
-
-  if (app.insightTab === "structure") {
-    container.innerHTML = `
-      ${renderGraphBuildStatus()}
-      ${renderKpiCards([
-        { label: "节点总数", value: formatInt(app.graphMeta.total_nodes), hint: "订单 / 任务 / 工序 / 机器 / 工装 / 人员" },
-        { label: "边总数", value: formatInt(app.graphMeta.total_edges), hint: "前驱、资源可行、装配依赖等关系" },
-        { label: "图构建时间", value: formatDateTime(app.graphMeta.created_at), hint: "用于判断图谱是否最新" },
-      ])}
-      <div class="two-column">
-        <article class="surface-card">
-          <div class="card-head"><h3>节点类型分布</h3><p>帮助业务理解当前问题是“订单密集型”还是“资源耦合型”。</p></div>
-          ${renderSimpleTable(
-            ["类型", "数量"],
-            Object.entries(app.graphMeta.node_type_counts || {}).map(([key, value]) => [escapeHtml(graphTypeLabel(key)), formatInt(value)]),
-          )}
-        </article>
-        <article class="surface-card">
-          <div class="card-head"><h3>关系类型分布</h3><p>展示工序前驱、可行资源、装配聚合等结构边权重。</p></div>
-          ${renderSimpleTable(
-            ["关系", "数量"],
-            Object.entries(app.graphMeta.edge_type_counts || {}).map(([key, value]) => [escapeHtml(humanizeCodeLabel(key)), formatInt(value)]),
-          )}
-        </article>
-      </div>
-      <article class="surface-card">
-        <div class="card-head"><h3>图谱样本预览</h3><p>用于确认异构图内容已构建成功，并非只显示摘要。</p></div>
-        ${renderSimpleTable(
-          ["节点", "类型", "标签"],
-          asArray(app.graphNodes).slice(0, 18).map((node) => [
-            escapeHtml(node.node_id || node.id || "-"),
-            escapeHtml(graphTypeLabel(node.node_type || node.type || "-")),
-            escapeHtml(node.label || node.name || node.node_id || "-"),
-          ]),
-          { footer: `当前仅预览前 ${Math.min(18, app.graphNodes.length)} 个节点。` },
-        )}
-      </article>
-      ${renderLegacyCytoscapeGraph()}
-    `;
-    requestAnimationFrame(() => mountLegacyCytoscapeGraph());
-    return;
-  }
-
-  if (app.insightTab === "resource") {
-    const machines = asArray(app.instanceDetails?.machines);
-    const toolings = asArray(app.instanceDetails?.toolings);
-    const personnel = asArray(app.instanceDetails?.personnel);
-    container.innerHTML = `
-      ${renderGraphBuildStatus()}
-      ${renderKpiCards([
-        { label: "机器", value: formatInt(machines.length), hint: "可执行加工主资源" },
-        { label: "工装", value: formatInt(toolings.length), hint: "辅助资源与夹具能力" },
-        { label: "人员", value: formatInt(personnel.length), hint: "班组 / 技能资源" },
-        { label: "停机记录", value: formatInt(app.downtimes.length), hint: "计划 + 非计划停机" },
-      ])}
-      <div class="two-column">
-        <article class="surface-card">
-          <div class="card-head"><h3>机器清单</h3><p>支持查看机器类型、班次模板和当前停机约束。</p></div>
-          ${renderSimpleTable(
-            ["机器", "类型", "班次数", "停机数"],
-            machines.slice(0, CONFIG.TABLE_LIMIT).map((item) => [
-              escapeHtml(`${item.machine_name || item.name || item.machine_id || item.id || "-"} (${item.machine_id || item.id || "-"})`),
-              escapeHtml(humanizeCodeLabel(item.type_name || item.type_id || item.machine_type || item.type || "-")),
-              formatInt(asArray(item.shifts).length),
-              formatInt(asArray(item.downtimes).length || app.downtimes.filter((dt) => dt.machine_id === (item.machine_id || item.id)).length),
-            ]),
-          )}
-        </article>
-        <article class="surface-card">
-          <div class="card-head"><h3>工装 / 人员概览</h3><p>强调共享辅助资源与技能资源对排程的影响。</p></div>
-          ${renderSimpleTable(
-            ["类别", "数量", "说明"],
-            [
-              ["工装", formatInt(toolings.length), "后续可通过模板或配置页维护约束"],
-              ["人员", formatInt(personnel.length), "用于装配、机加工、检验等辅助占用"],
-              ["停机", formatInt(app.downtimes.length), "可在问题配置页维护"],
-            ],
-          )}
-        </article>
-      </div>
-    `;
-    return;
-  }
-
-  const insight = buildBottleneckInsight();
-  container.innerHTML = `
-    ${renderGraphBuildStatus()}
-    ${renderKpiCards([
-      { label: "关键任务(<=0h)", value: formatInt(insight.tightTaskCount), hint: "任务关键余量已耗尽，最容易直接传导为订单风险" },
-      { label: "紧绷工序(<=4h)", value: formatInt(insight.warningOpCount), hint: "工序层关键余量紧张，建议尽快核查前驱与资源释放" },
-      { label: "候选瓶颈资源", value: formatInt(insight.machineRows.slice(0, 5).length), hint: "基于当前排程证据与资源关系计算出的重点关注机器" },
-      { label: "分析依据", value: escapeHtml(insight.candidate ? "实际排程" : "结构预判"), hint: insight.sourceLabel },
-    ])}
-    <article class="surface-card insight-banner">
-      <div>
-        <div class="card-head">
-          <h3>瓶颈与关键路径诊断</h3>
-          <p>不再只给泛化提示，而是结合关键余量、资源可行边、当前方案甘特和停机数据，定位真正影响交付的热区。</p>
-        </div>
-        <div class="insight-chip-row">
-          <span class="insight-chip">分析来源：${escapeHtml(insight.sourceLabel)}</span>
-          <span class="insight-chip">结构边：${formatInt(insight.graphCounts.structureEdges)}</span>
-          <span class="insight-chip">机器可行边：${formatInt(insight.graphCounts.resourceEdges)}</span>
-          <span class="insight-chip">平均每工序可行机器：${formatNumber(insight.avgEligiblePerOp, 1)}</span>
-          ${insight.sourceMetrics.bottleneck_ids.length ? `<span class="insight-chip subtle">当前方案瓶颈机：${escapeHtml(insight.sourceMetrics.bottleneck_ids.join(", "))}</span>` : ""}
-        </div>
-      </div>
-      <div class="context-grid">
-        <div><span>总延误</span><strong>${insight.sourceMetrics.total_tardiness !== null && insight.sourceMetrics.total_tardiness !== undefined ? formatDurationHours(insight.sourceMetrics.total_tardiness) : "-"}</strong></div>
-        <div><span>总周期</span><strong>${insight.sourceMetrics.makespan !== null && insight.sourceMetrics.makespan !== undefined ? formatDurationHours(insight.sourceMetrics.makespan) : "-"}</strong></div>
-        <div><span>总等待</span><strong>${insight.sourceMetrics.total_wait_time !== null && insight.sourceMetrics.total_wait_time !== undefined ? formatDurationHours(insight.sourceMetrics.total_wait_time) : "-"}</strong></div>
-        <div><span>关键资源净可用利用率</span><strong>${insight.sourceMetrics.critical_net_available_utilization !== null && insight.sourceMetrics.critical_net_available_utilization !== undefined ? formatPercent(insight.sourceMetrics.critical_net_available_utilization) : "-"}</strong></div>
-      </div>
-    </article>
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>关键任务链热区</h3><p>按关键余量和关键路径时间排序，优先看最容易拖慢主订单交付的任务。</p></div>
-        ${insight.tightTasks.length ? renderSimpleTable(
-          ["任务", "订单", "主任务", "关键余量", "关键路径", "理想最晚完成"],
-          insight.tightTasks.map((item) => [
-            `<strong>${escapeHtml(item.name || item.id)}</strong>`,
-            escapeHtml(item.order_name || item.order_id || "-"),
-            item.is_main ? "是" : "否",
-            `<span class="${Number(item.critical_slack) <= 0 ? "text-danger" : Number(item.critical_slack) <= 8 ? "text-warning" : ""}">${escapeHtml(formatSlackDisplay(item.critical_slack))}</span>`,
-            escapeHtml(formatDurationHours(item.critical_path_time || 0)),
-            escapeHtml(item.derived_due_at || item.due_at || "-"),
-          ]),
-          { footer: `展示前 ${formatInt(insight.tightTasks.length)} 个高风险任务，越靠前越需要优先保护。` },
-        ) : renderEmptyState("暂无关键任务风险", "当前任务层关键余量未表现出明显风险。")}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>关键工序热区</h3><p>按工序级关键余量排序，用于解释为什么某些资源和前驱关系会放大整体排程难度。</p></div>
-        ${insight.tightOps.length ? renderSimpleTable(
-          ["工序", "订单/任务", "状态", "关键余量", "理想最晚开始", "理想最晚完成"],
-          insight.tightOps.map((item) => [
-            `<strong>${escapeHtml(item.name || item.id)}</strong>`,
-            `${escapeHtml(item.order_name || item.order_id || "-")} / ${escapeHtml(item.task_name || item.task_id || "-")}`,
-            escapeHtml(item.initial_status || "-"),
-            `<span class="${Number(item.critical_slack) <= 0 ? "text-danger" : Number(item.critical_slack) <= 4 ? "text-warning" : ""}">${escapeHtml(formatSlackDisplay(item.critical_slack))}</span>`,
-            escapeHtml(item.derived_start_at || "-"),
-            escapeHtml(item.derived_due_at || "-"),
-          ]),
-          { footer: `展示前 ${formatInt(insight.tightOps.length)} 个工序级风险点，适合和图谱及甘特图交叉验证。` },
-        ) : renderEmptyState("暂无关键工序风险", "当前工序层还没有明显的紧绷节点。")}
-      </article>
-    </div>
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>瓶颈资源证据</h3><p>综合当前方案排程、关键工序覆盖、可行资源边、停机记录和关键设备标签，识别最该关注的资源。</p></div>
-        ${insight.machineRows.length ? `
-          <div class="evidence-list">
-            ${insight.machineRows.slice(0, 6).map((item, index) => `
-              <div class="evidence-item ${index === 0 ? "is-hot" : ""}">
-                <div class="evidence-head">
-                  <div class="evidence-title">
-                    <strong>${escapeHtml(item.machineName)}</strong>
-                    <span>${escapeHtml(item.machineId)} · ${escapeHtml(humanizeCodeLabel(item.typeName || "-"))}${item.isCritical ? " · 关键设备" : ""}</span>
-                  </div>
-                  <div class="evidence-score">压力分 ${formatNumber(item.score, 1)}</div>
-                </div>
-                ${renderKeyValueGrid([
-                  { label: "净可用利用率", value: formatPercent(item.netUtil) },
-                  { label: "活跃窗口利用率", value: formatPercent(item.activeUtil) },
-                  { label: "已排工序", value: formatInt(item.opCount) },
-                  { label: "关键工序", value: formatInt(item.criticalOps) },
-                  { label: "停机影响", value: `${formatInt(item.downtimeCount)} 段 / ${formatDurationHours(item.downtimeHours)}` },
-                  { label: "候选关键工序", value: formatInt(item.eligibleCriticalOps) },
-                ])}
-                <div class="insight-chip-row">
-                  ${item.reasons.length ? item.reasons.map((reason) => `<span class="insight-chip subtle">${escapeHtml(reason)}</span>`).join("") : '<span class="insight-chip subtle">当前更多是结构性关注点，尚未观察到强排程证据。</span>'}
-                </div>
-              </div>
-            `).join("")}
-          </div>
-        ` : renderEmptyState("暂无瓶颈资源证据", "建议先运行规则仿真或选择一个方案，再结合真实排程分析瓶颈资源。")}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>风险解释与建议动作</h3><p>把关键链、资源、停机和在制状态放到同一张解释画布上，便于业务决策和领导理解。</p></div>
-        <div class="risk-stack">
-          ${insight.riskCards.map((item) => `
-            <div class="risk-card">
-              <div class="evidence-head">
-                <div class="evidence-title">
-                  <strong>${escapeHtml(item.title)}</strong>
-                  <span>综合结构与排程证据</span>
-                </div>
-                <span class="risk-level ${item.level === "高" ? "high" : item.level === "中" ? "medium" : "low"}">${escapeHtml(item.level)}</span>
-              </div>
-              <p>${escapeHtml(item.body)}</p>
-            </div>
-          `).join("")}
-        </div>
-        <ul class="help-links">
-          ${insight.actionNotes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-        </ul>
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-nav-jump="simulate">去仿真排产</button>
-          <button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>
-          <button class="btn btn-ghost" type="button" data-nav-jump="ai-review">去 AI 评审</button>
-        </div>
-      </article>
-    </div>
-    ${insight.bottleneckSchedule.length ? renderTimeline(insight.bottleneckSchedule, { title: "瓶颈资源甘特证据带" }) : ""}
-  `;
-}
-
 function renderWorkflowStep1() {
   return `
     <div class="two-column">
@@ -3450,7 +3077,6 @@ function renderWorkflowStep3() {
       ]) : renderEmptyState("尚未构建图谱", "点击下方按钮即可根据当前实例构建图谱。")}
       <div class="form-actions">
         <button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>
-        <button class="btn btn-ghost" type="button" data-nav-jump="structure-analysis">查看洞察</button>
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">切到仿真视图</button>
       </div>
       </article>
@@ -4786,7 +4412,7 @@ function mountInteractiveGraph() {
     if (!nodeEl) return;
     if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
     app.selectedGraphNodeId = nodeEl.dataset.graphNode || nodeEl.dataset.id || null;
-    renderInsights();
+    renderCurrentPage();
   });
 
   svg.addEventListener("pointermove", (event) => {
@@ -5102,7 +4728,6 @@ async function renderCurrentPage() {
     if (!app.validation && !app.validationBusy && app.currentScene) handleRunValidation(true);
   }
   if (app.currentPage === "dashboard") renderDashboard();
-  if (app.currentPage === "insights") renderInsights();
   if (app.currentPage === "workflow") renderWorkflow();
   if (app.currentPage === "review") renderReview();
   if (app.currentPage === "system") renderSystem();
@@ -5407,7 +5032,7 @@ function stopGraphBuildPolling() {
 async function refreshGraphBuildFeedback() {
   const panel = el("graph-build-status-panel");
   if (panel) panel.outerHTML = renderGraphBuildStatus();
-  else if (["workflow", "insights"].includes(app.currentPage)) await renderCurrentPage();
+  else if (app.currentPage === "workflow") await renderCurrentPage();
   syncGraphBuildControls();
 }
 
@@ -5757,25 +5382,25 @@ async function handleAction(action, target) {
   }
   if (action === "set-graph-mode") {
     app.graphView.mode = target.dataset.mode || "focus";
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "toggle-graph-node-type") {
     const key = target.dataset.key;
     app.graphView.nodeTypes[key] = !app.graphView.nodeTypes[key];
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "toggle-graph-edge-group") {
     const key = target.dataset.key;
     app.graphView.edgeGroups[key] = !app.graphView.edgeGroups[key];
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "zoom-graph-in") {
     app.graphView.zoom = Math.min(2.4, app.graphView.zoom * 1.15);
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "zoom-graph-out") {
     app.graphView.zoom = Math.max(0.45, app.graphView.zoom * 0.87);
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "reset-graph-view") {
     const mode = app.graphView.mode;
@@ -5787,11 +5412,11 @@ async function handleAction(action, target) {
     app.graphView.search = search;
     app.graphView.nodeTypes = nodeTypes;
     app.graphView.edgeGroups = edgeGroups;
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "fit-graph-view") {
     fitGraphViewport(app.graphView.bounds);
-    return renderInsights();
+    return renderCurrentPage();
   }
   if (action === "sync-current-scene") {
     await syncCurrentScene();
@@ -5902,13 +5527,6 @@ function bindGlobalEvents() {
   });
 
   document.addEventListener("click", async (event) => {
-    const insightTabTarget = event.target.closest("[data-insight-tab]");
-    if (insightTabTarget) {
-      event.preventDefault();
-      app.insightTab = insightTabTarget.dataset.insightTab;
-      renderInsights();
-      return;
-    }
     const reviewTabTarget = event.target.closest("[data-review-tab]");
     if (reviewTabTarget) {
       event.preventDefault();
@@ -5927,7 +5545,7 @@ function bindGlobalEvents() {
     if (navParentTarget) {
       event.preventDefault();
       const navKey = navParentTarget.dataset.nav;
-      const groupKey = navKey === "insights" ? "insights" : "optimize";
+      const groupKey = "optimize";
       if (app.currentNav === navKey) {
         const nextExpanded = !app.sidebarExpanded[groupKey];
         expandSidebarGroup(groupKey, nextExpanded);
@@ -6021,7 +5639,7 @@ function bindGlobalEvents() {
     const target = event.target;
     if (target.matches("[data-graph-search]")) {
       app.graphView.search = target.value || "";
-      renderInsights();
+      renderCurrentPage();
       window.setTimeout(() => {
         const searchInput = document.querySelector("[data-graph-search]");
         if (searchInput) {
@@ -6033,7 +5651,7 @@ function bindGlobalEvents() {
     }
     if (target.matches("#graph-max-orders")) {
       app.graphView.maxOrders = Math.max(1, Math.min(20, Number(target.value || app.graphView.maxOrders || 6)));
-      renderInsights();
+      renderCurrentPage();
       return;
     }
     if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression")) {
