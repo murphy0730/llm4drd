@@ -2115,6 +2115,7 @@ _INFEASIBLE_REASON_LABELS: dict[str, tuple[str, bool]] = {
     "personnel_no_calendar": ("所需人员全部没有可用排班日历", True),
     "release_inf": ("工序投放时间为无穷大（订单/任务 release_time 异常）", True),
     "starved": ("前驱已完成但始终抢不到资源（资源竞争 / 日历产能不足）", True),
+    "calendar_exhausted": ("已就绪但资源日历覆盖不到工序所需工时（机器/工装/人员某类日历太短），被仿真器挂起", True),
     "blocked_by_predecessor": ("被上游未完成工序阻塞（级联受阻，非根因）", False),
 }
 
@@ -2127,7 +2128,58 @@ def _resource_has_calendar(resource) -> bool:
         return True
 
 
-def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics) -> dict:
+# 足够大的上界，用于求某资源在计划期内的总可用工时
+_CAL_HORIZON = 1e7
+
+
+def _resource_available_hours(resource) -> Optional[float]:
+    """某资源(机器/工装/人员)在 [0, _CAL_HORIZON] 内的总可用工时。
+
+    单个资源对象没有 calendar_days 属性(那是 ShopFloor 级别方法)，
+    用 CalendarResourceMixin.available_time_between 求和可用窗口。
+    """
+    try:
+        return resource.available_time_between(0.0, _CAL_HORIZON)
+    except Exception:
+        return None
+
+
+def _calendar_bottleneck_hint(current_shop: ShopFloor, op: Operation) -> list[str]:
+    """对"已就绪但排不下(资源日历耗尽)"的工序，定位可用工时 < 所需工时的资源类型。
+
+    返回形如 ['工装:tool_turning(单件可用 656h)', '人员:skill_turning(单人可用 656h)']
+    的描述，便于在前端/日志直接看到应核查哪类资源的日历。比较口径: 取该类型中
+    "单台/单件/单人最长可用工时"与工序所需工时(取 work_remaining 或 processing_time)。
+    """
+    try:
+        need = float(op.work_remaining if op.work_remaining is not None else (op.processing_time or 0.0))
+    except Exception:
+        need = 0.0
+    if need <= 0:
+        return []
+    hints: list[str] = []
+    machines = current_shop.get_eligible_machines(op)
+    if machines:
+        avail = max((_resource_available_hours(m) or 0.0) for m in machines)
+        if need > avail:
+            hints.append(f"机器(单台可用{avail:.0f}h<{need:.0f}h)")
+    for t in op.required_tooling_types or []:
+        tools = current_shop.get_toolings_for_type(t)
+        if tools:
+            avail = max((_resource_available_hours(x) or 0.0) for x in tools)
+            if need > avail:
+                hints.append(f"工装:{t}(单件可用{avail:.0f}h<{need:.0f}h)")
+    for s in op.required_personnel_skills or []:
+        people = current_shop.get_personnel_for_skill(s)
+        if people:
+            avail = max((_resource_available_hours(x) or 0.0) for x in people)
+            if need > avail:
+                hints.append(f"人员:{s}(单人可用{avail:.0f}h<{need:.0f}h)")
+    return hints
+
+
+def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics,
+                         unschedulable_ops: Optional[set] = None) -> dict:
     """对不可行 / 部分排程的仿真结果逐工序做根因分析。
 
     返回结构化诊断：
@@ -2217,6 +2269,13 @@ def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics) 
         # 8. 投放时间无穷大
         if current_shop.get_operation_release_time(op) == float("inf"):
             _add("release_inf", op)
+            continue
+
+        # 9a. 已就绪但资源日历覆盖不到所需工时 —— 仿真器将其挂起(_unschedulable_ops)。
+        #     这类工序前驱都已完成，若不单列会被误归为"级联受阻/抢不到资源"，
+        #     且无法指向真正该改的日历。这里明确标为根因并附带最短资源类型提示。
+        if unschedulable_ops and op.id in unschedulable_ops:
+            _add("calendar_exhausted", op, _calendar_bottleneck_hint(current_shop, op))
             continue
 
         # 9. 前驱未完成 —— 级联受阻（受害者，真正根因在上游）
@@ -2417,7 +2476,10 @@ async def simulate(req: SimReq):
     diagnosis = None
     diagnosis_detail = None
     if not analytics.feasible:
-        diagnosis_detail = _diagnose_infeasible(current_shop, r, analytics)
+        diagnosis_detail = _diagnose_infeasible(
+            current_shop, r, analytics,
+            unschedulable_ops=getattr(sim, "_unschedulable_ops", None),
+        )
         diagnosis = _diagnosis_oneline(diagnosis_detail, len(r.schedule or []))
         # 后台打印逐工序根因分类，方便定位具体的不可行原因
         logging.warning(
