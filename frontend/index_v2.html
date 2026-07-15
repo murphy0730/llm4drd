@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>LLM4DRD 智能调度决策中枢</title>
-  <link rel="stylesheet" href="/static/app_v2.css?v=20260714-21">
+  <link rel="stylesheet" href="/static/app_v2.css?v=20260714-22">
   <link rel="stylesheet" href="/static/design-system.css?v=20260713-2">
 </head>
 <body>
@@ -244,54 +244,6 @@
           </div>
         </section>
       </main>
-
-      <aside class="context-panel" id="context-panel">
-        <button class="panel-toggle" type="button" data-action="toggle-panel">收起</button>
-
-        <section class="context-card">
-          <div class="context-card-head"><h3>当前实例</h3></div>
-          <div class="context-grid">
-            <div><span>名称</span><strong id="panel-scene-name">未加载</strong></div>
-            <div><span>订单</span><strong id="panel-orders">-</strong></div>
-            <div><span>工序</span><strong id="panel-operations">-</strong></div>
-            <div><span>机器</span><strong id="panel-machines">-</strong></div>
-            <div><span>状态</span><strong id="panel-scene-status">未就绪</strong></div>
-            <div><span>计划起点</span><strong id="panel-plan-start">-</strong></div>
-          </div>
-        </section>
-
-        <section class="context-card">
-          <div class="context-card-head"><h3>最近优化</h3></div>
-          <div class="context-grid">
-            <div><span>状态</span><strong id="panel-opt-status">未启动</strong></div>
-            <div><span>方案数</span><strong id="panel-opt-count">0</strong></div>
-            <div><span>评估数</span><strong id="panel-opt-evals">0</strong></div>
-            <div><span>耗时</span><strong id="panel-opt-duration">-</strong></div>
-            <div><span>精确评估</span><strong id="panel-opt-exact">0</strong></div>
-            <div><span>近似评估</span><strong id="panel-opt-approx">0</strong></div>
-          </div>
-        </section>
-
-        <section class="context-card">
-          <div class="context-card-head"><h3>当前关注方案</h3></div>
-          <div class="context-grid">
-            <div><span>方案</span><strong id="panel-selected-solution">未选择</strong></div>
-            <div><span>主目标</span><strong id="panel-selected-objectives">-</strong></div>
-            <div><span>延误</span><strong id="panel-selected-tardiness">-</strong></div>
-            <div><span>利用率</span><strong id="panel-selected-utilization">-</strong></div>
-          </div>
-        </section>
-
-        <section class="context-card">
-          <div class="context-card-head"><h3>快速提示</h3></div>
-          <ul class="help-links">
-            <li>先生成或导入实例，再进入驾驶舱和工作台。</li>
-            <li>图谱、仿真和优化都会复用当前活动实例。</li>
-            <li>方案评审页支持启发式解、Pareto 解和精确冠军一起比较。</li>
-            <li>AI 评审默认从主目标、全量 KPI 和风险解释三层输出。</li>
-          </ul>
-        </section>
-      </aside>
     </div>
 
     <div class="toast-stack" id="toast-stack"></div>
@@ -300,6 +252,6 @@
   <script src="/static/vendor/cytoscape.min.js?v=3.30.4"></script>
   <script src="/static/vendor/dagre.min.js?v=0.8.5"></script>
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
-  <script src="/static/app_v2.js?v=20260714-30"></script>
+  <script src="/static/app_v2.js?v=20260714-31"></script>
 </body>
 </html>

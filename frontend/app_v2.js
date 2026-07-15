@@ -1387,35 +1387,6 @@ function updateShell() {
   el("topbar-toolings").textContent = hasScene ? formatInt(summary.toolings) : "-";
   el("topbar-personnel").textContent = hasScene ? formatInt(summary.personnel) : "-";
 
-  el("panel-scene-name").textContent = hasScene ? app.currentScene.name : "未加载";
-  el("panel-orders").textContent = hasScene ? formatInt(summary.orders) : "-";
-  el("panel-operations").textContent = hasScene ? formatInt(summary.operations) : "-";
-  el("panel-machines").textContent = hasScene ? formatInt(summary.machines) : "-";
-  el("panel-scene-status").textContent = hasScene ? "已就绪" : "未就绪";
-  el("panel-plan-start").textContent = hasScene ? formatDateTime(app.instanceDetails?.plan_start_at) : "-";
-
-  const solution = getSelectedReviewCandidate();
-  el("panel-selected-solution").textContent = solution ? solution.name : "未选择";
-  el("panel-selected-objectives").textContent = app.optimizeResult?.objective_keys
-    ? objectiveShortList(app.optimizeResult.objective_keys)
-    : objectiveShortList(app.optimizeForm.objectiveKeys);
-  el("panel-selected-tardiness").textContent = solution ? metricDisplay(solution, "total_tardiness") : "-";
-  el("panel-selected-utilization").textContent = solution ? metricDisplay(solution, "avg_net_available_utilization") : "-";
-
-  const optimizeState = String(app.optimizeStatus?.status || "").toLowerCase();
-  el("panel-opt-status").textContent = optimizeIsRunning()
-    ? "运行中"
-    : ["error", "failed"].includes(optimizeState)
-      ? "失败"
-      : app.optimizeResult
-        ? "已完成"
-        : "未启动";
-  el("panel-opt-count").textContent = formatInt(app.optimizeResult?.found_solution_count || app.optimizeResult?.solutions?.length || 0);
-  el("panel-opt-evals").textContent = formatInt(app.optimizeStatus?.total_evaluations || app.optimizeResult?.total_evaluations || 0);
-  el("panel-opt-duration").textContent = formatDurationSeconds(app.optimizeStatus?.elapsed_s || app.optimizeResult?.elapsed_s || 0);
-  el("panel-opt-exact").textContent = formatInt(app.optimizeStatus?.exact_evaluations || app.optimizeResult?.exact_evaluations || 0);
-  el("panel-opt-approx").textContent = formatInt(app.optimizeStatus?.approximate_evaluations || app.optimizeResult?.approximate_evaluations || 0);
-
   document.querySelectorAll(".requires-scene").forEach((node) => {
     node.classList.toggle("is-disabled", !hasScene);
   });
@@ -6403,10 +6374,6 @@ async function handleAction(action, target) {
     if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
     await shell.requestFullscreen();
     return;
-  }
-  if (action === "toggle-panel") {
-    el("context-panel").classList.toggle("collapsed");
-    target.textContent = el("context-panel").classList.contains("collapsed") ? "展开" : "收起";
   }
 }
 
