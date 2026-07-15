@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 import openpyxl
 
 from ..config import get_config, reload_config
-from ..core.models import OpStatus, ShopFloor
+from ..core.models import OpStatus, Operation, ShopFloor
 from ..data.generator import InstanceGenerator
 from ..core.rules import BUILTIN_RULES, get_all_rule_names
 from ..core.simulator import Simulator, SimResult
