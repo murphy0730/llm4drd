@@ -75,14 +75,14 @@ class HybridGraphContextTests(unittest.TestCase):
                         make_graph_context_shop(), self.config, None, mode
                     )
 
-    def test_active_reuses_current_shop_indexes(self):
+    def test_active_rebuilds_current_shop_indexes(self):
         shop = make_graph_context_shop()
         context = self.context(shop)
 
         with patch.object(shop, "build_indexes", wraps=shop.build_indexes) as build:
             HybridNSGA3ALNSOptimizer(shop, self.config, context, "active")
 
-        build.assert_not_called()
+        build.assert_called_once_with()
 
     def test_active_rebuilds_stale_shop_indexes(self):
         shop = make_graph_context_shop()

@@ -145,6 +145,7 @@ class GraphContextService:
             display,
             context,
             precommit_check=precommit_check,
+            build_time_ms=build_time_ms,
         )
         return context, build_time_ms, validation_time_ms
 
@@ -343,7 +344,7 @@ class GraphContextService:
 
 
 def resolve_graph_context_mode() -> GraphContextMode:
-    value = os.environ.get("LLM4DRD_GRAPH_CONTEXT_MODE", "active").strip().lower()
+    value = os.environ.get("LLM4DRD_GRAPH_CONTEXT_MODE", "legacy").strip().lower()
     try:
         return GraphContextMode(value)
     except ValueError:

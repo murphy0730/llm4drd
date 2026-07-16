@@ -176,6 +176,7 @@ class GraphArtifactStore:
         display: DisplayGraphProjection,
         context: GraphContext,
         precommit_check: Callable[[], None] | None = None,
+        build_time_ms: float = 0.0,
     ) -> None:
         if display.fingerprint != context.fingerprint:
             raise GraphContextPersistenceError("display and compute fingerprints differ")
@@ -263,7 +264,7 @@ class GraphArtifactStore:
                     fingerprint.feature_hash,
                     fingerprint.schema_version,
                     fingerprint.builder_version,
-                    0.0,
+                    float(build_time_ms),
                     "",
                 ),
             )
@@ -285,7 +286,7 @@ class GraphArtifactStore:
                     len(context.operation_ids),
                     len(relation_rows),
                     len(feature_rows),
-                    0.0,
+                    float(build_time_ms),
                     created_at,
                     "",
                 ),

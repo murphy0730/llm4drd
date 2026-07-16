@@ -63,15 +63,16 @@ class CanonicalGraph:
 
 
 def _finite(value: float, field: str) -> float:
-    if not math.isfinite(value):
+    numeric = float(value)
+    if not math.isfinite(numeric):
         raise ValueError(f"non-finite graph input: {field}")
-    return value
+    return numeric
 
 
 def _shifts(resource_id: str, shifts: list) -> list[dict]:
     return [
         {
-            "day": shift.day,
+            "day": int(shift.day),
             "start_hour": _finite(shift.start_hour, f"{resource_id}.shifts.start_hour"),
             "hours": _finite(shift.hours, f"{resource_id}.shifts.hours"),
         }

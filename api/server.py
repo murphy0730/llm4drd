@@ -2035,7 +2035,7 @@ async def build_graph(bg: BackgroundTasks):
         if existing.get("status") in {"queued", "running"}:
             return {"task_id": existing_id, "status": existing["status"], "message": "已有图谱构建任务正在运行"}
 
-    current_shop = shop
+    current_shop = _active_shop()
     task_id = str(uuid.uuid4())[:8]
     _graph_tasks = dict(list(_graph_tasks.items())[-19:])
     _graph_tasks[task_id] = {
@@ -2137,8 +2137,7 @@ async def graph_build_status(task_id: str):
         task["elapsed_s"] = round(time.time() - task["started_at"], 2)
     return {"task_id": task_id, **task}
 
-@app.get("/api/graph/meta")
-async def graph_meta():
+def _graph_meta_payload() -> dict:
     meta = graph_store.load_meta()
     if not meta:
         raise HTTPException(400, "暂无图数据,请先构建图")
@@ -2165,20 +2164,35 @@ async def graph_meta():
         or (compute_meta or {}).get("invalid_reason", ""),
     }
 
+
+def _require_graph_cache_ready() -> None:
+    meta = _graph_meta_payload()
+    if not meta["cache_ready"]:
+        reason = meta.get("invalid_reason") or "实例或图上下文已变化"
+        raise HTTPException(409, f"图谱已失效，请重新构建：{reason}")
+
+
+@app.get("/api/graph/meta")
+async def graph_meta():
+    return _graph_meta_payload()
+
 @app.get("/api/graph/nodes")
 async def graph_nodes(node_type: str = None, search: str = None,
                       limit: int = 200, offset: int = 0):
+    _require_graph_cache_ready()
     total, nodes = graph_store.load_nodes(node_type=node_type, search=search, limit=min(max(limit, 1), 1000), offset=max(offset, 0))
     return {"total": total, "nodes": nodes}
 
 @app.get("/api/graph/edges")
 async def graph_edges(edge_type: str = None, search: str = None,
                       limit: int = 200, offset: int = 0):
+    _require_graph_cache_ready()
     total, edges = graph_store.load_edges(edge_type=edge_type, search=search, limit=min(max(limit, 1), 1000), offset=max(offset, 0))
     return {"total": total, "edges": edges}
 
 @app.get("/api/graph/order/{order_id}")
 async def graph_order(order_id: str):
+    _require_graph_cache_ready()
     result = graph_store.load_order_subgraph(order_id)
     if not result["order_id"]:
         raise HTTPException(404, f"图谱中不存在订单 {order_id}")
@@ -2190,6 +2204,7 @@ async def graph_order_search(q: str = ""):
     query = (q or "").strip()
     if not query:
         raise HTTPException(400, "请输入订单号")
+    _require_graph_cache_ready()
     result = graph_store.search_order_subgraph(query)
     if not result["order_id"]:
         raise HTTPException(404, f"没有找到该订单：{query}")
@@ -2197,6 +2212,7 @@ async def graph_order_search(q: str = ""):
 
 @app.get("/api/graph/node/{node_id:path}/neighbors")
 async def node_neighbors(node_id: str):
+    _require_graph_cache_ready()
     return graph_store.get_node_neighbors(node_id)
 
 # === Simulate ===
@@ -2709,7 +2725,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
     if not shop and not inst_store.has_data():
         raise HTTPException(400, "请先生成实例")
 
-    current_shop = inst_store.build_shopfloor() if inst_store.has_data() else shop
+    current_shop = _active_shop()
     graph_context_mode = resolve_graph_context_mode()
     task_id = str(uuid.uuid4())[:8]
     _latest_hybrid_task_id = task_id

@@ -227,60 +227,6 @@ def build_legacy_graph_features(shop, graph) -> dict[str, dict[str, float]]:
     return features
 
 
-def _shop_indexes_are_current(shop) -> bool:
-    resources = (
-        *shop.machines.values(),
-        *shop.toolings.values(),
-        *shop.personnel.values(),
-    )
-    if any(not resource._calendar_compiled for resource in resources):
-        return False
-
-    expected_machine_entries = len(shop.machines)
-    if sum(map(len, shop._machine_by_type.values())) != expected_machine_entries:
-        return False
-    if any(
-        machine_id not in shop._machine_by_type.get(machine.type_id, ())
-        for machine_id, machine in shop.machines.items()
-    ):
-        return False
-
-    if sum(map(len, shop._tooling_by_type.values())) != len(shop.toolings):
-        return False
-    if any(
-        tooling_id not in shop._tooling_by_type.get(tooling.type_id, ())
-        for tooling_id, tooling in shop.toolings.items()
-    ):
-        return False
-
-    expected_skill_entries = sum(
-        len(person.skills) for person in shop.personnel.values()
-    )
-    if sum(map(len, shop._personnel_by_skill.values())) != expected_skill_entries:
-        return False
-    if any(
-        person_id not in shop._personnel_by_skill.get(skill_id, ())
-        for person_id, person in shop.personnel.items()
-        for skill_id in person.skills
-    ):
-        return False
-
-    if sum(map(len, shop._ops_by_task.values())) != len(shop.operations):
-        return False
-    if any(
-        op_id not in shop._ops_by_task.get(operation.task_id, ())
-        for op_id, operation in shop.operations.items()
-    ):
-        return False
-
-    if sum(map(len, shop._tasks_by_order.values())) != len(shop.tasks):
-        return False
-    return all(
-        task_id in shop._tasks_by_order.get(task.order_id, ())
-        for task_id, task in shop.tasks.items()
-    )
-
-
 class HybridNSGA3ALNSOptimizer:
     def __init__(
         self,
@@ -300,10 +246,7 @@ class HybridNSGA3ALNSOptimizer:
             raise ValueError(
                 f"GraphContext is required for {self.graph_context_mode} mode"
             )
-        if self.graph_context_mode != "active" or not _shop_indexes_are_current(
-            self.shop
-        ):
-            self.shop.build_indexes()
+        self.shop.build_indexes()
         self.graph_context = graph_context
         self.graph_context_diff = None
         self.operation_order_rank = {

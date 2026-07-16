@@ -980,6 +980,13 @@ class GraphStore:
                     time.time(),
                 ),
             )
+            conn.execute(
+                """
+                UPDATE graph_context_meta
+                SET status='invalid', invalid_reason='legacy_graph_saved'
+                WHERE id=1
+                """
+            )
 
     def load_nodes(self, node_type: str = None, search: str = None, limit: int = 200, offset: int = 0) -> tuple[int, list[dict]]:
         with get_db(self.db_path) as conn:

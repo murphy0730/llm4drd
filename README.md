@@ -272,11 +272,11 @@ SQLite（WAL 模式）：
 
 图上下文发布模式：
 
-- `LLM4DRD_GRAPH_CONTEXT_MODE=legacy`：回退到原 NetworkX 优化路径。
+- `LLM4DRD_GRAPH_CONTEXT_MODE=legacy`：使用原 NetworkX 优化路径（默认）。
 - `LLM4DRD_GRAPH_CONTEXT_MODE=shadow`：比较新旧关系和特征，但仍用旧路径求解。
-- `LLM4DRD_GRAPH_CONTEXT_MODE=active`：优化器直接使用缓存的不可变上下文（默认）。
+- `LLM4DRD_GRAPH_CONTEXT_MODE=active`：优化器直接使用缓存的不可变上下文；当前需显式启用。
 
-`/api/graph/meta` 和 `/api/optimize/hybrid/status/{id}` 会返回缓存层级、指纹前缀、构建/加载时间及失效原因。回滚只需设置 `LLM4DRD_GRAPH_CONTEXT_MODE=legacy` 并重启服务；SQLite 新表可保留，无需降级数据库。
+`/api/graph/meta` 和 `/api/optimize/hybrid/status/{id}` 会返回缓存层级、指纹前缀、构建/加载时间及失效原因。切换模式后需重启服务；SQLite 新表可保留，无需降级数据库。
 
 基准命令：
 

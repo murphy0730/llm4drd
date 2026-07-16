@@ -156,7 +156,7 @@ class GraphContextServiceTests(unittest.TestCase):
 class GraphContextModeTests(unittest.TestCase):
     def test_mode_resolution_accepts_known_values_and_rejects_unknown(self):
         for value, expected in (
-            (None, GraphContextMode.ACTIVE),
+            (None, GraphContextMode.LEGACY),
             ("legacy", GraphContextMode.LEGACY),
             ("shadow", GraphContextMode.SHADOW),
             ("active", GraphContextMode.ACTIVE),

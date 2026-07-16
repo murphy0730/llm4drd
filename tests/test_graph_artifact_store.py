@@ -158,6 +158,7 @@ class GraphArtifactStoreTests(unittest.TestCase):
             self.store.load_context(self.context.fingerprint)
 
     def test_legacy_graph_store_still_saves_after_schema_migration(self):
+        self.store.save_artifacts(self.display, self.context)
         graph = HeterogeneousGraph()
         graph.build_from_shopfloor(self.shop)
         legacy_store = GraphStore(self.db_path)
@@ -167,6 +168,10 @@ class GraphArtifactStoreTests(unittest.TestCase):
         self.assertEqual(
             legacy_store.load_meta()["total_nodes"], graph.graph.number_of_nodes()
         )
+        compute_meta = self.store.load_context_meta()
+        self.assertEqual(compute_meta["status"], "invalid")
+        self.assertEqual(compute_meta["invalid_reason"], "legacy_graph_saved")
+        self.assertIsNone(self.store.load_context(self.context.fingerprint))
 
     def test_failure_after_relation_insert_keeps_old_artifacts(self):
         self.store.save_artifacts(self.display, self.context)

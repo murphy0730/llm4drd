@@ -60,6 +60,31 @@ class GraphFingerprintTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-finite"):
             compute_graph_fingerprint(shop)
 
+    def test_numeric_representation_does_not_change_fingerprint(self):
+        left = make_graph_context_shop()
+        for resource in [
+            *left.machines.values(),
+            *left.toolings.values(),
+            *left.personnel.values(),
+        ]:
+            for shift in resource.shifts:
+                shift.start_hour = int(shift.start_hour)
+                shift.hours = int(shift.hours)
+        right = copy.deepcopy(left)
+        for resource in [
+            *right.machines.values(),
+            *right.toolings.values(),
+            *right.personnel.values(),
+        ]:
+            for shift in resource.shifts:
+                shift.start_hour = float(shift.start_hour)
+                shift.hours = float(shift.hours)
+
+        self.assertEqual(
+            compute_graph_fingerprint(left),
+            compute_graph_fingerprint(right),
+        )
+
     def test_mapping_keys_and_model_ids_are_both_fingerprinted(self):
         entity_examples = (
             ("machine_types", "cut"),
