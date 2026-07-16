@@ -8,7 +8,7 @@ from openpyxl.styles import Font, PatternFill
 
 HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")
 HEADER_FONT = Font(bold=True)
-TEMPLATE_VERSION = "2026.03.26.1"
+TEMPLATE_VERSION = "2026.07.16.1"
 
 
 def _add_sheet(workbook, name: str, headers: list[str], rows: list[list]):
@@ -69,6 +69,7 @@ def build_instance_template_bytes() -> bytes:
             "op_name",
             "process_type",
             "processing_time_hrs",
+            "turnover_time_hrs",
             "predecessor_ops",
             "predecessor_tasks",
             "eligible_machine_ids",
@@ -76,9 +77,9 @@ def build_instance_template_bytes() -> bytes:
             "required_personnel_skills",
         ],
         [
-            ["OP-0001-01-01", "T-0001-01", "Turning", "turning", 5.5, "", "", "turning_1;turning_2", "tool_turning", "skill_turning"],
-            ["OP-0001-01-02", "T-0001-01", "Milling", "milling", 3.2, "OP-0001-01-01", "", "milling_1", "tool_milling", "skill_milling"],
-            ["OP-0001-ASM", "T-0001-MAIN", "Assembly", "assembly", 6, "", "T-0001-01", "assembly_1", "tool_assembly", "skill_assembly"],
+            ["OP-0001-01-01", "T-0001-01", "Turning", "turning", 5.5, 2, "", "", "turning_1;turning_2", "tool_turning", "skill_turning"],
+            ["OP-0001-01-02", "T-0001-01", "Milling", "milling", 3.2, 0, "OP-0001-01-01", "", "milling_1", "tool_milling", "skill_milling"],
+            ["OP-0001-ASM", "T-0001-MAIN", "Assembly", "assembly", 6, 0, "", "T-0001-01", "assembly_1", "tool_assembly", "skill_assembly"],
         ],
     )
     _add_sheet(

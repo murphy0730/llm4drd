@@ -338,6 +338,7 @@ class Operation:
     name: str
     process_type: str
     processing_time: float
+    turnover_time: float = 0.0
     predecessor_ops: list[str] = field(default_factory=list)
     predecessor_tasks: list[str] = field(default_factory=list)
     eligible_machine_ids: list[str] = field(default_factory=list)
