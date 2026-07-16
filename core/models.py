@@ -738,6 +738,32 @@ class ShopFloor:
         order_release = order.release_time if order else 0.0
         return max(task_release, order_release)
 
+    def get_operation_flow_ready_time(self, op: Operation, release_time: float | None = None) -> float:
+        """工序可开工的最早时刻：任务/订单放行 与 前驱流转完成 的较大者。
+
+        前驱工序完工后，工件需再等 turnover_time 才能流转到本工序，故
+        本工序最早开工时刻不早于 前驱.end_time + 前驱.turnover_time。
+        turnover 按自然时间流逝，不参与班次推进。
+
+        仅在前驱全部完成时返回终值；前驱未完工(end_time is None)时该前驱
+        不贡献约束，调用方应先用 check_op_ready / _is_op_ready 判断就绪。
+
+        release_time: 调用方已缓存的放行时刻，传 None 则内部计算。
+        """
+        gate = release_time if release_time is not None else self.get_operation_release_time(op)
+        for predecessor_id in op.predecessor_ops:
+            predecessor = self.operations.get(predecessor_id)
+            if predecessor is not None and predecessor.end_time is not None:
+                gate = max(gate, predecessor.end_time + predecessor.turnover_time)
+        for predecessor_task_id in op.predecessor_tasks:
+            predecessor_task = self.tasks.get(predecessor_task_id)
+            if predecessor_task is None:
+                continue
+            for task_op in predecessor_task.operations:
+                if task_op.end_time is not None:
+                    gate = max(gate, task_op.end_time + task_op.turnover_time)
+        return gate
+
     def check_op_ready(self, op: Operation) -> bool:
         for predecessor_id in op.predecessor_ops:
             predecessor = self.operations.get(predecessor_id)

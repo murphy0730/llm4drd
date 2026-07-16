@@ -10,7 +10,7 @@ from pathlib import Path
 
 import openpyxl
 
-from llm4drd.core.models import Operation
+from llm4drd.core.models import Machine, MachineType, Operation, Order, Shift, ShopFloor, Task
 from llm4drd.data.db import InstanceStore, _float_or_default, init_db
 from llm4drd.data.template_builder import build_instance_template_bytes
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
@@ -117,6 +117,85 @@ class TestTurnoverPersistence(unittest.TestCase):
         store.save_from_shopfloor(shop)
         loaded = store.build_shopfloor()
         self.assertEqual(loaded.operations["OP-11"].turnover_time, 2.5)
+
+
+def _shop_with_two_ops(turnover: float) -> ShopFloor:
+    """OP1 -> OP2 串行，OP1 的 turnover 可调。OP1 已完工于 t=10。"""
+    op1 = Operation(id="OP1", task_id="T1", name="OP1", process_type="turning",
+                    processing_time=5.0, turnover_time=turnover)
+    op2 = Operation(id="OP2", task_id="T1", name="OP2", process_type="milling",
+                    processing_time=3.0, predecessor_ops=["OP1"])
+    task = Task(id="T1", order_id="O1", name="T1", due_date=100.0, operations=[op1, op2])
+    calendar = [Shift(day=d, start_hour=0.0, hours=24.0) for d in range(30)]
+    shop = ShopFloor(
+        machine_types={"turning": MachineType(id="turning", name="turning"),
+                       "milling": MachineType(id="milling", name="milling")},
+        machines={"m1": Machine(id="m1", name="m1", type_id="turning", shifts=calendar),
+                  "m2": Machine(id="m2", name="m2", type_id="milling", shifts=calendar)},
+        orders={"O1": Order(id="O1", name="O1", due_date=100.0, task_ids=["T1"], main_task_id="T1")},
+        tasks={"T1": task},
+        operations={"OP1": op1, "OP2": op2},
+    )
+    shop.build_indexes()
+    op1.end_time = 10.0
+    return shop
+
+
+class TestFlowReadyGate(unittest.TestCase):
+    def test_gate_adds_predecessor_turnover_to_its_end_time(self):
+        shop = _shop_with_two_ops(turnover=4.0)
+        self.assertEqual(shop.get_operation_flow_ready_time(shop.operations["OP2"]), 14.0)
+
+    def test_zero_turnover_gate_equals_predecessor_end(self):
+        """零回归锚点：turnover=0 时闸门退化为前驱完工时刻。"""
+        shop = _shop_with_two_ops(turnover=0.0)
+        op2 = shop.operations["OP2"]
+        self.assertEqual(
+            shop.get_operation_flow_ready_time(op2),
+            max(shop.get_operation_release_time(op2), 10.0),
+        )
+
+    def test_gate_honors_release_time_when_larger(self):
+        shop = _shop_with_two_ops(turnover=1.0)
+        shop.tasks["T1"].release_time = 50.0
+        self.assertEqual(shop.get_operation_flow_ready_time(shop.operations["OP2"]), 50.0)
+
+    def test_gate_accepts_precomputed_release_time(self):
+        """调用方传入缓存的 release_time 时，结果必须与内部计算一致。"""
+        shop = _shop_with_two_ops(turnover=4.0)
+        op2 = shop.operations["OP2"]
+        self.assertEqual(
+            shop.get_operation_flow_ready_time(op2, release_time=0.0),
+            shop.get_operation_flow_ready_time(op2),
+        )
+
+    def test_gate_tolerates_predecessor_without_end_time(self):
+        """前驱尚未完工（end_time is None）时不得崩溃。"""
+        shop = _shop_with_two_ops(turnover=4.0)
+        shop.operations["OP1"].end_time = None
+        self.assertEqual(shop.get_operation_flow_ready_time(shop.operations["OP2"]), 0.0)
+
+    def test_gate_uses_max_over_task_predecessor_operations(self):
+        """口径 2：任务级前驱取 max(各工序 end + 各自 turnover)。
+
+        刻意让「完工最晚的工序」(OP4, end=12) 与「流转最晚的工序」
+        (OP3, end=5 但 turnover=9) 不是同一道——若实现错写成「取任务
+        completion_time 再加末工序 turnover」，此测试会得 13 而非 14。
+        """
+        shop = _shop_with_two_ops(turnover=1.0)
+        early = Operation(id="OP3", task_id="T2", name="OP3", process_type="turning",
+                          processing_time=2.0, turnover_time=9.0)
+        late = Operation(id="OP4", task_id="T2", name="OP4", process_type="turning",
+                         processing_time=2.0, turnover_time=1.0)
+        early.end_time = 5.0   # 5 + 9 = 14
+        late.end_time = 12.0   # 12 + 1 = 13
+        shop.tasks["T2"] = Task(id="T2", order_id="O1", name="T2", due_date=100.0,
+                                operations=[early, late])
+        shop.operations["OP3"] = early
+        shop.operations["OP4"] = late
+        shop.operations["OP2"].predecessor_tasks = ["T2"]
+        # max(OP1: 10+1=11, OP3: 14, OP4: 13) = 14
+        self.assertEqual(shop.get_operation_flow_ready_time(shop.operations["OP2"]), 14.0)
 
 
 if __name__ == "__main__":
