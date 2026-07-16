@@ -339,6 +339,65 @@ class TestDerivedTimesWithTurnover(unittest.TestCase):
         self.assertAlmostEqual(op1.derived_due_date, 94.0, places=6)
         self.assertAlmostEqual(op1.derived_start_time, 89.0, places=6)
 
+    def _two_task_shop(self, t1_ops_spec, t2_due=100.0, t2_proc=2.0):
+        """T2（含 due）通过 predecessor_task_ids 依赖 T1；T1 的工序由 spec 给定。
+
+        t1_ops_spec: [(op_id, processing_time, turnover_time)]，T1 内无工序级前驱（并行）。
+        """
+        t1_ops = [
+            Operation(id=op_id, task_id="T1", name=op_id, process_type="turning",
+                      processing_time=proc, turnover_time=turnover)
+            for op_id, proc, turnover in t1_ops_spec
+        ]
+        task1 = Task(id="T1", order_id="O1", name="T1", operations=t1_ops)
+        op_b = Operation(id="OPB", task_id="T2", name="OPB", process_type="turning",
+                         processing_time=t2_proc)
+        task2 = Task(id="T2", order_id="O1", name="T2", due_date=t2_due,
+                     predecessor_task_ids=["T1"], operations=[op_b])
+        shop = ShopFloor(
+            orders={"O1": Order(id="O1", name="O1", task_ids=["T1", "T2"])},
+            tasks={"T1": task1, "T2": task2},
+            operations={op.id: op for op in [*t1_ops, op_b]},
+        )
+        shop.build_indexes()
+        return shop
+
+    def test_cross_task_backward_pass_reserves_turnover(self):
+        """跨任务反推：前驱任务的工序须为自身 turnover 预留时间。
+
+        OPA (proc=5, turnover=4)；OPB (proc=2, due=100) 经 predecessor_tasks 依赖 T1。
+        OPB.derived_start = 98 => OPA 须在 98 - 4 = 94 前完工，最迟 89 开工。
+        修复前任务级反推直接传播 98，OPA.derived_start 高估为 93。
+        """
+        shop = self._two_task_shop([("OPA", 5.0, 4.0)])
+        op_a, op_b = shop.operations["OPA"], shop.operations["OPB"]
+        self.assertAlmostEqual(op_b.derived_start_time, 98.0, places=6)
+        self.assertAlmostEqual(op_a.derived_due_date, 94.0, places=6)
+        self.assertAlmostEqual(op_a.derived_start_time, 89.0, places=6)
+        # 任务级标量同口径：T1 最迟 89 开工，自身工作最迟 94 完成
+        self.assertAlmostEqual(shop.tasks["T1"].derived_start_time, 89.0, places=6)
+        self.assertAlmostEqual(shop.tasks["T1"].derived_due_date, 94.0, places=6)
+
+    def test_cross_task_backward_pass_is_per_operation(self):
+        """异质 turnover：反推须保留工序级约束，不能给整个任务统一减一个值。
+
+        T1 并行两道：A (proc=10, turnover=0)、B (proc=1, turnover=2)。
+        OPB.derived_start = 99 => A 最迟 99 完工；B 最迟 99 - 2 = 97 完工。
+        若只用任务级标量（cp_wt=10 与 cp=10 相同），B 会被高估为 99。
+        """
+        shop = self._two_task_shop([("OPA", 10.0, 0.0), ("OPB1", 1.0, 2.0)], t2_proc=1.0)
+        self.assertAlmostEqual(shop.operations["OPB"].derived_start_time, 99.0, places=6)
+        self.assertAlmostEqual(shop.operations["OPA"].derived_due_date, 99.0, places=6)
+        self.assertAlmostEqual(shop.operations["OPB1"].derived_due_date, 97.0, places=6)
+
+    def test_cross_task_backward_zero_turnover_unchanged(self):
+        """零回归锚点：turnover=0 时跨任务反推与旧口径一致。"""
+        shop = self._two_task_shop([("OPA", 5.0, 0.0)])
+        op_a = shop.operations["OPA"]
+        self.assertAlmostEqual(op_a.derived_due_date, 98.0, places=6)
+        self.assertAlmostEqual(op_a.derived_start_time, 93.0, places=6)
+        self.assertAlmostEqual(shop.tasks["T1"].derived_start_time, 93.0, places=6)
+
 
 class TestApproxEvalTurnover(unittest.TestCase):
     def test_simulator_result_respects_turnover_as_reference(self):

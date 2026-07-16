@@ -656,23 +656,37 @@ class ShopFloor:
             }
 
         task_topo = _topological_order(task_predecessors, list(self.tasks.keys()))
+        # 反推分两个通道：外部交期约束任务自身完工（不扣 turnover）；
+        # 后继任务开工约束本任务各工序的 end + 各自 turnover（流转通道）。
+        # 不同工序 turnover 不同，流转通道必须保留到工序级再逐一扣减。
+        task_external_due: dict[str, float] = {}
+        task_flow_due: dict[str, float] = {}
         for task_id in reversed(task_topo):
             task = self.tasks[task_id]
             order = self.orders.get(task.order_id)
             external_due = task.due_date
             if not math.isfinite(external_due) and order is not None:
                 external_due = order.due_date
-            successor_starts = [
-                self.tasks[successor_id].derived_start_time
-                for successor_id in task_successors.get(task_id, set())
-                if math.isfinite(self.tasks[successor_id].derived_start_time)
-            ]
-            candidates = [value for value in [external_due, *successor_starts] if math.isfinite(value)]
-            task.critical_path_time = task_meta.get(task_id, {}).get("critical_path", 0.0)
-            task.derived_due_date = min(candidates) if candidates else float("inf")
-            task.derived_start_time = (
-                task.derived_due_date - task.critical_path_time
-                if math.isfinite(task.derived_due_date)
+            flow_due = min(
+                (self.tasks[successor_id].derived_start_time
+                 for successor_id in task_successors.get(task_id, set())
+                 if math.isfinite(self.tasks[successor_id].derived_start_time)),
+                default=float("inf"),
+            )
+            task_external_due[task_id] = external_due
+            task_flow_due[task_id] = flow_due
+            meta = task_meta.get(task_id, {})
+            task.critical_path_time = meta.get("critical_path", 0.0)
+            critical_path_with_turnover = meta.get("critical_path_with_turnover", task.critical_path_time)
+            start_candidates = []
+            if math.isfinite(external_due):
+                start_candidates.append(external_due - task.critical_path_time)
+            if math.isfinite(flow_due):
+                start_candidates.append(flow_due - critical_path_with_turnover)
+            task.derived_start_time = min(start_candidates) if start_candidates else float("inf")
+            task.derived_due_date = (
+                task.derived_start_time + task.critical_path_time
+                if math.isfinite(task.derived_start_time)
                 else float("inf")
             )
 
@@ -711,7 +725,13 @@ class ShopFloor:
                     for successor_id in successors.get(op_id, set())
                     if math.isfinite(self.operations[successor_id].derived_start_time)
                 ]
-                candidates = [value for value in [task.derived_due_date, *successor_starts] if math.isfinite(value)]
+                # 外部交期不扣 turnover；后继任务开工（流转通道）扣本工序自己的 turnover
+                external_bound = task_external_due.get(task_id, float("inf"))
+                flow_bound = task_flow_due.get(task_id, float("inf")) - op.turnover_time
+                candidates = [
+                    value for value in [external_bound, flow_bound, *successor_starts]
+                    if math.isfinite(value)
+                ]
                 op.derived_due_date = min(candidates) if candidates else float("inf")
                 op.derived_start_time = (
                     op.derived_due_date - op.processing_time
