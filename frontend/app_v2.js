@@ -155,6 +155,8 @@ const app = {
   sidebarExpanded: {
     optimize: false,
   },
+  pendingGantts: new Map(),
+  ganttInstances: [],
 };
 
 function defaultGraphView() {
@@ -390,18 +392,6 @@ function offsetToDateTimeLocal(offset) {
 
 function formatTimelineLabel(offset) {
   return formatDateTime(offsetToDateTime(offset));
-}
-
-function formatTimelineTickLabel(offset) {
-  const date = tryParseDate(offsetToDateTime(offset));
-  if (!date) return "-";
-  return date.toLocaleString("zh-CN", {
-    hour12: false,
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).replace(/\//g, "-");
 }
 
 function normalizeScheduleStatus(status) {
@@ -1394,69 +1384,30 @@ function buildGanttData(entries, options = {}) {
 }
 
 function renderTimeline(entries, options = {}) {
-  const normalized = asArray(entries)
-    .map((item) => ({
-      machineId: item.machine_id || item.machine_name || item.resource_id || "unknown",
-      machineName: item.machine_name || item.machine_id || item.resource_name || "未知资源",
-      opId: item.op_id || item.operation_id || item.id || "-",
-      orderId: item.order_id || "-",
-      taskId: item.task_id || "-",
-      start: Number(item.start ?? item.start_time ?? 0),
-      end: Number(item.end ?? item.end_time ?? 0),
-      startAt: item.start_at || offsetToDateTime(item.start),
-      endAt: item.end_at || offsetToDateTime(item.end),
-      status: normalizeScheduleStatus(item.status),
-      statusLabel: item.status_label || (normalizeScheduleStatus(item.status) === "completed" ? "已完成" : normalizeScheduleStatus(item.status) === "processing" ? "进行中" : "未来排产"),
-    }))
-    .filter((item) => !Number.isNaN(item.start) && !Number.isNaN(item.end) && item.end > item.start)
-    .sort((a, b) => a.start - b.start);
-
-  if (!normalized.length) {
+  const data = buildGanttData(entries, options);
+  if (!data) {
     return renderEmptyState("暂无甘特数据", "当前方案还没有可显示的资源排程。");
   }
+  const id = options.canvasId || `gantt-${(options.title || "t").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
+  app.pendingGantts.set(id, { entries, options });
 
-  const groups = new Map();
-  normalized.forEach((item) => {
-    if (!groups.has(item.machineId)) groups.set(item.machineId, { machineId: item.machineId, machineName: item.machineName, items: [] });
-    groups.get(item.machineId).items.push(item);
-  });
-
-  const rows = Array.from(groups.values());
-  const horizonStart = Math.min(...normalized.map((item) => item.start));
-  const horizonEnd = Math.max(...normalized.map((item) => item.end));
-  const horizonSpan = Math.max(horizonEnd - horizonStart, 1e-6);
-  const tickCount = Math.min(7, Math.max(4, Math.round(horizonSpan / 24)));
-  const ticks = Array.from({ length: tickCount + 1 }, (_, index) => horizonStart + (horizonSpan * index) / tickCount);
-  const machineMap = getMachineMap();
-  const statusCounts = normalized.reduce((acc, item) => {
-    acc[item.status] = (acc[item.status] || 0) + 1;
+  const statusCounts = data.items.reduce((acc, it) => {
+    if (it.type === "background") return acc;
+    const key = (it.className || "").replace("status-", "");
+    acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, { completed: 0, processing: 0, future: 0 });
-  const overlayStats = normalized.reduce((acc, item) => {
-    acc.min = Math.min(acc.min, item.start);
-    acc.max = Math.max(acc.max, item.end);
-    return acc;
-  }, { min: horizonStart, max: horizonEnd });
 
   return `
     <div class="surface-card">
       <div class="card-head">
         <h3>${escapeHtml(options.title || "资源甘特图")}</h3>
-        <p>横轴已转换为日期时间展示，条块颜色区分已完成 / 进行中 / 未来排产，遮罩显示班次外与停机占用。</p>
+        <p>可滚轮缩放、左右拖拽平移查看全程；条块颜色区分已完成 / 进行中 / 未来排产，斜纹遮罩显示班次外与停机占用。</p>
       </div>
       <div class="timeline-summary-strip">
-        <div class="timeline-summary-card">
-          <span>时间窗口</span>
-          <strong>${escapeHtml(formatTimelineTickLabel(overlayStats.min))} ~ ${escapeHtml(formatTimelineTickLabel(overlayStats.max))}</strong>
-        </div>
-        <div class="timeline-summary-card">
-          <span>资源行数</span>
-          <strong>${formatInt(rows.length)}</strong>
-        </div>
-        <div class="timeline-summary-card">
-          <span>已完成 / 进行中 / 未来</span>
-          <strong>${formatInt(statusCounts.completed)} / ${formatInt(statusCounts.processing)} / ${formatInt(statusCounts.future)}</strong>
-        </div>
+        <div class="timeline-summary-card"><span>资源行数</span><strong>${formatInt(data.groups.length)}</strong></div>
+        <div class="timeline-summary-card"><span>已完成 / 进行中 / 未来</span><strong>${formatInt(statusCounts.completed)} / ${formatInt(statusCounts.processing)} / ${formatInt(statusCounts.future)}</strong></div>
+        <div class="timeline-summary-card"><span>时间基准</span><strong>${data.hasRealBase ? "计划起始时间" : "相对小时（无 plan_start_at）"}</strong></div>
       </div>
       <div class="legend">
         <span class="legend-item"><span class="legend-swatch status-completed"></span>已完成</span>
@@ -1466,45 +1417,7 @@ function renderTimeline(entries, options = {}) {
         <span class="legend-item"><span class="legend-swatch planned"></span>计划停机</span>
         <span class="legend-item"><span class="legend-swatch unplanned"></span>非计划停机</span>
       </div>
-      <div class="timeline">
-        <div class="timeline-axis">
-          <div class="timeline-label"><strong>资源</strong><span>时间轴</span></div>
-          <div class="timeline-track">
-            <div class="ticks">
-              ${ticks.map((tick) => `<span class="tick" style="left:${((tick - horizonStart) / horizonSpan) * 100}%" title="${escapeHtml(formatTimelineLabel(tick))}">${formatTimelineTickLabel(tick)}</span>`).join("")}
-            </div>
-          </div>
-        </div>
-        ${rows.map((row) => {
-          const overlays = buildMachineOverlays(machineMap.get(row.machineId), horizonStart, horizonEnd);
-          const completedCount = row.items.filter((item) => item.status === "completed").length;
-          const processingCount = row.items.filter((item) => item.status === "processing").length;
-          const futureCount = row.items.filter((item) => item.status === "future").length;
-          return `
-            <div class="timeline-row">
-              <div class="timeline-label">
-                <strong>${escapeHtml(row.machineName)}</strong>
-                <span>${escapeHtml(row.machineId)} · 完成 ${formatInt(completedCount)} / 进行 ${formatInt(processingCount)} / 未来 ${formatInt(futureCount)}</span>
-              </div>
-              <div class="timeline-track">
-                ${overlays.map((overlay) => `
-                  <div class="${overlay.className}" style="left:${overlay.left};width:${overlay.width}" title="${escapeHtml(overlay.title)}"></div>
-                `).join("")}
-                ${row.items.map((item) => `
-                  <div
-                    class="timeline-block status-${escapeHtml(item.status)}"
-                    style="left:${((item.start - horizonStart) / horizonSpan) * 100}%;width:${((item.end - item.start) / horizonSpan) * 100}%"
-                    title="${escapeHtml(`${item.statusLabel} · ${item.opId}\n订单:${item.orderId} 任务:${item.taskId}\n${formatDateTime(item.startAt)} ~ ${formatDateTime(item.endAt)}`)}"
-                  >
-                    <span class="timeline-block-id">${escapeHtml(item.opId)}</span>
-                    <span class="timeline-block-status">${escapeHtml(item.statusLabel)}</span>
-                  </div>
-                `).join("")}
-              </div>
-            </div>
-          `;
-        }).join("")}
-      </div>
+      <div class="gantt-canvas" id="${escapeHtml(id)}"></div>
     </div>
   `;
 }
