@@ -1349,7 +1349,7 @@ function buildGanttData(entries, options = {}) {
 
   const groupsMap = new Map();
   normalized.forEach((item) => { if (!groupsMap.has(item.machineId)) groupsMap.set(item.machineId, item.machineName); });
-  const groups = Array.from(groupsMap, ([id, content]) => ({ id, content }));
+  const groups = Array.from(groupsMap, ([id, content]) => ({ id, content: escapeHtml(content) }));
 
   const machineMap = getMachineMap();
   const horizonStart = Math.min(...normalized.map((i) => i.start));
