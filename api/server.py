@@ -19,8 +19,10 @@ from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
 from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore, shifts_to_payload
+from ..data.graph_artifact_store import GraphArtifactStore
 from ..data.template_builder import build_instance_template_bytes
-from ..knowledge.graph import HeterogeneousGraph
+from ..knowledge.canonical import compute_graph_fingerprint
+from ..knowledge.context_service import GraphContextService
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
 from ..scheduling.online import OnlineSchedulerV3
 from ..core.time_utils import datetime_to_offset_hours
@@ -39,6 +41,8 @@ last_sim_payload = None
 last_engine: Optional[EvolutionEngine] = None
 inst_store = InstanceStore()
 graph_store = GraphStore()
+graph_artifact_store = GraphArtifactStore()
+graph_context_service = GraphContextService(graph_artifact_store)
 downtime_store = DowntimeStore()
 _nsga2_tasks: dict = {}
 _exact_tasks: dict = {}
@@ -46,6 +50,44 @@ _hybrid_tasks: dict = {}
 _graph_tasks: dict = {}
 _latest_hybrid_task_id: Optional[str] = None
 online_scheduler_v3: Optional[OnlineSchedulerV3] = None
+
+
+def _invalidate_graph_context(reason: str) -> None:
+    graph_context_service.invalidate(reason)
+
+
+def _build_graph_artifacts(
+    current_shop,
+    *,
+    force_rebuild=False,
+    progress_callback=None,
+    deadline=None,
+):
+    return graph_context_service.get_or_build(
+        current_shop,
+        force_rebuild=force_rebuild,
+        progress_callback=progress_callback,
+        deadline=deadline,
+    )
+
+
+def _graph_context_diagnostics_payload(diagnostics) -> dict:
+    fingerprint = diagnostics.fingerprint
+    return {
+        "cache_level": diagnostics.cache_level,
+        "cache_hit": diagnostics.cache_hit,
+        "instance_hash": fingerprint.instance_hash[:12],
+        "topology_hash": fingerprint.topology_hash[:12],
+        "feature_hash": fingerprint.feature_hash[:12],
+        "schema_version": fingerprint.schema_version,
+        "builder_version": fingerprint.builder_version,
+        "load_time_ms": round(diagnostics.load_time_ms, 3),
+        "build_time_ms": round(diagnostics.build_time_ms, 3),
+        "validation_time_ms": round(diagnostics.validation_time_ms, 3),
+        "operation_count": diagnostics.operation_count,
+        "relation_count": diagnostics.relation_count,
+        "invalid_reason": diagnostics.invalid_reason,
+    }
 
 @app.on_event("startup")
 async def startup():
@@ -1282,7 +1324,7 @@ async def gen_instance(req: GenReq):
     last_result = None
     # 保存到数据库
     inst_store.save_from_shopfloor(shop)
-    graph_store.clear_all()
+    _invalidate_graph_context("instance_generated")
     return {"status": "ok", "summary": shop.summary(), "calendar": calendar_info, "details": _instance_details(shop), "validation": _validate_instance(shop)}
 
 @app.get("/api/instance/details")
@@ -1324,7 +1366,7 @@ async def update_order(order_id: str, data: dict):
     global shop
     inst_store.update_order(order_id, data)
     shop = inst_store.build_shopfloor()
-    graph_store.clear_all()
+    _invalidate_graph_context("order_updated")
     return {"status": "ok"}
 
 @app.put("/api/instance/task/{task_id}")
@@ -1332,7 +1374,7 @@ async def update_task(task_id: str, data: dict):
     global shop
     inst_store.update_task(task_id, data)
     shop = inst_store.build_shopfloor()
-    graph_store.clear_all()
+    _invalidate_graph_context("task_updated")
     return {"status": "ok"}
 
 @app.put("/api/instance/operation/{op_id}")
@@ -1352,7 +1394,7 @@ async def update_operation(op_id: str, data: dict):
     }
     inst_store.update_operation(op_id, data)
     shop = inst_store.build_shopfloor()
-    graph_store.clear_all()
+    _invalidate_graph_context("operation_updated")
     return {"status": "ok"}
 
 @app.put("/api/instance/machine/{machine_id}")
@@ -1360,7 +1402,7 @@ async def update_machine(machine_id: str, data: dict):
     global shop
     inst_store.update_machine(machine_id, data)
     shop = inst_store.build_shopfloor()
-    graph_store.clear_all()
+    _invalidate_graph_context("machine_updated")
     return {"status": "ok"}
 
 @app.post("/api/instance/import-excel")
@@ -1448,7 +1490,7 @@ async def import_excel(file: UploadFile = File(...)):
         else:
             downtime_store.clear_all()
         shop = inst_store.build_shopfloor()
-        graph_store.clear_all()
+        _invalidate_graph_context("instance_imported")
 
         validation = _validate_instance(shop)
         logging.info(
@@ -2034,10 +2076,18 @@ async def build_graph(bg: BackgroundTasks):
             if estimate["estimated_edges"] > GRAPH_WARN_EDGES:
                 update(warning=f"预计 {estimate['estimated_edges']:,} 条边，构建可能持续较长时间，请保持页面开启")
 
-            hg = HeterogeneousGraph()
-
             def build_progress(processed, total, nodes, edges):
                 ratio = processed / max(total, 1)
+                if processed >= total:
+                    update(
+                        stage="saving",
+                        progress=66,
+                        message=(
+                            f"内存图构建完成，正在编译并保存 {nodes:,} 个节点、"
+                            f"{edges:,} 条边"
+                        ),
+                    )
+                    return
                 update(
                     stage="building",
                     progress=min(64, round(10 + ratio * 54)),
@@ -2045,16 +2095,26 @@ async def build_graph(bg: BackgroundTasks):
                 )
 
             update(stage="building", progress=10, message="正在构建订单、任务、工序和资源关系")
-            hg.build_from_shopfloor(build_shop, progress_callback=build_progress, deadline=deadline)
-            stats = hg.get_graph_stats()
-
-            def save_progress(written, total):
-                ratio = written / max(total, 1)
-                update(stage="saving", progress=min(96, round(66 + ratio * 30)), message=f"正在保存图谱：{written:,}/{total:,} 条记录")
-
-            update(stage="saving", progress=66, message=f"内存图构建完成，正在保存 {stats['total_nodes']:,} 个节点、{stats['total_edges']:,} 条边")
-            graph_store.save_graph(hg, progress_callback=save_progress, deadline=deadline)
-            update(status="done", stage="done", progress=100, message="图谱构建并保存成功", stats=stats)
+            _, diagnostics = graph_context_service.get_or_build(
+                build_shop,
+                force_rebuild=True,
+                progress_callback=build_progress,
+                deadline=deadline,
+                current_fingerprint_provider=lambda: compute_graph_fingerprint(
+                    _active_shop()
+                ),
+            )
+            stats = graph_store.load_meta()
+            if not stats:
+                raise RuntimeError("图谱构建完成但展示元数据缺失")
+            update(
+                status="done",
+                stage="done",
+                progress=100,
+                message="图谱构建并保存成功",
+                stats=stats,
+                graph_context=_graph_context_diagnostics_payload(diagnostics),
+            )
         except TimeoutError as exc:
             update(status="error", stage="timeout", message="图谱构建超时", error=f"{exc}；已超过 {GRAPH_BUILD_TIMEOUT_S} 秒限制")
         except Exception as exc:
@@ -2078,7 +2138,28 @@ async def graph_meta():
     meta = graph_store.load_meta()
     if not meta:
         raise HTTPException(400, "暂无图数据,请先构建图")
-    return meta
+    compute_meta = graph_artifact_store.load_context_meta()
+    cache_ready = bool(
+        compute_meta
+        and compute_meta.get("status") == "ready"
+        and compute_meta.get("instance_hash") == meta.get("instance_hash")
+        and compute_meta.get("topology_hash") == meta.get("topology_hash")
+        and compute_meta.get("feature_hash") == meta.get("feature_hash")
+        and int(compute_meta.get("schema_version", -1))
+        == int(meta.get("schema_version", -2))
+        and compute_meta.get("builder_version") == meta.get("builder_version")
+        and not compute_meta.get("invalid_reason")
+        and not meta.get("invalid_reason")
+    )
+    return {
+        **meta,
+        "instance_hash_prefix": str(meta.get("instance_hash", ""))[:12],
+        "topology_hash_prefix": str(meta.get("topology_hash", ""))[:12],
+        "feature_hash_prefix": str(meta.get("feature_hash", ""))[:12],
+        "cache_ready": cache_ready,
+        "invalid_reason": meta.get("invalid_reason", "")
+        or (compute_meta or {}).get("invalid_reason", ""),
+    }
 
 @app.get("/api/graph/nodes")
 async def graph_nodes(node_type: str = None, search: str = None,
