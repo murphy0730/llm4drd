@@ -231,6 +231,7 @@ class ApproximateScheduleEvaluator:
         op: Operation,
         predecessor_completion: dict[str, float],
         task_completion: dict[str, float],
+        task_flow_ready: dict[str, float],
         machine_ready_time: dict[str, float],
         tooling_ready_time: dict[str, float],
         personnel_ready_time: dict[str, float],
@@ -245,15 +246,10 @@ class ApproximateScheduleEvaluator:
         if op.predecessor_tasks:
             task_ready = 0.0
             for task_id in op.predecessor_tasks:
-                task = self.shop.tasks.get(task_id)
-                if task is None:
+                if task_id not in self.shop.tasks:
                     task_ready = max(task_ready, task_completion.get(task_id, float("inf")))
                     continue
-                for task_op in task.operations:
-                    task_ready = max(
-                        task_ready,
-                        predecessor_completion.get(task_op.id, 0.0) + task_op.turnover_time,
-                    )
+                task_ready = max(task_ready, task_flow_ready.get(task_id, 0.0))
             if task_ready == float("inf"):
                 return None
             base_ready = max(base_ready, task_ready)
@@ -319,6 +315,9 @@ class ApproximateScheduleEvaluator:
         remaining_task_work = dict(self._remaining_task_work_base)
         predecessor_completion: dict[str, float] = {}
         task_completion: dict[str, float] = {}
+        # 任务流转完成时刻: max(该任务已排工序的 end + turnover)。工序只在其前驱
+        # 任务全部工序排完后才入堆，故此增量值与"遍历前驱任务全部工序求 max"等价。
+        task_flow_ready: dict[str, float] = {}
         machine_ready_time = {machine_id: 0.0 for machine_id in self.shop.machines}
         tooling_ready_time = {tooling_id: 0.0 for tooling_id in self.shop.toolings}
         personnel_ready_time = {person_id: 0.0 for person_id in self.shop.personnel}
@@ -344,15 +343,10 @@ class ApproximateScheduleEvaluator:
                 ))
             if op.predecessor_tasks:
                 for task_id in op.predecessor_tasks:
-                    task = self.shop.tasks.get(task_id)
-                    if task is None:
+                    if task_id not in self.shop.tasks:
                         base_ready = max(base_ready, task_completion.get(task_id, 0.0))
                         continue
-                    for task_op in task.operations:
-                        base_ready = max(
-                            base_ready,
-                            predecessor_completion.get(task_op.id, 0.0) + task_op.turnover_time,
-                        )
+                    base_ready = max(base_ready, task_flow_ready.get(task_id, 0.0))
             score = self._priority_score(candidate, op, base_ready, remaining_task_work, predecessor_remaining, machine_ready_time)
             heapq.heappush(ready_heap, (-score, base_ready, op_id))
             inserted_ops.add(op_id)
@@ -381,6 +375,7 @@ class ApproximateScheduleEvaluator:
                         op,
                         predecessor_completion,
                         task_completion,
+                        task_flow_ready,
                         machine_ready_time,
                         tooling_ready_time,
                         personnel_ready_time,
@@ -426,6 +421,9 @@ class ApproximateScheduleEvaluator:
             predecessor_completion[chosen_op_id] = end
             task_id = chosen_op.task_id
             task_completion[task_id] = max(task_completion.get(task_id, 0.0), end)
+            task_flow_ready[task_id] = max(
+                task_flow_ready.get(task_id, 0.0), end + chosen_op.turnover_time
+            )
             remaining_task_work[task_id] = max(0.0, remaining_task_work.get(task_id, 0.0) - chosen_op.processing_time)
             task_remaining_ops[task_id] = max(0, task_remaining_ops.get(task_id, 0) - 1)
 
