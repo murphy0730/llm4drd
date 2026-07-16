@@ -351,6 +351,9 @@ class Operation:
     start_time: Optional[float] = None
     end_time: Optional[float] = None
     remaining_processing_time: Optional[float] = None
+    # 运行时下界：滚动窗口裁剪掉已完工前驱时，其 end_time + turnover_time 折算
+    # 到本工序的最早开工时刻。不落库、不进 fingerprint。
+    flow_release_floor: float = 0.0
     derived_due_date: float = float("inf")
     derived_start_time: float = float("inf")
     earliest_start_time: float = 0.0
@@ -749,7 +752,7 @@ class ShopFloor:
         order = self.orders.get(task.order_id) if task else None
         task_release = task.release_time if task else 0.0
         order_release = order.release_time if order else 0.0
-        return max(task_release, order_release)
+        return max(task_release, order_release, op.flow_release_floor)
 
     def get_operation_flow_ready_time(self, op: Operation, release_time: float | None = None) -> float:
         """工序可开工的最早时刻：任务/订单放行 与 前驱流转完成 的较大者。

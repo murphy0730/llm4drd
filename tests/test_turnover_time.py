@@ -527,6 +527,36 @@ class TestOnlineSchedulerTurnover(unittest.TestCase):
             "新窗口内重排时，OP2 不得早于原 turnover 折算后的时刻开工",
         )
 
+    def test_trimmed_turnover_floor_does_not_delay_sibling_ops(self):
+        """裁剪折算必须是工序级的：同任务内不依赖该前驱的旁路工序不得被连带推迟。
+
+        OP2 依赖已完工的 OP1（窗口内剩余 turnover 19h）；OP3 与 OP2 同任务但
+        无任何前驱，本应在新窗口起点即可排产。若把闸门提升为整个任务的
+        release_time，OP3 会被错误推迟 19h。
+        """
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 20.0),
+             ("OP2", "milling", 2.0, ["OP1"]),
+             ("OP3", "milling", 10.0, [])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        scheduler = OnlineSchedulerV3(shop, rule_name="FIFO")
+        scheduler.advance(6.0)
+        self.assertEqual(scheduler.sim_shop.operations["OP1"].status, OpStatus.COMPLETED)
+
+        remaining_shop = scheduler._build_remaining_shop()
+        if "OP3" not in remaining_shop.operations:
+            self.skipTest("OP3 已在窗口内完工，场景未成立")
+        self.assertGreaterEqual(
+            remaining_shop.get_operation_flow_ready_time(remaining_shop.operations["OP2"]),
+            19.0 - 1e-9,
+        )
+        self.assertLessEqual(
+            remaining_shop.get_operation_flow_ready_time(remaining_shop.operations["OP3"]),
+            1e-9,
+            "旁路工序 OP3 不依赖被裁剪的前驱，不得继承其 turnover 闸门",
+        )
+
 
 class TestTurnoverValidation(unittest.TestCase):
     """turnover 允许 0、拒绝负值——与 processing_time 必须 > 0 的规则不同。"""

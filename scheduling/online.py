@@ -507,11 +507,12 @@ class OnlineSchedulerV3:
                     if pred_id in completed_task_flow_ready
                 ]
                 if flow_ready_candidates:
-                    successor_task = remaining_shop.tasks.get(op.task_id)
-                    if successor_task is not None:
-                        # Absolute-time floor; the loop below shifts it by -snapshot along
-                        # with every other task.release_time, so it must not be pre-shifted.
-                        successor_task.release_time = max(successor_task.release_time, max(flow_ready_candidates))
+                    # 工序级下界：只约束依赖被裁剪前驱的这道工序本身，
+                    # 不得提升整个任务的 release_time 连带推迟旁路工序。
+                    # 直接写窗口相对值（后面的循环只平移 task 级时间）。
+                    op.flow_release_floor = max(
+                        op.flow_release_floor, max(flow_ready_candidates) - snapshot
+                    )
 
         for task in remaining_shop.tasks.values():
             task.release_time = max(0.0, task.release_time - snapshot)
