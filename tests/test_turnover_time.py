@@ -10,11 +10,12 @@ from pathlib import Path
 
 import openpyxl
 
-from llm4drd.core.models import Machine, MachineType, Operation, Order, Shift, ShopFloor, Task
+from llm4drd.core.models import Machine, MachineType, Operation, OpStatus, Order, Shift, ShopFloor, Task
 from llm4drd.core.rules import BUILTIN_RULES
 from llm4drd.core.simulator import Simulator
 from llm4drd.data.db import InstanceStore, _float_or_default, init_db
 from llm4drd.data.template_builder import build_instance_template_bytes
+from llm4drd.scheduling.online import OnlineSchedulerV3
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 from llm4drd.tests.test_simulator_robustness import _build_shop, _full_calendar
 
@@ -428,6 +429,59 @@ class TestExactSolverTurnover(unittest.TestCase):
         self.assertGreaterEqual(
             entries["OP2"]["start"], entries["OP1"]["end"] + 4.0 - 1e-6,
             "CP-SAT 必须与仿真器同口径地满足 turnover 约束",
+        )
+
+
+class TestOnlineSchedulerTurnover(unittest.TestCase):
+    def test_probe_and_ready_gate_respect_turnover(self):
+        """滚动排产的 probe/就绪筛选/wait_time/release_time 四处取值须与仿真器同口径。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        scheduler = OnlineSchedulerV3(shop, rule_name="FIFO")
+        scheduler.advance(50.0)
+        completed = {entry["op_id"]: entry for entry in scheduler.state.completed_ops}
+        self.assertGreaterEqual(
+            completed["OP2"]["start"], completed["OP1"]["end"] + 4.0 - 1e-9,
+            "滚动排产必须与仿真器一致地等满 turnover",
+        )
+
+    def test_reschedule_window_preserves_trimmed_predecessor_turnover(self):
+        """跨窗口裁剪：OP1 已完工被裁出窗口后，OP2 仍不得早于其 turnover 开工。
+
+        OP1 turnover=20h，在 t=6 时已 COMPLETED（end=5）但 turnover 尚未走完。
+        _build_remaining_shop 会把 OP1 从 remaining_shop.operations 中裁掉，
+        OP2.predecessor_ops 里对 OP1 的引用也随之被过滤——若该 turnover 约束
+        未被折算进窗口内的 release_time，OP2 会在新窗口里被允许提前开工。
+        """
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 20.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        scheduler = OnlineSchedulerV3(shop, rule_name="FIFO")
+        scheduler.advance(6.0)
+        op1 = scheduler.sim_shop.operations["OP1"]
+        self.assertEqual(op1.status, OpStatus.COMPLETED)
+        self.assertAlmostEqual(op1.end_time, 5.0, places=6)
+
+        remaining_shop = scheduler._build_remaining_shop()
+        op2 = remaining_shop.operations["OP2"]
+        # OP1 已被裁出窗口：predecessor_ops 中不再含 OP1。
+        self.assertNotIn("OP1", op2.predecessor_ops)
+        # 但 turnover 约束（5+20=25，折算到新窗口 25-6=19）必须仍然生效。
+        self.assertGreaterEqual(
+            remaining_shop.get_operation_flow_ready_time(op2), 19.0 - 1e-9,
+            "被裁剪的前驱其 turnover 约束不得随窗口裁剪而丢失",
+        )
+
+        result = Simulator(remaining_shop, BUILTIN_RULES["FIFO"]).run()
+        entries = {entry["op_id"]: entry for entry in result.schedule}
+        self.assertGreaterEqual(
+            entries["OP2"]["start"], 19.0 - 1e-9,
+            "新窗口内重排时，OP2 不得早于原 turnover 折算后的时刻开工",
         )
 
 

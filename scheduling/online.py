@@ -113,7 +113,7 @@ class OnlineSchedulerV3:
         return max(required_times)
 
     def _earliest_feasible_start(self, machine, op, not_before: float):
-        probe = max(not_before, self.sim_shop.get_operation_release_time(op), machine.current_finish_time)
+        probe = max(not_before, self.sim_shop.get_operation_flow_ready_time(op), machine.current_finish_time)
         for _ in range(1000):
             machine_ready = machine.next_available_time(probe)
             if machine_ready == float("inf"):
@@ -138,7 +138,7 @@ class OnlineSchedulerV3:
         for op in self.sim_shop.operations.values():
             if op.status != OpStatus.PENDING:
                 continue
-            if self.sim_shop.check_op_ready(op) and self.sim_shop.get_operation_release_time(op) <= now:
+            if self.sim_shop.check_op_ready(op) and self.sim_shop.get_operation_flow_ready_time(op) <= now:
                 op.status = OpStatus.READY
 
     def _dispatch_idle_machines(self, now: float, rule_fn) -> None:
@@ -183,7 +183,7 @@ class OnlineSchedulerV3:
                     "progress": task.progress if task else 0.0,
                     "priority": order.priority if order else 1,
                     "is_main": 1.0 if (task and task.is_main) else 0.0,
-                    "wait_time": max(0.0, now - self.sim_shop.get_operation_release_time(op)),
+                    "wait_time": max(0.0, now - self.sim_shop.get_operation_flow_ready_time(op)),
                     "prereq_ratio": 1.0,
                     "machine_busy_time": machine.total_busy_time,
                     "tooling_demand": float(len(op.required_tooling_types)),
@@ -316,7 +316,7 @@ class OnlineSchedulerV3:
 
             for op in self.sim_shop.operations.values():
                 if op.status == OpStatus.PENDING and self.sim_shop.check_op_ready(op):
-                    release_time = self.sim_shop.get_operation_release_time(op)
+                    release_time = self.sim_shop.get_operation_flow_ready_time(op)
                     if release_time > now + 1e-9:
                         next_times.append(release_time)
 
@@ -439,6 +439,28 @@ class OnlineSchedulerV3:
         completed_op_ids = {op.id for op in remaining_shop.operations.values() if op.status == OpStatus.COMPLETED}
         completed_task_ids = {task.id for task in remaining_shop.tasks.values() if task.is_completed}
 
+        # Completed predecessors are about to be dropped from remaining_shop below, which
+        # would silently strip any predecessor_ops/predecessor_tasks reference a surviving
+        # op holds on them -- and with it, their turnover_time constraint. Capture
+        # end_time + turnover_time for each completed op (and, for completed predecessor
+        # tasks, the max over all their operations, matching get_operation_flow_ready_time's
+        # own task-level semantics) while the data is still intact, so it can be folded into
+        # the successor's task release_time floor once the references are trimmed.
+        completed_op_flow_ready = {
+            op.id: op.end_time + op.turnover_time
+            for op in remaining_shop.operations.values()
+            if op.id in completed_op_ids and op.end_time is not None
+        }
+        completed_task_flow_ready = {}
+        for task_id in completed_task_ids:
+            values = [
+                completed_op_flow_ready[op.id]
+                for op in remaining_shop.tasks[task_id].operations
+                if op.id in completed_op_flow_ready
+            ]
+            if values:
+                completed_task_flow_ready[task_id] = max(values)
+
         for op_id in completed_op_ids:
             remaining_shop.operations.pop(op_id, None)
         for task_id in list(remaining_shop.tasks.keys()):
@@ -469,8 +491,27 @@ class OnlineSchedulerV3:
             op.assigned_personnel_ids = []
             op.start_time = None
             op.end_time = None
+            trimmed_op_preds = [pred for pred in op.predecessor_ops if pred not in remaining_shop.operations]
+            trimmed_task_preds = [pred for pred in op.predecessor_tasks if pred not in remaining_shop.tasks]
             op.predecessor_ops = [pred for pred in op.predecessor_ops if pred in remaining_shop.operations]
             op.predecessor_tasks = [pred for pred in op.predecessor_tasks if pred in remaining_shop.tasks]
+
+            if trimmed_op_preds or trimmed_task_preds:
+                flow_ready_candidates = [
+                    completed_op_flow_ready[pred_id]
+                    for pred_id in trimmed_op_preds
+                    if pred_id in completed_op_flow_ready
+                ] + [
+                    completed_task_flow_ready[pred_id]
+                    for pred_id in trimmed_task_preds
+                    if pred_id in completed_task_flow_ready
+                ]
+                if flow_ready_candidates:
+                    successor_task = remaining_shop.tasks.get(op.task_id)
+                    if successor_task is not None:
+                        # Absolute-time floor; the loop below shifts it by -snapshot along
+                        # with every other task.release_time, so it must not be pre-shifted.
+                        successor_task.release_time = max(successor_task.release_time, max(flow_ready_candidates))
 
         for task in remaining_shop.tasks.values():
             task.release_time = max(0.0, task.release_time - snapshot)
