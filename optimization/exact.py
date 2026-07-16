@@ -141,7 +141,15 @@ class ExactSolver:
             (self._fixed_end_hours(op, clamp_nonnegative=True) for op in [*completed_ops, *fixed_processing_ops]),
             default=0.0,
         )
-        horizon_hours = max(latest_due, total_decision_work * 1.5, max_fixed_end + total_decision_work * 1.5) + 24.0
+        # turnover 会把后继工序推到交期/工时估算之外；全量求和是链式累加的安全上界
+        total_turnover = sum(
+            op.turnover_time for op in operations
+            if math.isfinite(op.turnover_time) and op.turnover_time > 0
+        )
+        horizon_hours = (
+            max(latest_due, total_decision_work * 1.5, max_fixed_end + total_decision_work * 1.5)
+            + total_turnover + 24.0
+        )
         horizon = max(1, int(round(horizon_hours * scale)))
 
         op_vars: dict[str, dict[str, object]] = {}

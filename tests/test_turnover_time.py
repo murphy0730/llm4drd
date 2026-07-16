@@ -433,6 +433,23 @@ class TestExactSolverTurnover(unittest.TestCase):
             "CP-SAT 必须与仿真器同口径地满足 turnover 约束",
         )
 
+    def test_exact_horizon_covers_long_turnover(self):
+        """horizon 估算须计入 turnover：100h 流转、未填交期的合法实例不得被误判 INFEASIBLE。
+
+        仿真器对同一实例给出 OP2 于 101-102h 的可行排程。
+        """
+        from llm4drd.optimization.exact import ExactSolver
+        shop = _build_shop(
+            [("OP1", "turning", 1.0, [], 100.0),
+             ("OP2", "milling", 1.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+            due_date=float("inf"),
+        )
+        result = ExactSolver(shop).solve()
+        entries = {e["op_id"]: e for e in result.schedule}
+        self.assertIn("OP2", entries, f"合法实例被误判为 {result.status}")
+        self.assertGreaterEqual(entries["OP2"]["start"], 101.0 - 1e-6)
+
     def test_exact_clamps_gate_not_end_time_for_negative_history(self):
         """历史完工 end_time=-2、turnover=1：闸门 = max(0, -2+1) = 0。
 
