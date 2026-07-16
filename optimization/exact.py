@@ -282,8 +282,9 @@ class ExactSolver:
             start_var = op_vars[op.id]["start"]
             for predecessor_id in op.predecessor_ops:
                 predecessor_end = op_end_exprs.get(predecessor_id)
-                if predecessor_end is not None:
-                    model.Add(start_var >= predecessor_end)
+                predecessor = self.shop.operations.get(predecessor_id)
+                if predecessor_end is not None and predecessor is not None:
+                    model.Add(start_var >= predecessor_end + int(round(predecessor.turnover_time * scale)))
             for predecessor_task_id in op.predecessor_tasks:
                 predecessor_task = self.shop.tasks.get(predecessor_task_id)
                 if not predecessor_task:
@@ -291,7 +292,7 @@ class ExactSolver:
                 for predecessor_op in predecessor_task.operations:
                     predecessor_end = op_end_exprs.get(predecessor_op.id)
                     if predecessor_end is not None:
-                        model.Add(start_var >= predecessor_end)
+                        model.Add(start_var >= predecessor_end + int(round(predecessor_op.turnover_time * scale)))
 
         makespan_var = model.NewIntVar(0, horizon, "makespan")
         all_end_exprs = list(op_end_exprs.values())

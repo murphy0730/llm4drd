@@ -415,5 +415,21 @@ class TestApproxEvalTurnover(unittest.TestCase):
         )
 
 
+class TestExactSolverTurnover(unittest.TestCase):
+    def test_exact_respects_turnover(self):
+        from llm4drd.optimization.exact import ExactSolver
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        result = ExactSolver(shop).solve()
+        entries = {e["op_id"]: e for e in result.schedule}
+        self.assertGreaterEqual(
+            entries["OP2"]["start"], entries["OP1"]["end"] + 4.0 - 1e-6,
+            "CP-SAT 必须与仿真器同口径地满足 turnover 约束",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
