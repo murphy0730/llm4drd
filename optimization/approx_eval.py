@@ -237,9 +237,23 @@ class ApproximateScheduleEvaluator:
     ) -> dict | None:
         base_ready = self._operation_release.get(op.id, 0.0)
         if op.predecessor_ops:
-            base_ready = max(base_ready, max(predecessor_completion.get(pred_id, 0.0) for pred_id in op.predecessor_ops))
+            base_ready = max(base_ready, max(
+                predecessor_completion.get(pred_id, 0.0) + self.shop.operations[pred_id].turnover_time
+                for pred_id in op.predecessor_ops
+                if pred_id in self.shop.operations
+            ))
         if op.predecessor_tasks:
-            task_ready = max(task_completion.get(task_id, float("inf")) for task_id in op.predecessor_tasks)
+            task_ready = 0.0
+            for task_id in op.predecessor_tasks:
+                task = self.shop.tasks.get(task_id)
+                if task is None:
+                    task_ready = max(task_ready, task_completion.get(task_id, float("inf")))
+                    continue
+                for task_op in task.operations:
+                    task_ready = max(
+                        task_ready,
+                        predecessor_completion.get(task_op.id, 0.0) + task_op.turnover_time,
+                    )
             if task_ready == float("inf"):
                 return None
             base_ready = max(base_ready, task_ready)
@@ -323,9 +337,22 @@ class ApproximateScheduleEvaluator:
             op = self.shop.operations[op_id]
             base_ready = self._operation_release.get(op_id, 0.0)
             if op.predecessor_ops:
-                base_ready = max(base_ready, max(predecessor_completion.get(pred_id, 0.0) for pred_id in op.predecessor_ops))
+                base_ready = max(base_ready, max(
+                    predecessor_completion.get(pred_id, 0.0) + self.shop.operations[pred_id].turnover_time
+                    for pred_id in op.predecessor_ops
+                    if pred_id in self.shop.operations
+                ))
             if op.predecessor_tasks:
-                base_ready = max(base_ready, max(task_completion.get(task_id, 0.0) for task_id in op.predecessor_tasks))
+                for task_id in op.predecessor_tasks:
+                    task = self.shop.tasks.get(task_id)
+                    if task is None:
+                        base_ready = max(base_ready, task_completion.get(task_id, 0.0))
+                        continue
+                    for task_op in task.operations:
+                        base_ready = max(
+                            base_ready,
+                            predecessor_completion.get(task_op.id, 0.0) + task_op.turnover_time,
+                        )
             score = self._priority_score(candidate, op, base_ready, remaining_task_work, predecessor_remaining, machine_ready_time)
             heapq.heappush(ready_heap, (-score, base_ready, op_id))
             inserted_ops.add(op_id)

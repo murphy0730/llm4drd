@@ -337,5 +337,83 @@ class TestDerivedTimesWithTurnover(unittest.TestCase):
         self.assertAlmostEqual(op1.derived_start_time, 89.0, places=6)
 
 
+class TestApproxEvalTurnover(unittest.TestCase):
+    def test_simulator_result_respects_turnover_as_reference(self):
+        """参照锚点：仿真器的真实结果，供近似评价对齐。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        entries = _run(shop)
+        self.assertGreaterEqual(entries["OP2"]["start"], entries["OP1"]["end"] + 4.0 - 1e-9)
+
+    def _evaluate(self, shop):
+        from llm4drd.optimization.approx_eval import ApproximateScheduleEvaluator
+        from llm4drd.optimization.solution_model import CandidateParameters, FEATURE_NAMES
+        candidate = CandidateParameters(
+            feature_weights={name: 0.0 for name in FEATURE_NAMES},
+            destroy_weights={},
+            repair_weights={},
+        )
+        evaluator = ApproximateScheduleEvaluator(
+            shop, graph_features={}, time_scale=10.0, due_scale=100.0,
+            priority_scale=1.0, keep_schedule_limit=100,
+        )
+        solution = evaluator.evaluate(candidate, source="test", generation=0)
+        return {entry["op_id"]: entry for entry in solution.schedule}
+
+    def test_approx_eval_respects_predecessor_op_turnover(self):
+        """base_ready 必须计入工序级前驱的 turnover——直接验证 approx_eval 内部，不止仿真器。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        entries = self._evaluate(shop)
+        self.assertGreaterEqual(
+            entries["OP2"]["start"], entries["OP1"]["end"] + 4.0 - 1e-9,
+            "approx_eval 的 base_ready 必须计入前驱 turnover",
+        )
+
+    def test_approx_eval_task_level_predecessor_uses_max_over_operations(self):
+        """口径 2 的 unroll 校验：不得退化为 task_completion（聚合完工时刻）+ 末工序 turnover。
+
+        OP3 (end=5, turnover=9 -> 14) 与 OP4 (end=12, turnover=1 -> 13) 是同一
+        预驱任务 T2 内并行的两道工序。若实现仍用聚合的 task_completion(=12，
+        即 OP4 的完工时刻) 再加某一道工序的 turnover，只会得到 13；正确实现
+        须遍历任务全部工序并取 max(14, 13) = 14。
+        """
+        early = Operation(id="OP3", task_id="T2", name="OP3", process_type="turning",
+                           processing_time=5.0, turnover_time=9.0)
+        late = Operation(id="OP4", task_id="T2", name="OP4", process_type="drilling",
+                          processing_time=12.0, turnover_time=1.0)
+        task2 = Task(id="T2", order_id="O1", name="T2", due_date=200.0, operations=[early, late])
+        op2 = Operation(id="OP2", task_id="T1", name="OP2", process_type="milling",
+                         processing_time=2.0, predecessor_tasks=["T2"])
+        task1 = Task(id="T1", order_id="O1", name="T1", due_date=200.0, operations=[op2])
+        shop = ShopFloor(
+            machine_types={
+                "turning": MachineType(id="turning", name="turning"),
+                "drilling": MachineType(id="drilling", name="drilling"),
+                "milling": MachineType(id="milling", name="milling"),
+            },
+            machines={
+                "m1": Machine(id="m1", name="m1", type_id="turning", shifts=_full_calendar()),
+                "m2": Machine(id="m2", name="m2", type_id="drilling", shifts=_full_calendar()),
+                "m3": Machine(id="m3", name="m3", type_id="milling", shifts=_full_calendar()),
+            },
+            orders={"O1": Order(id="O1", name="O1", due_date=200.0, task_ids=["T1", "T2"], main_task_id="T1")},
+            tasks={"T1": task1, "T2": task2},
+            operations={"OP2": op2, "OP3": early, "OP4": late},
+        )
+        shop.build_indexes()
+        entries = self._evaluate(shop)
+        self.assertGreaterEqual(
+            entries["OP2"]["start"], 14.0 - 1e-6,
+            "任务级前驱须取 max(各工序 end+turnover)，不得退化为末工序/聚合完工时刻取值",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
