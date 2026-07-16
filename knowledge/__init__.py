@@ -22,6 +22,12 @@ from .context import (
     compare_legacy_context,
     validate_graph_context,
 )
+from .context_service import (
+    GraphContextDiagnostics,
+    GraphContextMode,
+    GraphContextService,
+    resolve_graph_context_mode,
+)
 from .graph import HeterogeneousGraph
 
 __all__ = [
@@ -37,12 +43,16 @@ __all__ = [
     "GraphContextBuildError",
     "GraphContextCorruptError",
     "GraphContextDiff",
+    "GraphContextDiagnostics",
     "GraphContextError",
+    "GraphContextMode",
     "GraphContextPersistenceError",
+    "GraphContextService",
     "GraphContextStaleError",
     "GraphFingerprint",
     "HeterogeneousGraph",
     "compare_legacy_context",
     "compute_graph_fingerprint",
+    "resolve_graph_context_mode",
     "validate_graph_context",
 ]
