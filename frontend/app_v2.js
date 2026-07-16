@@ -1109,7 +1109,7 @@ async function navigate(navKey, pushHash = true) {
   if (resolved.requiresScene) {
     const ready = await ensureSceneLoaded();
     if (!ready) {
-      toast("请先在“新建与导入”页生成或导入实例。", "warning");
+      toast("请先在“数据导入”页生成或导入实例。", "warning");
       app.currentNav = "new-scene";
       app.currentPage = "new-scene";
       setActiveNav("new-scene");
@@ -2750,45 +2750,6 @@ function renderWorkflowStep1() {
   `;
 }
 
-function renderWorkflowStep2() {
-  return `
-    <div class="three-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>订单与任务</h3><p>维护优先级、交期、释放时间和内部目标时间。</p></div>
-        ${renderKeyValueGrid([
-          { label: "订单", value: formatInt(getSceneSummary().orders) },
-          { label: "任务", value: formatInt(getSceneSummary().tasks) },
-        ])}
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-nav-jump="order-maintenance">进入维护</button>
-        </div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>资源与班次</h3><p>维护机器、工装、人员与班次模板。</p></div>
-        ${renderKeyValueGrid([
-          { label: "机器", value: formatInt(getSceneSummary().machines) },
-          { label: "工装", value: formatInt(getSceneSummary().toolings) },
-          { label: "人员", value: formatInt(getSceneSummary().personnel) },
-        ])}
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-nav-jump="resource-maintenance">进入维护</button>
-        </div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>停机与在制状态</h3><p>确保初始状态不是“从零开始”的理想世界。</p></div>
-        ${renderKeyValueGrid([
-          { label: "停机记录", value: formatInt(app.downtimes.length) },
-          { label: "进行中工序", value: formatInt(getSceneSummary().ops_in_progress || 0) },
-          { label: "已完成工序", value: formatInt(getSceneSummary().ops_completed || 0) },
-        ])}
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-nav-jump="downtime-management">进入维护</button>
-        </div>
-      </article>
-    </div>
-  `;
-}
-
 function renderWorkflowStep3() {
   const focus = app.workflowFocus || "graph";
   const simMetrics = app.simResult?.metrics || {};
@@ -2831,7 +2792,7 @@ function renderWorkflowStep3() {
       ${app.simResult && simMetrics.feasible === false ? `
         <div class="sim-infeasible-banner" role="alert">
           <strong>仿真结果不完整，下方指标不可用于决策</strong>
-          <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)} 道工序，请到“实例与约束”页运行数据校验。`)}</span>
+          <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)} 道工序，请到“数据导入”页运行数据校验。`)}</span>
           <div class="form-actions"><button class="btn btn-secondary" type="button" data-nav-jump="new-scene">去查看校验结果</button></div>
         </div>
       ` : ""}
@@ -2967,45 +2928,12 @@ function renderWorkflowStep4() {
   `;
 }
 
-function renderWorkflowStep5() {
-  const selected = getSelectedReviewCandidates();
-  return `
-    <div class="three-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>方案库</h3><p>查看 Pareto 解、启发式参考解与精确冠军参考解。</p></div>
-        ${renderKeyValueGrid([
-          { label: "总方案", value: formatInt(getReviewCandidates().length) },
-          { label: "当前已选", value: formatInt(selected.length) },
-          { label: "主目标", value: objectiveShortList(app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys) },
-        ])}
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-nav-jump="pareto-library">打开方案库</button>
-        </div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>精确冠军参考</h3><p>支持单目标和加权单目标，为业务偏好提供高置信冠军方案。</p></div>
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-nav-jump="exact-reference">生成 / 查看</button>
-        </div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>AI 评审助手</h3><p>基于主目标 + 全量 KPI + 风险解释进行比较与推荐。</p></div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" data-nav-jump="ai-review">进入 AI 评审</button>
-        </div>
-      </article>
-    </div>
-  `;
-}
-
 function renderWorkflow() {
   const container = el("workflow-content");
   let html = "";
   if (app.workflowStep === 1) html = renderWorkflowStep1();
-  if (app.workflowStep === 2) html = renderWorkflowStep2();
   if (app.workflowStep === 3) html = renderWorkflowStep3();
   if (app.workflowStep === 4) html = renderWorkflowStep4();
-  if (app.workflowStep === 5) html = renderWorkflowStep5();
   container.innerHTML = html;
   if (app.workflowStep === 3 && (app.workflowFocus || "graph") === "graph" && app.graphMeta) {
     requestAnimationFrame(() => mountLegacyCytoscapeGraph());
