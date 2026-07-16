@@ -70,7 +70,8 @@ const NAV_MAP = {
   "new-scene": { page: "new-scene" },
   dashboard: { page: "dashboard", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
-  workflow: { page: "workflow", workflowStep: 1, requiresScene: true },
+  // 旧的通用 "workflow" 书签 hash（原 rail 导航已移除）统一落到「仿真与洞察」图谱视图。
+  workflow: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
   graph: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
   simulate: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
   "optimize-config": { page: "workflow", workflowStep: 4, requiresScene: true },
@@ -2727,29 +2728,6 @@ function renderInteractiveGraph() {
   `;
 }
 
-function renderWorkflowStep1() {
-  return `
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>从零创建或导入实例</h3><p>统一从实例入口完成参数生成或 Excel 导入。</p></div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" data-nav-jump="new-scene">打开新建场景</button>
-          <button class="btn btn-ghost" type="button" data-action="sync-current-scene">同步当前实例</button>
-        </div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>当前实例摘要</h3><p>确认当前实例是否已经具备后续仿真与优化所需的最小条件。</p></div>
-        ${renderKeyValueGrid([
-          { label: "订单", value: formatInt(getSceneSummary().orders) },
-          { label: "任务", value: formatInt(getSceneSummary().tasks) },
-          { label: "工序", value: formatInt(getSceneSummary().operations) },
-          { label: "计划起点", value: formatDateTime(app.instanceDetails?.plan_start_at) },
-        ])}
-      </article>
-    </div>
-  `;
-}
-
 function renderWorkflowStep3() {
   const focus = app.workflowFocus || "graph";
   const simMetrics = app.simResult?.metrics || {};
@@ -2931,7 +2909,6 @@ function renderWorkflowStep4() {
 function renderWorkflow() {
   const container = el("workflow-content");
   let html = "";
-  if (app.workflowStep === 1) html = renderWorkflowStep1();
   if (app.workflowStep === 3) html = renderWorkflowStep3();
   if (app.workflowStep === 4) html = renderWorkflowStep4();
   container.innerHTML = html;
@@ -5130,7 +5107,10 @@ async function handleAction(action, target) {
   if (action === "save-llm-config") return handleSaveLlmConfig();
   if (action === "test-llm-config") return handleTestLlmConfig();
   if (action === "goto-workflow-step") {
-    app.workflowStep = Number(target.dataset.step || 1);
+    const step = Number(target.dataset.step || 1);
+    const stepNavKey = { 3: "simulate", 4: "optimize-launch" }[step];
+    if (stepNavKey) return navigate(stepNavKey);
+    app.workflowStep = step;
     return navigate("workflow");
   }
   if (action === "set-workflow-focus") {
