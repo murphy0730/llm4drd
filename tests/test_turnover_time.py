@@ -11,9 +11,12 @@ from pathlib import Path
 import openpyxl
 
 from llm4drd.core.models import Machine, MachineType, Operation, Order, Shift, ShopFloor, Task
+from llm4drd.core.rules import BUILTIN_RULES
+from llm4drd.core.simulator import Simulator
 from llm4drd.data.db import InstanceStore, _float_or_default, init_db
 from llm4drd.data.template_builder import build_instance_template_bytes
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
+from llm4drd.tests.test_simulator_robustness import _build_shop, _full_calendar
 
 
 class TestTurnoverField(unittest.TestCase):
@@ -196,6 +199,106 @@ class TestFlowReadyGate(unittest.TestCase):
         shop.operations["OP2"].predecessor_tasks = ["T2"]
         # max(OP1: 10+1=11, OP3: 14, OP4: 13) = 14
         self.assertEqual(shop.get_operation_flow_ready_time(shop.operations["OP2"]), 14.0)
+
+
+def _run(shop):
+    result = Simulator(shop, BUILTIN_RULES["FIFO"]).run()
+    return {entry["op_id"]: entry for entry in result.schedule}
+
+
+class TestSimulatorTurnover(unittest.TestCase):
+    def test_successor_waits_for_predecessor_turnover(self):
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 3.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        entries = _run(shop)
+        self.assertGreaterEqual(
+            entries["OP2"]["start"], entries["OP1"]["end"] + 3.0 - 1e-9,
+            "后继必须等满前驱的 turnover",
+        )
+
+    def test_zero_turnover_is_unchanged(self):
+        """零回归：turnover=0 时后继紧接前驱开工。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 0.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        entries = _run(shop)
+        self.assertAlmostEqual(entries["OP2"]["start"], entries["OP1"]["end"], places=6)
+
+    def test_machine_is_free_during_turnover(self):
+        """口径 3：turnover 期间机床可接别的活——这是本字段的核心动机。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 100.0),   # 超长 turnover
+             ("OP2", "milling", 2.0, ["OP1"]),
+             ("OP3", "turning", 4.0, [])],          # 无前驱，抢同一台车床
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        entries = _run(shop)
+        self.assertLess(
+            entries["OP3"]["start"], entries["OP1"]["end"] + 100.0,
+            "OP3 不该等 OP1 的 turnover——turnover 不占用机床",
+        )
+
+    def test_turnover_elapses_on_wall_clock_not_shift_time(self):
+        """口径 1：turnover 跨越非排班时段时不被拉长。
+
+        机床每天只排 0-8h。OP1 需 6h，从 0 开工、8h 前完工。turnover=10h
+        跨越了当天的非排班时段。若 turnover 错误地只在班次内计时，OP2 会被
+        推迟一整天；按自然时间则闸门落在次日，OP2 应在闸门开启后的第一个
+        排班窗口内开工。
+        """
+        short_shifts = [Shift(day=d, start_hour=0.0, hours=8.0) for d in range(30)]
+        shop = _build_shop(
+            [("OP1", "turning", 6.0, [], 10.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", short_shifts), ("m2", "milling", short_shifts)],
+        )
+        entries = _run(shop)
+        gate = entries["OP1"]["end"] + 10.0
+        self.assertGreaterEqual(entries["OP2"]["start"], gate - 1e-9)
+        self.assertLess(entries["OP2"]["start"], gate + 24.0,
+                        "OP2 应在闸门后的首个排班窗口开工，而非因 turnover 被班次化再推一天")
+
+    def test_completed_predecessor_with_negative_end_time_gates_at_t0(self):
+        """spec 用例 7：initial_state 中已完工前驱的 end_time 为负值。
+
+        end_time=-2, turnover=1 -> 闸门 = -1 <= 0，后继在 t=0 即就绪。
+        """
+        op1 = Operation(
+            id="OP1", task_id="T1", name="OP1", process_type="turning",
+            processing_time=5.0, turnover_time=1.0,
+        )
+        op2 = Operation(
+            id="OP2", task_id="T1", name="OP2", process_type="milling",
+            processing_time=2.0, predecessor_ops=["OP1"],
+        )
+        from llm4drd.core.models import OpStatus
+        op1.status = OpStatus.COMPLETED
+        op1.end_time = -2.0
+        task = Task(id="T1", order_id="O1", name="T1", due_date=100.0, operations=[op1, op2])
+        shop = ShopFloor(
+            machine_types={
+                "turning": MachineType(id="turning", name="turning"),
+                "milling": MachineType(id="milling", name="milling"),
+            },
+            machines={
+                "m1": Machine(id="m1", name="m1", type_id="turning", shifts=_full_calendar()),
+                "m2": Machine(id="m2", name="m2", type_id="milling", shifts=_full_calendar()),
+            },
+            orders={"O1": Order(id="O1", name="O1", due_date=100.0, task_ids=["T1"], main_task_id="T1")},
+            tasks={"T1": task},
+            operations={"OP1": op1, "OP2": op2},
+        )
+        shop.build_indexes()
+        # predecessor 的贡献是 end_time + turnover_time = -2 + 1 = -1；
+        # 与 release_time 默认值 0 取 max 后闸门为 0，即 <= 0，后继 t=0 即就绪。
+        self.assertLessEqual(shop.get_operation_flow_ready_time(op2), 0.0)
+        entries = _run(shop)
+        self.assertLessEqual(entries["OP2"]["start"], 1e-9)
 
 
 if __name__ == "__main__":

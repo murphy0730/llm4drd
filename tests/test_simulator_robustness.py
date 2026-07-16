@@ -31,13 +31,17 @@ def _full_calendar(days: int = 30) -> list[Shift]:
 
 
 def _build_shop(ops_spec, machines_spec, due_date: float = 100.0) -> ShopFloor:
-    """ops_spec: [(op_id, process_type, hours, predecessor_ops)]"""
+    """ops_spec: [(op_id, process_type, hours, predecessor_ops)]
+    或 [(op_id, process_type, hours, predecessor_ops, turnover_hours)]
+    """
     operations = {}
     task = Task(id="T1", order_id="O1", name="T1", due_date=due_date, operations=[])
-    for op_id, process_type, hours, preds in ops_spec:
+    for spec in ops_spec:
+        op_id, process_type, hours, preds = spec[:4]
+        turnover = spec[4] if len(spec) > 4 else 0.0
         op = Operation(
             id=op_id, task_id="T1", name=op_id, process_type=process_type,
-            processing_time=hours, predecessor_ops=list(preds),
+            processing_time=hours, turnover_time=turnover, predecessor_ops=list(preds),
         )
         operations[op_id] = op
         task.operations.append(op)
