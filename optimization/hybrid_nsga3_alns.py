@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 
 from ..core.rules import BUILTIN_RULES
+from ..core.sim_runtime import SimulationRuntimePool
 from ..core.simulator import Simulator
 from ..knowledge.context import GraphContext, compare_legacy_context
 from ..knowledge.graph import HeterogeneousGraph
@@ -287,6 +288,15 @@ class HybridNSGA3ALNSOptimizer:
         self.approx_parallel_workers = self._phase_parallel_workers("approx")
         self.exact_parallel_workers = self._phase_parallel_workers("exact")
         self.refine_parallel_workers = self._phase_parallel_workers("refine")
+        # 每个并发 worker 一个互不共享的 runtime；静态数据只构建一次。
+        self._runtime_pool = SimulationRuntimePool(
+            self.shop,
+            max(
+                self.parallel_workers,
+                self.exact_parallel_workers,
+                self.refine_parallel_workers,
+            ),
+        )
 
         processing_times = [op.processing_time for op in self.shop.operations.values()]
         due_dates = [task.due_date for task in self.shop.tasks.values()]
@@ -860,8 +870,12 @@ class HybridNSGA3ALNSOptimizer:
         return cloned
 
     def _simulate_candidate(self, candidate: CandidateParameters, source: str, generation: int) -> OptimizationSolution:
-        simulator = Simulator(self.shop, self._dispatch_rule(candidate))
-        sim_result = simulator.run()
+        runtime = self._runtime_pool.acquire()
+        try:
+            simulator = Simulator(self.shop, self._dispatch_rule(candidate), runtime=runtime)
+            sim_result = simulator.run()
+        finally:
+            self._runtime_pool.release(runtime)
         schedule = self._enrich_schedule(sim_result.schedule)
         analytics = build_schedule_analytics(self.shop, sim_result)
         metrics = sim_result.to_dict()
@@ -1016,8 +1030,12 @@ class HybridNSGA3ALNSOptimizer:
             return self._clone_solution(cached, source, generation)
 
         started = time.time()
-        simulator = Simulator(self.shop, BUILTIN_RULES[rule_name])
-        sim_result = simulator.run()
+        runtime = self._runtime_pool.acquire()
+        try:
+            simulator = Simulator(self.shop, BUILTIN_RULES[rule_name], runtime=runtime)
+            sim_result = simulator.run()
+        finally:
+            self._runtime_pool.release(runtime)
         schedule = self._enrich_schedule(sim_result.schedule)
         analytics = build_schedule_analytics(self.shop, sim_result)
         metrics = sim_result.to_dict()

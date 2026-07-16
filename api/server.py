@@ -13,6 +13,7 @@ from ..config import get_config, reload_config
 from ..core.models import OpStatus, Operation, ShopFloor
 from ..data.generator import InstanceGenerator
 from ..core.rules import BUILTIN_RULES, get_all_rule_names
+from ..core.sim_runtime import SimulationRuntime
 from ..core.simulator import Simulator, SimResult
 from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
@@ -2680,9 +2681,11 @@ async def compare(rule_names: list[str] = None):
     if current_shop is None: raise HTTPException(400, "请先生成实例")
     names = rule_names or get_all_rule_names()
     results = []
+    # 逐规则复用同一个 runtime：静态数据(深拷贝/日历/派生时刻/环检测)只建一次。
+    runtime = SimulationRuntime(current_shop)
     for n in names:
         if n not in BUILTIN_RULES: continue
-        r = Simulator(current_shop, BUILTIN_RULES[n]).run()
+        r = Simulator(current_shop, BUILTIN_RULES[n], runtime=runtime).run()
         analytics = build_schedule_analytics(current_shop, r)
         metrics = r.to_dict()
         metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})

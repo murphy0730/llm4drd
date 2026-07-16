@@ -1,72 +1,16 @@
 from __future__ import annotations
 
-import copy
 import heapq
 import logging
 import math
 import time as wall_time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable
 
 from .models import OpStatus, Operation, ResourceState, ShopFloor
+from .sim_runtime import SimulationRuntime
 
 PDRFunc = Callable
-
-
-def _iterative_tarjan_scc(nodes, adj):
-    """迭代式 Tarjan 强连通分量，避免大实例递归爆栈。
-
-    adj: dict[node -> 可迭代的前驱节点]。返回 list[list[node]]，其中长度>1
-    或含自环的单节点分量即为依赖环。
-    """
-    index_counter = [0]
-    index: dict = {}
-    lowlink: dict = {}
-    on_stack: dict = {}
-    stack: list = []
-    result: list = []
-    for start in nodes:
-        if start in index:
-            continue
-        work = [(start, 0)]
-        while work:
-            v, pi = work[-1]
-            if pi == 0:
-                index[v] = index_counter[0]
-                lowlink[v] = index_counter[0]
-                index_counter[0] += 1
-                stack.append(v)
-                on_stack[v] = True
-            recurse = False
-            neighbors = list(adj[v])
-            i = pi
-            while i < len(neighbors):
-                w = neighbors[i]
-                if w not in index:
-                    work[-1] = (v, i + 1)
-                    work.append((w, 0))
-                    recurse = True
-                    break
-                elif on_stack.get(w):
-                    lowlink[v] = min(lowlink[v], index[w])
-                i += 1
-            if recurse:
-                continue
-            if lowlink[v] == index[v]:
-                comp = []
-                while True:
-                    w = stack.pop()
-                    on_stack[w] = False
-                    comp.append(w)
-                    if w == v:
-                        break
-                result.append(comp)
-            work.pop()
-            if work:
-                u = work[-1][0]
-                lowlink[u] = min(lowlink[u], lowlink[v])
-    return result
 
 
 @dataclass
@@ -115,9 +59,11 @@ class Event:
 class Simulator:
     _seq = 0
 
-    def __init__(self, shop: ShopFloor, pdr: PDRFunc):
+    def __init__(self, shop: ShopFloor, pdr: PDRFunc, runtime: SimulationRuntime | None = None):
         self.orig_shop = shop
         self.pdr = pdr
+        # 复用的运行时（静态数据构建一次）；None 表示首次 run() 时自建。
+        self._runtime = runtime
         self._eligible_machine_ids: dict[str, set[str]] = {}
         self._tooling_candidates: dict[str, dict[str, list]] = {}
         self._personnel_candidates: dict[str, dict[str, list]] = {}
@@ -139,111 +85,37 @@ class Simulator:
         # 仿真前检测出的依赖环(任务级前驱互锁/工序级前驱环/混合)，由 _compute_kpi 写入 SimResult
         self._dependency_cycles: list = []
 
-    def _init_runtime_caches(self, shop: ShopFloor) -> None:
-        self._eligible_machine_ids = {}
-        self._tooling_candidates = {}
-        self._personnel_candidates = {}
-        self._release_time_cache = {}
-        self._dependent_ops_by_op = {op_id: [] for op_id in shop.operations}
-        self._dependent_ops_by_task = {task_id: [] for task_id in shop.tasks}
+    def _bind_runtime(self, runtime: SimulationRuntime) -> None:
+        """静态缓存共享 runtime 的（本轮 run 只读），动态结构每轮新建。"""
+        shop = runtime.shop
+        self._eligible_machine_ids = runtime.eligible_machine_ids
+        self._op_dispatch_type_ids = runtime.op_dispatch_type_ids
+        self._tooling_candidates = runtime.tooling_candidates
+        self._personnel_candidates = runtime.personnel_candidates
+        self._release_time_cache = runtime.release_time_cache
+        self._dependent_ops_by_op = runtime.dependent_ops_by_op
+        self._dependent_ops_by_task = runtime.dependent_ops_by_task
         self._ready_by_type = {}
-        self._dispatch_scheduled_at = {machine_id: None for machine_id in shop.machines}
+        self._dispatch_scheduled_at = dict.fromkeys(shop.machines, None)
         self._release_checks_scheduled = set()
         self._completed_ops = set()
         self._completed_tasks = set()
-        self._task_remaining_ops = {task_id: len(task.operations) for task_id, task in shop.tasks.items()}
+        self._task_remaining_ops = dict(runtime.task_op_counts)
         self._unschedulable_ops = set()
-        self._pdr_error_logged = False
         self._flow_gate_cache = {}
+        self._pdr_error_logged = False
         self._dependency_cycles = []
-
-        self._op_dispatch_type_ids = {}
-        for op_id, op in shop.operations.items():
-            eligible_machines = shop.get_eligible_machines(op)
-            self._eligible_machine_ids[op_id] = {machine.id for machine in eligible_machines}
-            # 派工桶必须按"可用机台的实际类型"建立：工序显式指定 eligible_machine_ids 时，
-            # 机台类型可能不等于工序的 process_type——若仍按 process_type 建桶，
-            # 指定机台所在类型的机器永远扫描不到该工序，导致其被永久饿死
-            # （表现为"前驱已完成但抢不到资源"，且与派工规则无关）。
-            dispatch_types = {machine.type_id for machine in eligible_machines}
-            self._op_dispatch_type_ids[op_id] = dispatch_types or {op.process_type}
-            self._tooling_candidates[op_id] = {
-                tooling_type: list(shop.get_toolings_for_type(tooling_type))
-                for tooling_type in op.required_tooling_types
-            }
-            self._personnel_candidates[op_id] = {
-                skill_id: list(shop.get_personnel_for_skill(skill_id))
-                for skill_id in op.required_personnel_skills
-            }
-            self._release_time_cache[op_id] = shop.get_operation_release_time(op)
-            for predecessor_id in op.predecessor_ops:
-                self._dependent_ops_by_op.setdefault(predecessor_id, []).append(op_id)
-            for predecessor_task_id in op.predecessor_tasks:
-                self._dependent_ops_by_task.setdefault(predecessor_task_id, []).append(op_id)
-
-    def _detect_dependency_cycles(self, shop: ShopFloor) -> list[dict]:
-        """仿真前用 Tarjan SCC 检测依赖环，并区分环类型。
-
-        工序就绪需 predecessor_ops 全完成 + predecessor_tasks 全完成(任务完成=
-        该任务所有工序完成)。故依赖图边 = 工序前驱 + 任务前驱展开为该任务全部工序。
-        SCC(长度>1 或自环) 即依赖环。按环内边来源区分:
-          - op   : 仅工序级前驱(predecessor_ops)闭合——改 predecessor_ops 打断
-          - task : 仅任务前驱(predecessor_tasks)展开闭合——改任务令前驱打断
-          - mixed: 两者都有
-        返回 [{"kind","size","ops","tasks"}, ...]，按 size 降序。
-        """
-        task_op_ids: dict[str, list[str]] = defaultdict(list)
-        for op in shop.operations.values():
-            task_op_ids[op.task_id].append(op.id)
-
-        adj: dict[str, set[str]] = {op.id: set() for op in shop.operations.values()}
-        for op in shop.operations.values():
-            for p in op.predecessor_ops:
-                if p in adj and p != op.id:
-                    adj[op.id].add(p)
-            for t in op.predecessor_tasks:
-                for po in task_op_ids.get(t, []):
-                    if po in adj and po != op.id:
-                        adj[op.id].add(po)
-
-        sccs = _iterative_tarjan_scc(list(adj.keys()), adj)
-        cycles: list[dict] = []
-        for comp in sccs:
-            if len(comp) <= 1:
-                nid = comp[0] if comp else None
-                if nid and nid in adj.get(nid, set()):
-                    comp = [nid]
-                else:
-                    continue
-            comp_set = set(comp)
-            op_edges = 0
-            task_edges = 0
-            for oid in comp:
-                op_obj = shop.operations[oid]
-                op_edges += sum(1 for p in op_obj.predecessor_ops if p in comp_set and p != oid)
-                for t in op_obj.predecessor_tasks:
-                    task_edges += sum(1 for po in task_op_ids.get(t, []) if po in comp_set and po != oid)
-            if op_edges and task_edges:
-                kind = "mixed"
-            elif task_edges:
-                kind = "task"
-            else:
-                kind = "op"
-            cycles.append({
-                "kind": kind,
-                "size": len(comp),
-                "ops": sorted(comp),
-                "tasks": sorted({shop.operations[oid].task_id for oid in comp}),
-            })
-        cycles.sort(key=lambda c: c["size"], reverse=True)
-        return cycles
 
     def run(self, max_time: float = 999999) -> SimResult:
         started_at = wall_time.time()
-        shop = copy.deepcopy(self.orig_shop)
-        shop.build_indexes()
-        self._init_runtime_caches(shop)
-        self._dependency_cycles = self._detect_dependency_cycles(shop)
+        runtime = self._runtime
+        if runtime is None:
+            runtime = self._runtime = SimulationRuntime(self.orig_shop)
+        # reset() 对新建实例是恒等操作，统一执行以保证复用路径与首用路径一致。
+        runtime.reset()
+        shop = runtime.shop
+        self._bind_runtime(runtime)
+        self._dependency_cycles = list(runtime.dependency_cycles)
 
         event_queue: list[Event] = []
         ready_ops: set[str] = set()
