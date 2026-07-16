@@ -1,13 +1,46 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from llm4drd.core.models import Operation, Order, ShopFloor, Task
 from llm4drd.data.db import GraphStore, init_db
+from llm4drd.knowledge.canonical import (
+    CanonicalEdge,
+    CanonicalGraph,
+    CanonicalNode,
+    GraphFingerprint,
+)
 from llm4drd.knowledge.graph import HeterogeneousGraph
 
 
 class HeterogeneousGraphTests(unittest.TestCase):
+    def test_build_translates_rows_from_canonical_builder(self):
+        canonical = CanonicalGraph(
+            nodes=(CanonicalNode("M:M-1", "machine", "M-1", {"label": "Machine"}),),
+            edges=(CanonicalEdge("OP:OP-1", "M:M-1", "machine_eligible", {}),),
+            fingerprint=GraphFingerprint("instance", "topology", "feature"),
+        )
+        shop = ShopFloor()
+        progress_callback = object()
+
+        with patch("llm4drd.knowledge.graph.CanonicalGraphBuilder") as builder_type:
+            builder_type.return_value.build.return_value = canonical
+            graph = HeterogeneousGraph()
+            graph.build_from_shopfloor(shop, progress_callback, 123.0)
+
+        builder_type.return_value.build.assert_called_once_with(
+            shop, progress_callback, 123.0
+        )
+        self.assertEqual(
+            graph.graph.nodes["M:M-1"],
+            {"node_type": "machine", "entity_id": "M-1", "label": "Machine"},
+        )
+        self.assertEqual(
+            graph.graph.edges["OP:OP-1", "M:M-1"],
+            {"edge_type": "machine_eligible"},
+        )
+
     def test_order_subgraph_excludes_other_orders_and_keeps_resources(self):
         graph = HeterogeneousGraph()
         for node_id, node_type, entity_id in [

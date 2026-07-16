@@ -7,9 +7,8 @@
 边类型: 订单→任务、任务前置、任务→工序、工序顺序、前置任务约束、机器兼容
 """
 import networkx as nx
-import time
-from typing import Optional
 from ..core.models import ShopFloor
+from .canonical import CanonicalGraphBuilder
 
 
 class HeterogeneousGraph:
@@ -38,180 +37,22 @@ class HeterogeneousGraph:
 
     def build_from_shopfloor(self, shop: ShopFloor, progress_callback=None, deadline: float | None = None):
         """从车间配置构建异构图"""
+        canonical = CanonicalGraphBuilder().build(shop, progress_callback, deadline)
         self.graph.clear()
-
-        def report(processed: int, total: int):
-            if deadline is not None and time.monotonic() > deadline:
-                raise TimeoutError("图谱内存构建超过时间限制")
-            if progress_callback:
-                progress_callback(processed, total, self.graph.number_of_nodes(), self.graph.number_of_edges())
-
-        # 添加机器节点
-        for mid, machine in shop.machines.items():
-            mt = shop.machine_types.get(machine.type_id)
+        for node in canonical.nodes:
             self.graph.add_node(
-                f"M:{mid}",
-                node_type=self.NODE_MACHINE,
-                entity_id=mid,
-                label=machine.name,
-                type_id=machine.type_id,
-                type_name=mt.name if mt else "",
-                is_critical=mt.is_critical if mt else False,
+                node.node_id,
+                node_type=node.node_type,
+                entity_id=node.entity_id,
+                **dict(node.attrs),
             )
-
-        for tooling_id, tooling in shop.toolings.items():
-            tooling_type = shop.tooling_types.get(tooling.type_id)
-            self.graph.add_node(
-                f"TL:{tooling_id}",
-                node_type=self.NODE_TOOLING,
-                entity_id=tooling_id,
-                label=tooling.name,
-                type_id=tooling.type_id,
-                type_name=tooling_type.name if tooling_type else "",
-            )
-
-        for person_id, person in shop.personnel.items():
-            self.graph.add_node(
-                f"P:{person_id}",
-                node_type=self.NODE_PERSONNEL,
-                entity_id=person_id,
-                label=person.name,
-                skills=";".join(person.skills),
-            )
-
-        report(0, max(1, len(shop.orders) + len(shop.tasks) + len(shop.operations)))
-
-        # Task dependencies can be declared either directly on the task or on
-        # one of its operations.  Aggregate both sources for the task-level
-        # view so operations.predecessor_tasks is not lost between task nodes.
-        task_predecessors = {
-            task_id: list(task.predecessor_task_ids)
-            for task_id, task in shop.tasks.items()
-        }
-        for op in shop.operations.values():
-            predecessors = task_predecessors.get(op.task_id)
-            if predecessors is None:
-                continue
-            for predecessor_task_id in op.predecessor_tasks:
-                if predecessor_task_id not in predecessors:
-                    predecessors.append(predecessor_task_id)
-
-        # 添加订单节点
-        processed = 0
-        total_entities = max(1, len(shop.orders) + len(shop.tasks) + len(shop.operations))
-        for oid, order in shop.orders.items():
-            self.graph.add_node(
-                f"O:{oid}",
-                node_type=self.NODE_ORDER,
-                entity_id=oid,
-                label=order.name,
-                due_date=order.due_date,
-                due_at=shop.time_label(order.due_date),
-                priority=order.priority,
-                release_time=order.release_time,
-                release_at=shop.time_label(order.release_time),
-            )
-            processed += 1
-            if processed % 500 == 0:
-                report(processed, total_entities)
-
-        # 添加任务节点
-        for tid, task in shop.tasks.items():
-            self.graph.add_node(
-                f"T:{tid}",
-                node_type=self.NODE_TASK,
-                entity_id=tid,
-                label=task.name,
-                order_id=task.order_id,
-                is_main=task.is_main,
-                due_date=task.due_date,
-                release_time=task.release_time,
-                due_at=shop.time_label(task.due_date),
-                release_at=shop.time_label(task.release_time),
-                derived_due_date=task.derived_due_date,
-                derived_due_at=shop.time_label(task.derived_due_date),
-                derived_start_time=task.derived_start_time,
-                derived_start_at=shop.time_label(task.derived_start_time),
-                critical_path_time=task.critical_path_time,
-                critical_slack=task.critical_slack,
-            )
-            # 订单 → 任务
+        for edge in canonical.edges:
             self.graph.add_edge(
-                f"O:{task.order_id}", f"T:{tid}",
-                edge_type=self.EDGE_ORDER_TASK,
+                edge.source,
+                edge.target,
+                edge_type=edge.edge_type,
+                **dict(edge.attrs),
             )
-            # 任务前置约束
-            for pred_tid in task_predecessors[tid]:
-                self.graph.add_edge(
-                    f"T:{pred_tid}", f"T:{tid}",
-                    edge_type=self.EDGE_TASK_PREDECESSOR,
-                )
-            processed += 1
-            if processed % 500 == 0:
-                report(processed, total_entities)
-
-        # 添加工序节点
-        for opid, op in shop.operations.items():
-            self.graph.add_node(
-                f"OP:{opid}",
-                node_type=self.NODE_OPERATION,
-                entity_id=opid,
-                label=op.name,
-                task_id=op.task_id,
-                process_type=op.process_type,
-                processing_time=op.processing_time,
-                required_tooling_types=";".join(op.required_tooling_types),
-                required_personnel_skills=";".join(op.required_personnel_skills),
-                status=op.status.value,
-                derived_due_date=op.derived_due_date,
-                derived_due_at=shop.time_label(op.derived_due_date),
-                derived_start_time=op.derived_start_time,
-                derived_start_at=shop.time_label(op.derived_start_time),
-                critical_slack=op.critical_slack,
-            )
-            # 任务 → 工序
-            self.graph.add_edge(
-                f"T:{op.task_id}", f"OP:{opid}",
-                edge_type=self.EDGE_TASK_OPERATION,
-            )
-            # 工序顺序约束
-            for pred_op in op.predecessor_ops:
-                self.graph.add_edge(
-                    f"OP:{pred_op}", f"OP:{opid}",
-                    edge_type=self.EDGE_OP_SEQUENCE,
-                )
-            # 工序依赖前置任务
-            for pred_task in op.predecessor_tasks:
-                self.graph.add_edge(
-                    f"T:{pred_task}", f"OP:{opid}",
-                    edge_type=self.EDGE_OP_PRED_TASK,
-                )
-            # 机器兼容边 — 如果指定了具体机器则用指定的, 否则按工艺类型
-            eligible_mids = op.eligible_machine_ids
-            if not eligible_mids:
-                eligible_mids = shop._machine_by_type.get(op.process_type, [])
-            for mid in eligible_mids:
-                self.graph.add_edge(
-                    f"OP:{opid}", f"M:{mid}",
-                    edge_type=self.EDGE_MACHINE_ELIGIBLE,
-                )
-            for tooling_type in op.required_tooling_types:
-                for tooling in shop.get_toolings_for_type(tooling_type):
-                    self.graph.add_edge(
-                        f"OP:{opid}", f"TL:{tooling.id}",
-                        edge_type=self.EDGE_TOOLING_ELIGIBLE,
-                    )
-            for skill_id in op.required_personnel_skills:
-                for person in shop.get_personnel_for_skill(skill_id):
-                    self.graph.add_edge(
-                        f"OP:{opid}", f"P:{person.id}",
-                        edge_type=self.EDGE_PERSONNEL_ELIGIBLE,
-                    )
-            processed += 1
-            if processed % 250 == 0:
-                report(processed, total_entities)
-
-        report(total_entities, total_entities)
 
     def get_graph_stats(self) -> dict:
         """获取图的统计信息"""
