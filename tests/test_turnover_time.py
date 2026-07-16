@@ -447,6 +447,65 @@ class TestDerivedTimesWithTurnover(unittest.TestCase):
         self.assertAlmostEqual(shop.tasks["T1"].derived_start_time, 93.0, places=6)
 
 
+class TestCalendarCapacityWithTurnover(unittest.TestCase):
+    """日历容量估算须覆盖 turnover 造成的挂钟跨度，否则合法排程会因日历耗尽而不可行。"""
+
+    def _long_turnover_shop(self, due_date=float("inf")):
+        one_day = [Shift(day=0, start_hour=0.0, hours=24.0)]
+        return _build_shop(
+            [("OP1", "turning", 1.0, [], 400.0),
+             ("OP2", "milling", 1.0, ["OP1"])],
+            [("m1", "turning", list(one_day)), ("m2", "milling", list(one_day))],
+            due_date=due_date,
+        )
+
+    def test_capacity_estimate_covers_turnover_span(self):
+        """OP2 闸门在 401h；未填交期时估算仍须扩到覆盖它的日历。"""
+        shop = self._long_turnover_shop()
+        shop.ensure_calendar_capacity()
+        self.assertGreaterEqual(
+            shop.calendar_days() * 24.0, 402.0,
+            "日历须覆盖 turnover 后的完工时刻（401h 开工 + 1h 加工）",
+        )
+
+    def test_simulator_feasible_after_capacity_extension(self):
+        """扩容后仿真器须给出可行且满足 turnover 的完整排程。"""
+        shop = self._long_turnover_shop()
+        shop.ensure_calendar_capacity()
+        result = Simulator(shop, BUILTIN_RULES["ATC"]).run()
+        entries = {entry["op_id"]: entry for entry in result.schedule}
+        self.assertTrue(result.feasible, "长 turnover 的合法实例不应被判为不可行")
+        self.assertIn("OP2", entries, "OP2 必须被排出")
+        self.assertGreaterEqual(entries["OP2"]["start"], 401.0 - 1e-6)
+
+    def test_zero_turnover_capacity_estimate_unchanged(self):
+        """零回归锚点：无 turnover 时估算不得因本改动而膨胀。"""
+        one_day = [Shift(day=0, start_hour=0.0, hours=24.0)]
+        shop = _build_shop(
+            [("OP1", "turning", 1.0, [], 0.0),
+             ("OP2", "milling", 1.0, ["OP1"])],
+            [("m1", "turning", list(one_day)), ("m2", "milling", list(one_day))],
+            due_date=float("inf"),
+        )
+        self.assertEqual(shop.estimate_required_schedule_days(), 14)
+
+    def test_parallel_turnover_does_not_inflate_estimate(self):
+        """并行工序的 turnover 不得累加：取依赖链上界，而非全量求和。"""
+        one_day = [Shift(day=0, start_hour=0.0, hours=24.0)]
+        shop = _build_shop(
+            [("OP1", "turning", 1.0, [], 100.0),
+             ("OP2", "turning", 1.0, [], 100.0),
+             ("OP3", "turning", 1.0, [], 100.0)],
+            [("m1", "turning", list(one_day))],
+            due_date=float("inf"),
+        )
+        # 三道并行、各 turnover=100 且无后继：链上界约 101h，远小于求和的 300h
+        self.assertLessEqual(
+            shop.estimate_required_schedule_days(), 14,
+            "并行 turnover 被错误求和会把日历撑到远超实际所需",
+        )
+
+
 class TestApproxEvalTurnover(unittest.TestCase):
     def test_simulator_result_respects_turnover_as_reference(self):
         """参照锚点：仿真器的真实结果，供近似评价对齐。"""

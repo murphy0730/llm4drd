@@ -548,9 +548,20 @@ class ShopFloor:
             24.0,
             0.02 * total_work + 0.9 * len(self.orders) + 0.18 * len(self.tasks),
         )
+        # turnover 是不占资源的挂钟等待，产能估算看不见它——日历必须另行覆盖流转
+        # 跨度，否则合法排程会因日历耗尽而被判不可行。派生时刻已按依赖链计入
+        # turnover（并行工序不累加），故取其上界即可。
+        self.derive_internal_targets()
+        flow_span_hours = max(
+            (op.earliest_finish_time + op.turnover_time
+             for op in self.operations.values()
+             if math.isfinite(op.earliest_finish_time) and math.isfinite(op.turnover_time)),
+            default=0.0,
+        )
         target_hours = max(
             due_based_hours + 24.0,
             max_release + required_hours * max(1.0, safety_factor) + complexity_buffer,
+            flow_span_hours + complexity_buffer,
         )
         estimated_days = int(math.ceil(max(target_hours, 0.0) / 24.0)) + 1
         return max(min_days, min(max_days, max(current_days, estimated_days)))
