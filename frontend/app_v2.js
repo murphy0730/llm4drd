@@ -65,7 +65,7 @@ const REVIEW_KPI_KEYS = [
 ];
 
 const NAV_MAP = {
-  // “当前实例”页面已移除；旧书签 hash 统一落到“新建与导入”。
+  // “当前实例”页面已移除；旧书签 hash 统一落到“数据导入”。
   "scene-library": { page: "new-scene" },
   "new-scene": { page: "new-scene" },
   dashboard: { page: "dashboard", requiresScene: true },
@@ -4173,7 +4173,7 @@ function renderLegacyCytoscapeGraph() {
             }).join("")}
           </datalist>
         </label>
-        <span class="subtle-note">从左到右展开 · 仅展示当前订单完整关联</span>
+        <span class="subtle-note">从上到下展开 · 仅展示当前订单完整关联</span>
         <label class="legacy-graph-switch"><input type="checkbox" data-cy-resource-edges checked> 显示资源可行边</label>
         <button class="btn btn-ghost" type="button" data-cy-fit>适配视图</button>
         <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen" aria-pressed="false">全屏查看</button>
@@ -4268,15 +4268,15 @@ function mountLegacyCytoscapeGraph() {
   });
   app.cyGraphInstance = cy;
 
-  const enforceSerialLeftToRight = () => {
+  const enforceSerialTopToBottom = () => {
     const sequenceEdges = cy.edges('[edge_type="operation_sequence"]');
     for (let pass = 0; pass < cy.nodes('[node_type="operation"]').length; pass += 1) {
       let moved = false;
       sequenceEdges.forEach((edge) => {
         const source = edge.source();
         const target = edge.target();
-        if (target.position("x") > source.position("x")) return;
-        target.position("x", source.position("x") + 150);
+        if (target.position("y") > source.position("y")) return;
+        target.position("y", source.position("y") + 150);
         moved = true;
       });
       if (!moved) break;
@@ -4285,12 +4285,12 @@ function mountLegacyCytoscapeGraph() {
 
   const runLayout = () => {
     try {
-      cy.layout({ name: "dagre", rankDir: "LR", rankSep: 150, nodeSep: 28, edgeSep: 14, ranker: "longest-path", padding: 40, fit: true, animate: false }).run();
+      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 150, nodeSep: 28, edgeSep: 14, ranker: "longest-path", padding: 40, fit: true, animate: false }).run();
     } catch (error) {
       console.warn("Dagre layout unavailable, falling back to breadthfirst", error);
       cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: true }).run();
     }
-    enforceSerialLeftToRight();
+    enforceSerialTopToBottom();
     cy.fit(undefined, 40);
   };
   runLayout();
