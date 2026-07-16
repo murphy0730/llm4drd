@@ -2802,7 +2802,7 @@ function renderWorkflowStep3() {
         ])}
       </article>
     </div>
-    ${renderTimeline(app.simResult.gantt, { title: `规则仿真甘特图 · ${app.simRule}` })}
+    ${renderTimeline(app.simResult.gantt, { title: `规则仿真甘特图 · ${app.simRule}`, canvasId: "gantt-sim" })}
     <article class="surface-card">
       <div class="card-head"><h3>仿真明细预览</h3><p>核查开始/结束时间、状态、订单和资源分配是否符合业务直觉。</p></div>
       ${renderSimpleTable(
@@ -2906,6 +2906,7 @@ function renderWorkflow() {
   if (app.workflowStep === 3) html = renderWorkflowStep3();
   if (app.workflowStep === 4) html = renderWorkflowStep4();
   container.innerHTML = html;
+  requestAnimationFrame(() => mountGantts());
   if (app.workflowStep === 3 && (app.workflowFocus || "graph") === "graph" && app.graphMeta) {
     requestAnimationFrame(() => mountLegacyCytoscapeGraph());
   }
@@ -3063,7 +3064,7 @@ function renderReviewLibraryTab() {
       ]),
     ) : ""}
     ${selected.length ? renderCandidateMetricMatrix(selected, "已选方案主目标 + 全量 KPI") : ""}
-    ${focused ? renderTimeline(focused.schedule, { title: `方案详情甘特图 · ${focused.name}` }) : ""}
+    ${focused ? renderTimeline(focused.schedule, { title: `方案详情甘特图 · ${focused.name}`, canvasId: `gantt-plan-${focused.id}` }) : ""}
   `;
 }
 
@@ -3108,7 +3109,7 @@ function renderReviewExactTab() {
           { label: "求解信息", value: escapeHtml(app.exactReference.exact_info?.solver_status || app.exactReference.evaluationMode || "-") },
         ])}
       </article>
-      ${renderTimeline(app.exactReference.schedule, { title: "精确冠军参考甘特图" })}
+      ${renderTimeline(app.exactReference.schedule, { title: "精确冠军参考甘特图", canvasId: "gantt-exact" })}
     ` : ""}
   `;
 }
@@ -3193,6 +3194,7 @@ function renderReview() {
   if (app.reviewTab === "library") container.innerHTML = renderReviewLibraryTab();
   if (app.reviewTab === "exact") container.innerHTML = renderReviewExactTab();
   if (app.reviewTab === "ai") container.innerHTML = renderReviewAiTab();
+  requestAnimationFrame(() => mountGantts());
 }
 
 function renderSystem() {
@@ -4199,6 +4201,40 @@ function renderLegacyCytoscapeGraph() {
       </div>
     </div>
   `;
+}
+
+function mountGantts() {
+  if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
+  app.ganttInstances.forEach((t) => { try { t.destroy(); } catch (_) {} });
+  app.ganttInstances = [];
+  document.querySelectorAll(".page.active .gantt-canvas:not([data-bound='1'])").forEach((el) => {
+    const payload = app.pendingGantts.get(el.id);
+    if (!payload) return;
+    const data = buildGanttData(payload.entries, payload.options);
+    if (!data) return;
+    el.dataset.bound = "1";
+    const timeline = new vis.Timeline(
+      el,
+      new vis.DataSet(data.items),
+      new vis.DataSet(data.groups),
+      {
+        editable: false,
+        selectable: false,
+        zoomable: true,
+        moveable: true,
+        horizontalScroll: true,
+        stack: false,
+        margin: { item: 6, axis: 8 },
+        orientation: { axis: "top" },
+        zoomMin: 1000 * 60 * 30,
+        zoomMax: 1000 * 60 * 60 * 24 * 90,
+        start: data.window.start,
+        end: data.window.end,
+        showTooltips: true,
+      }
+    );
+    app.ganttInstances.push(timeline);
+  });
 }
 
 function mountLegacyCytoscapeGraph() {
