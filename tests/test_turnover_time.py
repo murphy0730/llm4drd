@@ -301,5 +301,41 @@ class TestSimulatorTurnover(unittest.TestCase):
         self.assertLessEqual(entries["OP2"]["start"], 1e-9)
 
 
+class TestDerivedTimesWithTurnover(unittest.TestCase):
+    def test_earliest_start_of_successor_includes_predecessor_turnover(self):
+        """任务内前推：后继的 earliest_start 必须含前驱 turnover。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        # OP1: est=0, pt=5, turnover=4 -> OP2.est = 0+5+4 = 9
+        self.assertAlmostEqual(shop.operations["OP2"].earliest_start_time, 9.0, places=6)
+
+    def test_zero_turnover_leaves_earliest_start_unchanged(self):
+        """零回归锚点。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 0.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        self.assertAlmostEqual(shop.operations["OP2"].earliest_start_time, 5.0, places=6)
+
+    def test_derived_start_time_backs_off_by_own_turnover(self):
+        """反推：后继要在 t 开工，则本工序须在 t - turnover 前完工。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0),
+             ("OP2", "milling", 2.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+            due_date=100.0,
+        )
+        op1, op2 = shop.operations["OP1"], shop.operations["OP2"]
+        # OP2.derived_start = 100 - 2 = 98；OP1 须在 98 - 4 = 94 前完工
+        # 故 OP1.derived_due_date = 94, OP1.derived_start = 94 - 5 = 89
+        self.assertAlmostEqual(op2.derived_start_time, 98.0, places=6)
+        self.assertAlmostEqual(op1.derived_due_date, 94.0, places=6)
+        self.assertAlmostEqual(op1.derived_start_time, 89.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

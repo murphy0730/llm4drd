@@ -624,18 +624,24 @@ class ShopFloor:
             topo = _topological_order(predecessors, op_ids)
             earliest_offsets: dict[str, float] = {}
             critical_path = 0.0
+            critical_path_with_turnover = 0.0
             for op_id in topo:
                 op = self.operations[op_id]
                 # 环内工序(工序级前驱互锁)的前驱可能尚未计算(拓扑序对环不完整)，
                 # 跳过避免 KeyError；环内工序的 earliest_offset 无实际意义，
                 # 仿真器会单独做 SCC 环检测并标记 feasible=False。
                 offset = max(
-                    (earliest_offsets[predecessor_id] + self.operations[predecessor_id].processing_time
+                    (earliest_offsets[predecessor_id]
+                     + self.operations[predecessor_id].processing_time
+                     + self.operations[predecessor_id].turnover_time
                      for predecessor_id in predecessors[op_id] if predecessor_id in earliest_offsets),
                     default=0.0,
                 )
                 earliest_offsets[op_id] = offset
                 critical_path = max(critical_path, offset + op.processing_time)
+                critical_path_with_turnover = max(
+                    critical_path_with_turnover, offset + op.processing_time + op.turnover_time
+                )
             task_meta[task_id] = {
                 "op_ids": op_ids,
                 "predecessors": predecessors,
@@ -643,6 +649,7 @@ class ShopFloor:
                 "topo": topo,
                 "earliest_offsets": earliest_offsets,
                 "critical_path": critical_path,
+                "critical_path_with_turnover": critical_path_with_turnover,
             }
 
         task_topo = _topological_order(task_predecessors, list(self.tasks.keys()))
@@ -666,16 +673,22 @@ class ShopFloor:
                 else float("inf")
             )
 
+        task_flow_finish: dict[str, float] = {}
         for task_id in task_topo:
             task = self.tasks[task_id]
             order = self.orders.get(task.order_id)
             base_release = max(task.release_time, order.release_time if order else 0.0)
             predecessor_finish = max(
-                (self.tasks[predecessor_id].earliest_finish_time for predecessor_id in task_predecessors.get(task_id, set())),
+                (task_flow_finish[predecessor_id]
+                 for predecessor_id in task_predecessors.get(task_id, set())
+                 if predecessor_id in task_flow_finish),
                 default=base_release,
             )
             task.earliest_start_time = max(base_release, predecessor_finish)
             task.earliest_finish_time = task.earliest_start_time + task.critical_path_time
+            task_flow_finish[task_id] = task.earliest_start_time + task_meta.get(task_id, {}).get(
+                "critical_path_with_turnover", task.critical_path_time
+            )
             task.critical_slack = (
                 task.derived_due_date - task.earliest_finish_time
                 if math.isfinite(task.derived_due_date)
@@ -691,7 +704,7 @@ class ShopFloor:
             for op_id in reversed(topo):
                 op = self.operations[op_id]
                 successor_starts = [
-                    self.operations[successor_id].derived_start_time
+                    self.operations[successor_id].derived_start_time - op.turnover_time
                     for successor_id in successors.get(op_id, set())
                     if math.isfinite(self.operations[successor_id].derived_start_time)
                 ]
