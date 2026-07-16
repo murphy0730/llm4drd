@@ -1,7 +1,9 @@
 import copy
 import math
 import unittest
+from unittest.mock import patch
 
+from llm4drd.core.models import Order, ShopFloor
 from llm4drd.knowledge.canonical import CanonicalGraphBuilder, compute_graph_fingerprint
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 
@@ -57,6 +59,75 @@ class GraphFingerprintTests(unittest.TestCase):
         shop.operations["OP-11"].processing_time = math.inf
         with self.assertRaisesRegex(ValueError, "non-finite"):
             compute_graph_fingerprint(shop)
+
+    def test_mapping_keys_and_model_ids_are_both_fingerprinted(self):
+        entity_examples = (
+            ("machine_types", "cut"),
+            ("tooling_types", "TL-CUT"),
+            ("machines", "M-C1"),
+            ("toolings", "TL-1"),
+            ("personnel", "P-1"),
+            ("orders", "O-1"),
+            ("tasks", "T-11"),
+            ("operations", "OP-11"),
+        )
+        for collection_name, entity_key in entity_examples:
+            with self.subTest(collection=collection_name):
+                left = make_graph_context_shop()
+                right = copy.deepcopy(left)
+                entity = getattr(right, collection_name)[entity_key]
+                entity.id = f"{entity.id}-changed"
+                self.assertNotEqual(
+                    compute_graph_fingerprint(left).instance_hash,
+                    compute_graph_fingerprint(right).instance_hash,
+                )
+
+    def test_tooling_model_id_changes_topology_and_canonical_edge(self):
+        left = make_graph_context_shop()
+        right = copy.deepcopy(left)
+        right.toolings["TL-1"].id = "TL-X"
+
+        left_edges = {
+            (edge.source, edge.target, edge.edge_type)
+            for edge in CanonicalGraphBuilder().build(left).edges
+        }
+        right_edges = {
+            (edge.source, edge.target, edge.edge_type)
+            for edge in CanonicalGraphBuilder().build(right).edges
+        }
+
+        self.assertNotEqual(left_edges, right_edges)
+        self.assertNotEqual(
+            compute_graph_fingerprint(left).topology_hash,
+            compute_graph_fingerprint(right).topology_hash,
+        )
+
+    def test_task_model_id_changes_legacy_feature_fingerprint(self):
+        from llm4drd.optimization.hybrid_nsga3_alns import (
+            HybridConfig,
+            HybridNSGA3ALNSOptimizer,
+        )
+
+        left = make_graph_context_shop()
+        right = copy.deepcopy(left)
+        right.tasks["T-11"].id = "T-X"
+        config = HybridConfig(
+            objective_keys=["total_tardiness", "makespan"],
+            parallel_workers=1,
+        )
+
+        left_value = HybridNSGA3ALNSOptimizer(left, config).graph_features["OP-11"][
+            "assembly_criticality"
+        ]
+        right_value = HybridNSGA3ALNSOptimizer(right, config).graph_features["OP-11"][
+            "assembly_criticality"
+        ]
+
+        self.assertNotEqual(left_value, right_value)
+        self.assertNotEqual(
+            compute_graph_fingerprint(left).feature_hash,
+            compute_graph_fingerprint(right).feature_hash,
+        )
 
 
 class CanonicalGraphBuilderTests(unittest.TestCase):
@@ -121,6 +192,34 @@ class CanonicalGraphBuilderTests(unittest.TestCase):
 
         self.assertIn(("T:T-11", "T:T-12", "task_predecessor"), edges)
         self.assertIn(("T:T-11", "OP:OP-13", "op_depends_task"), edges)
+
+    def test_progress_reports_legacy_digraph_counts(self):
+        shop = make_graph_context_shop()
+        shop.operations["OP-11"].eligible_machine_ids.append("M-C1")
+        calls = []
+
+        CanonicalGraphBuilder().build(shop, lambda *values: calls.append(values))
+
+        self.assertEqual(calls, [(0, 9, 5, 0), (9, 9, 14, 18)])
+
+    def test_deadline_is_checked_at_order_checkpoint(self):
+        shop = ShopFloor()
+        for index in range(500):
+            order_id = f"O-{index}"
+            shop.orders[order_id] = Order(id=order_id, due_date=24.0)
+        calls = []
+
+        with patch(
+            "llm4drd.knowledge.canonical.time.monotonic", side_effect=[0.0, 2.0]
+        ):
+            with self.assertRaisesRegex(TimeoutError, "超过时间限制"):
+                CanonicalGraphBuilder().build(
+                    shop,
+                    lambda *values: calls.append(values),
+                    deadline=1.0,
+                )
+
+        self.assertEqual(calls, [(0, 500, 0, 0)])
 
 
 if __name__ == "__main__":

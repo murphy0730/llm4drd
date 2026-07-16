@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeAlias
 
@@ -45,6 +45,7 @@ class CanonicalGraph:
     nodes: tuple[CanonicalNode, ...]
     edges: tuple[CanonicalEdge, ...]
     fingerprint: GraphFingerprint
+    _node_order: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def stats(self) -> dict:
         node_types: dict[str, int] = {}
@@ -104,16 +105,22 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
     return {
         "plan_start_at": shop.plan_start_at.isoformat(),
         "machine_types": [
-            {"id": type_id, "name": machine_type.name, "is_critical": machine_type.is_critical}
+            {
+                "key": type_id,
+                "id": machine_type.id,
+                "name": machine_type.name,
+                "is_critical": machine_type.is_critical,
+            }
             for type_id, machine_type in sorted(shop.machine_types.items())
         ],
         "tooling_types": [
-            {"id": type_id, "name": tooling_type.name}
+            {"key": type_id, "id": tooling_type.id, "name": tooling_type.name}
             for type_id, tooling_type in sorted(shop.tooling_types.items())
         ],
         "machines": [
             {
-                "id": machine_id,
+                "key": machine_id,
+                "id": machine.id,
                 "name": machine.name,
                 "type_id": machine.type_id,
                 "shifts": _shifts(machine_id, machine.shifts),
@@ -123,7 +130,8 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
         ],
         "toolings": [
             {
-                "id": tooling_id,
+                "key": tooling_id,
+                "id": tooling.id,
                 "name": tooling.name,
                 "type_id": tooling.type_id,
                 "shifts": _shifts(tooling_id, tooling.shifts),
@@ -133,7 +141,8 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
         ],
         "personnel": [
             {
-                "id": person_id,
+                "key": person_id,
+                "id": person.id,
                 "name": person.name,
                 "skills": sorted(person.skills),
                 "shifts": _shifts(person_id, person.shifts),
@@ -143,7 +152,8 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
         ],
         "orders": [
             {
-                "id": order_id,
+                "key": order_id,
+                "id": order.id,
                 "name": order.name,
                 "release_time": _finite(order.release_time, f"orders.{order_id}.release_time"),
                 "due_date": _finite(order.due_date, f"orders.{order_id}.due_date"),
@@ -156,7 +166,8 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
         ],
         "tasks": [
             {
-                "id": task_id,
+                "key": task_id,
+                "id": task.id,
                 "order_id": task.order_id,
                 "name": task.name,
                 "is_main": task.is_main,
@@ -169,7 +180,8 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
         ],
         "operations": [
             {
-                "id": operation_id,
+                "key": operation_id,
+                "id": operation.id,
                 "task_id": operation.task_id,
                 "name": operation.name,
                 "process_type": operation.process_type,
@@ -191,26 +203,37 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
 def _normalized_topology_payload(shop: ShopFloor) -> dict:
     return {
         "machine_types": [
-            {"id": type_id, "is_critical": machine_type.is_critical}
+            {
+                "key": type_id,
+                "id": machine_type.id,
+                "is_critical": machine_type.is_critical,
+            }
             for type_id, machine_type in sorted(shop.machine_types.items())
         ],
         "machines": [
-            {"id": machine_id, "type_id": machine.type_id}
+            {"key": machine_id, "id": machine.id, "type_id": machine.type_id}
             for machine_id, machine in sorted(shop.machines.items())
         ],
-        "tooling_types": [{"id": type_id} for type_id in sorted(shop.tooling_types)],
+        "tooling_types": [
+            {"key": type_id, "id": tooling_type.id}
+            for type_id, tooling_type in sorted(shop.tooling_types.items())
+        ],
         "toolings": [
-            {"id": tooling_id, "type_id": tooling.type_id}
+            {"key": tooling_id, "id": tooling.id, "type_id": tooling.type_id}
             for tooling_id, tooling in sorted(shop.toolings.items())
         ],
         "personnel": [
-            {"id": person_id, "skills": sorted(person.skills)}
+            {"key": person_id, "id": person.id, "skills": sorted(person.skills)}
             for person_id, person in sorted(shop.personnel.items())
         ],
-        "orders": [{"id": order_id} for order_id in sorted(shop.orders)],
+        "orders": [
+            {"key": order_id, "id": order.id}
+            for order_id, order in sorted(shop.orders.items())
+        ],
         "tasks": [
             {
-                "id": task_id,
+                "key": task_id,
+                "id": task.id,
                 "order_id": task.order_id,
                 "predecessor_task_ids": sorted(task.predecessor_task_ids),
             }
@@ -218,7 +241,8 @@ def _normalized_topology_payload(shop: ShopFloor) -> dict:
         ],
         "operations": [
             {
-                "id": operation_id,
+                "key": operation_id,
+                "id": operation.id,
                 "task_id": operation.task_id,
                 "process_type": operation.process_type,
                 "predecessor_ops": sorted(operation.predecessor_ops),
@@ -235,24 +259,29 @@ def _normalized_topology_payload(shop: ShopFloor) -> dict:
 def _normalized_feature_payload(shop: ShopFloor) -> dict:
     return {
         "machine_types": [
-            {"id": type_id, "is_critical": machine_type.is_critical}
+            {
+                "key": type_id,
+                "id": machine_type.id,
+                "is_critical": machine_type.is_critical,
+            }
             for type_id, machine_type in sorted(shop.machine_types.items())
         ],
         "machines": [
-            {"id": machine_id, "type_id": machine.type_id}
+            {"key": machine_id, "id": machine.id, "type_id": machine.type_id}
             for machine_id, machine in sorted(shop.machines.items())
         ],
         "toolings": [
-            {"id": tooling_id, "type_id": tooling.type_id}
+            {"key": tooling_id, "id": tooling.id, "type_id": tooling.type_id}
             for tooling_id, tooling in sorted(shop.toolings.items())
         ],
         "personnel": [
-            {"id": person_id, "skills": sorted(person.skills)}
+            {"key": person_id, "id": person.id, "skills": sorted(person.skills)}
             for person_id, person in sorted(shop.personnel.items())
         ],
         "orders": [
             {
-                "id": order_id,
+                "key": order_id,
+                "id": order.id,
                 "release_time": _finite(order.release_time, f"orders.{order_id}.release_time"),
                 "due_date": _finite(order.due_date, f"orders.{order_id}.due_date"),
                 "priority": order.priority,
@@ -262,7 +291,8 @@ def _normalized_feature_payload(shop: ShopFloor) -> dict:
         ],
         "tasks": [
             {
-                "id": task_id,
+                "key": task_id,
+                "id": task.id,
                 "order_id": task.order_id,
                 "is_main": task.is_main,
                 "predecessor_task_ids": sorted(task.predecessor_task_ids),
@@ -274,7 +304,8 @@ def _normalized_feature_payload(shop: ShopFloor) -> dict:
         ],
         "operations": [
             {
-                "id": operation_id,
+                "key": operation_id,
+                "id": operation.id,
                 "task_id": operation.task_id,
                 "process_type": operation.process_type,
                 "processing_time": _finite(
@@ -323,6 +354,14 @@ class CanonicalGraphBuilder:
     ) -> CanonicalGraph:
         nodes: list[CanonicalNode] = []
         edges: list[CanonicalEdge] = []
+        node_order: list[str] = []
+        seen_nodes: set[str] = set()
+        edge_pairs: set[tuple[str, str]] = set()
+
+        def record_node_appearance(node_id: str) -> None:
+            if node_id not in seen_nodes:
+                seen_nodes.add(node_id)
+                node_order.append(node_id)
 
         def add_node(
             node_id: str,
@@ -330,6 +369,7 @@ class CanonicalGraphBuilder:
             entity_id: str,
             attrs: dict[str, ScalarValue],
         ) -> None:
+            record_node_appearance(node_id)
             nodes.append(
                 CanonicalNode(node_id, node_type, entity_id, MappingProxyType(attrs))
             )
@@ -340,6 +380,9 @@ class CanonicalGraphBuilder:
             edge_type: str,
             attrs: dict[str, ScalarValue] | None = None,
         ) -> None:
+            record_node_appearance(source)
+            record_node_appearance(target)
+            edge_pairs.add((source, target))
             edges.append(
                 CanonicalEdge(
                     source,
@@ -353,7 +396,7 @@ class CanonicalGraphBuilder:
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("图谱内存构建超过时间限制")
             if progress_callback:
-                progress_callback(processed, total, len(nodes), len(edges))
+                progress_callback(processed, total, len(node_order), len(edge_pairs))
 
         for machine_id, machine in shop.machines.items():
             machine_type = shop.machine_types.get(machine.type_id)
@@ -528,4 +571,5 @@ class CanonicalGraphBuilder:
             tuple(nodes),
             tuple(edges),
             compute_graph_fingerprint(shop),
+            tuple(node_order),
         )

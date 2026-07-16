@@ -39,13 +39,27 @@ class HeterogeneousGraph:
         """从车间配置构建异构图"""
         canonical = CanonicalGraphBuilder().build(shop, progress_callback, deadline)
         self.graph.clear()
+        nodes_by_id = {node.node_id: node for node in canonical.nodes}
+        node_order = canonical._node_order or tuple(nodes_by_id)
+        for node_id in node_order:
+            node = nodes_by_id.get(node_id)
+            if node is None:
+                self.graph.add_node(node_id)
+            else:
+                self.graph.add_node(
+                    node.node_id,
+                    node_type=node.node_type,
+                    entity_id=node.entity_id,
+                    **dict(node.attrs),
+                )
         for node in canonical.nodes:
-            self.graph.add_node(
-                node.node_id,
-                node_type=node.node_type,
-                entity_id=node.entity_id,
-                **dict(node.attrs),
-            )
+            if node.node_id not in self.graph:
+                self.graph.add_node(
+                    node.node_id,
+                    node_type=node.node_type,
+                    entity_id=node.entity_id,
+                    **dict(node.attrs),
+                )
         for edge in canonical.edges:
             self.graph.add_edge(
                 edge.source,
