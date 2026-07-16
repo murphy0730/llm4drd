@@ -393,13 +393,9 @@ body {
 }
 .kpi-card:hover { transform: none; box-shadow: none; border-color: var(--line-strong); }
 
-.context-panel { padding: 18px 14px; background: var(--surface); border-color: var(--line); }
-.context-card { padding: 0 2px 18px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
-.context-card-head h3 { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint); }
 .context-grid div { border-bottom-color: var(--line); }
 .context-grid span { font-size: 11px; }
 .context-grid strong { font-size: 11px; }
-.panel-toggle { border-radius: 6px; }
 
 .tab-strip {
   gap: 2px;
@@ -427,11 +423,8 @@ select:focus,
 textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent); }
 
 .objective-pill,
-.focus-tab,
-.workflow-step { border-radius: 6px; background: var(--surface); box-shadow: none; }
+.focus-tab { border-radius: 6px; background: var(--surface); box-shadow: none; }
 .objective-pill:has(input:checked) { border-color: color-mix(in srgb, var(--primary) 35%, transparent); background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
-.workflow-step.active { background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border-color: color-mix(in srgb, var(--primary) 28%, var(--line)); }
-.workflow-step.done { border-color: color-mix(in srgb, var(--success) 28%, var(--line)); }
 
 .table-shell,
 .table-wrapper,
