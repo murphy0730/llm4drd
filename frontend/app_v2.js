@@ -1080,9 +1080,7 @@ function updateShell() {
   const hasScene = !!app.currentScene;
   const summary = getSceneSummary();
   el("topbar-scene-name").textContent = hasScene ? app.currentScene.name : "未加载场景";
-  el("topbar-scene-meta").textContent = hasScene
-    ? `${summary.orders || 0} 单 / ${summary.operations || 0} 工序`
-    : "请新建或导入实例";
+  el("topbar-scene-meta").textContent = hasScene ? "查看实例摘要" : "请新建或导入实例";
   el("topbar-orders").textContent = hasScene ? formatInt(summary.orders) : "-";
   el("topbar-tasks").textContent = hasScene ? formatInt(summary.tasks) : "-";
   el("topbar-operations").textContent = hasScene ? formatInt(summary.operations) : "-";
@@ -1136,9 +1134,9 @@ function renderKpiCards(items) {
   `;
 }
 
-function renderKeyValueGrid(items) {
+function renderKeyValueGrid(items, className = "context-grid") {
   return `
-    <div class="context-grid">
+    <div class="${className}">
       ${items.map((item) => `
         <div>
           <span>${escapeHtml(item.label)}</span>
@@ -2728,17 +2726,16 @@ function renderWorkflowStep3() {
   const graphPanel = `
     <div class="workflow-stage-stack">
       <article class="surface-card">
-      <div class="card-head"><h3>图谱构建</h3><p>构建订单 - 任务 - 工序 - 机器 - 工装 - 人员异构图，并作为后续结构洞察与优化引导基础。</p></div>
+      <div class="card-head"><h3>图谱构建</h3></div>
       ${renderGraphBuildStatus()}
       ${app.graphMeta ? renderKeyValueGrid([
         { label: "节点", value: formatInt(app.graphMeta.total_nodes) },
         { label: "边", value: formatInt(app.graphMeta.total_edges) },
         { label: "创建时间", value: formatDateTime(app.graphMeta.created_at) },
         { label: "节点类型", value: formatInt(Object.keys(app.graphMeta.node_type_counts || {}).length) },
-      ]) : renderEmptyState("尚未构建图谱", "点击下方按钮即可根据当前实例构建图谱。")}
-      <div class="form-actions">
+      ], "context-grid cols-4") : renderEmptyState("尚未构建图谱", "点击下方按钮即可根据当前实例构建图谱。")}
+      <div class="form-actions form-actions--gap">
         <button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>
-        <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">切到仿真视图</button>
       </div>
       </article>
       ${app.graphMeta ? renderLegacyCytoscapeGraph() : ""}
@@ -2748,13 +2745,11 @@ function renderWorkflowStep3() {
   const simulationPanel = `
     <article class="surface-card">
       <div class="card-head"><h3>规则仿真</h3><p>先用规则基线验证数据、班次、停机和初始在制状态是否合理，再决定是否进入优化。</p></div>
-      <div class="form-grid">
-        <label class="span-2">
-          <span>规则</span>
-          <select id="workflow-sim-rule">
-            ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.simRule ? "selected" : ""}>${rule}</option>`).join("")}
-          </select>
-        </label>
+      <div class="field-inline">
+        <span>规则</span>
+        <select id="workflow-sim-rule">
+          ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.simRule ? "selected" : ""}>${rule}</option>`).join("")}
+        </select>
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" type="button" data-action="run-simulate">运行仿真</button>
@@ -2780,28 +2775,6 @@ function renderWorkflowStep3() {
   `;
 
   const simulationDetail = app.simResult ? `
-    <div class="two-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>仿真摘要</h3><p>重点确认总延误、总周期、净可用利用率与是否完整覆盖全部工序。</p></div>
-        ${renderKpiCards([
-          { label: "总延误", value: formatDurationHours(simMetrics.total_tardiness), hint: "订单交付压力的直接结果" },
-          { label: "总周期", value: formatDurationHours(simMetrics.makespan), hint: "从计划起点到最后完工的整体跨度" },
-          { label: "总等待", value: formatDurationHours(simMetrics.total_wait_time), hint: "排队、前驱与日历等待的综合结果" },
-          { label: "净可用利用率", value: formatPercent(simMetrics.avg_net_available_utilization), hint: "更适合业务理解的资源利用口径" },
-        ])}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>状态与资源信号</h3><p>用状态分布帮助业务快速判断这是历史延续排程，还是几乎全部为未来新排产。</p></div>
-        ${renderKeyValueGrid([
-          { label: "已完成工序", value: formatInt(asArray(app.simResult.gantt).filter((item) => normalizeScheduleStatus(item.status) === "completed").length) },
-          { label: "进行中工序", value: formatInt(asArray(app.simResult.gantt).filter((item) => normalizeScheduleStatus(item.status) === "processing").length) },
-          { label: "未来排产工序", value: formatInt(asArray(app.simResult.gantt).filter((item) => normalizeScheduleStatus(item.status) === "future").length) },
-          { label: "关键瓶颈设备", value: asArray(simMetrics.bottleneck_machine_ids).length ? escapeHtml(asArray(simMetrics.bottleneck_machine_ids).slice(0, 4).join(", ")) : "-" },
-          { label: "主订单延误总时长", value: formatDurationHours(simMetrics.main_order_tardy_total_time) },
-          { label: "装配同步惩罚", value: formatDurationHours(simMetrics.assembly_sync_penalty) },
-        ])}
-      </article>
-    </div>
     ${renderTimeline(app.simResult.gantt, { title: `规则仿真甘特图 · ${app.simRule}`, canvasId: "gantt-sim" })}
     <article class="surface-card">
       <div class="card-head"><h3>仿真明细预览</h3><p>核查开始/结束时间、状态、订单和资源分配是否符合业务直觉。</p></div>
@@ -2979,12 +2952,6 @@ function renderCandidateCards(candidates) {
             </div>
             <input type="checkbox" data-action="toggle-candidate" data-id="${escapeHtml(item.id)}" ${app.reviewSelection.includes(item.id) ? "checked" : ""}>
           </div>
-          ${renderKeyValueGrid([
-            { label: "总延误", value: metricDisplay(item, "total_tardiness") },
-            { label: "总周期", value: metricDisplay(item, "makespan") },
-            { label: "净可用利用率", value: metricDisplay(item, "avg_net_available_utilization") },
-            { label: "等待时间", value: metricDisplay(item, "total_wait_time") },
-          ])}
           <div class="form-actions">
             <button class="btn btn-ghost" type="button" data-action="focus-candidate" data-id="${escapeHtml(item.id)}">查看详情</button>
             <button class="btn btn-primary" type="button" data-action="send-candidate-to-ai" data-id="${escapeHtml(item.id)}">送入 AI 评审</button>
@@ -2993,6 +2960,55 @@ function renderCandidateCards(candidates) {
         </article>
       `).join("")}
     </div>
+  `;
+}
+
+const HEURISTIC_RULE_BLURB = {
+  ATC: "综合考虑交期紧迫度与处理时间，平衡延误与利用率",
+  EDD: "优先安排交期最早的任务，降低最大延误",
+  SPT: "优先处理耗时最短的工序，缩短平均周期",
+  CR: "按交期剩余时间与剩余加工时间之比排序",
+  FIFO: "按到达顺序先到先做，规则简单稳健",
+  LPT: "优先处理长工序，规避长尾延误与资源空闲",
+};
+
+function renderReviewCandidateComparison() {
+  const candidates = getReviewCandidates();
+  if (!candidates.length) return "";
+  const focusedId = app.reviewDetailId;
+  let preview;
+  if (focusedId && candidates.some((item) => item.id === focusedId)) {
+    const focused = candidates.find((item) => item.id === focusedId);
+    preview = [focused, ...candidates.filter((item) => item.id !== focusedId)].slice(0, 5);
+  } else {
+    preview = candidates.slice(0, 5);
+  }
+  const primaryKeys = activePrimaryObjectiveKeys();
+  const extraKeys = REVIEW_KPI_KEYS.filter((key) => !primaryKeys.includes(key));
+  const headers = ["方案", "来源", ...primaryKeys.map((key) => getObjectiveLabel(key)), ...extraKeys.map((key) => getObjectiveLabel(key))];
+  const rows = preview.map((item) => {
+    const isFocused = app.reviewDetailId === item.id;
+    return `<tr class="${isFocused ? "is-selected" : ""}">
+      <td>${escapeHtml(item.name)}</td>
+      <td>${escapeHtml(item.source)}</td>
+      ${primaryKeys.map((key) => `<td>${metricDisplay(item, key)}</td>`).join("")}
+      ${extraKeys.map((key) => `<td>${metricDisplay(item, key)}</td>`).join("")}
+    </tr>`;
+  }).join("");
+  return `
+    <article class="surface-card">
+      <div class="card-head">
+        <h3>主目标 + 全量 KPI 对比</h3>
+        <p>点击上方方案卡片的「查看详情」可置顶并高亮对应行；默认展示前 ${preview.length} 个方案，横向滚动可查看全部 KPI。</p>
+      </div>
+      ${renderPrimaryObjectiveBadges(primaryKeys)}
+      <div class="table-shell">
+        <table class="data-table">
+          <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </article>
   `;
 }
 
@@ -3005,12 +3021,8 @@ function renderReviewLibraryTab() {
   const heuristicCount = candidates.filter((item) => String(item.source || "").includes("heuristic") || item.heuristicRuleName).length;
   const paretoCount = Math.max(0, candidates.length - exactCount - heuristicCount);
   return `
-    <article class="surface-card decision-band">
-      <div>
-        <span class="eyebrow">Solution Review</span>
-        <h3>把 Pareto、启发式和精确冠军放到同一个决策工作台里</h3>
-        <p>先收集候选，再挑出 1-4 个进入 AI 评审。这里既能看主目标，也能完整对比全量 KPI 与导出结果。</p>
-      </div>
+    <article class="surface-card decision-band decision-band--inline">
+      <h3>把 Pareto、启发式和精确冠军放到同一个决策工作台里</h3>
       <div class="decision-band-stats">
         <div><span>Pareto</span><strong>${formatInt(paretoCount)}</strong></div>
         <div><span>启发式</span><strong>${formatInt(heuristicCount)}</strong></div>
@@ -3026,7 +3038,7 @@ function renderReviewLibraryTab() {
             <label class="objective-pill">
               <input type="checkbox" data-heuristic-rule="${escapeHtml(rule)}" ${app.heuristicSelection.includes(rule) ? "checked" : ""}>
               <strong>${escapeHtml(rule)}</strong>
-              <span>用于快速加载规则参考方案</span>
+              <span>${escapeHtml(HEURISTIC_RULE_BLURB[rule] || "用于快速加载规则参考方案")}</span>
             </label>
           `).join("")}
         </div>
@@ -3050,20 +3062,7 @@ function renderReviewLibraryTab() {
       "先运行混合优化，或先加载启发式参考方案。",
       '<button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>',
     )}
-    ${selected.length ? renderSimpleTable(
-      ["方案", "来源", "总延误", "总周期", "净可用利用率", "活跃窗口利用率", "总等待时间", "装配同步惩罚"],
-      selected.map((item) => [
-        escapeHtml(item.name),
-        escapeHtml(item.source),
-        metricDisplay(item, "total_tardiness"),
-        metricDisplay(item, "makespan"),
-        metricDisplay(item, "avg_net_available_utilization"),
-        metricDisplay(item, "avg_active_window_utilization"),
-        metricDisplay(item, "total_wait_time"),
-        metricDisplay(item, "assembly_sync_penalty"),
-      ]),
-    ) : ""}
-    ${selected.length ? renderCandidateMetricMatrix(selected, "已选方案主目标 + 全量 KPI") : ""}
+    ${candidates.length ? renderReviewCandidateComparison() : ""}
     ${focused ? renderTimeline(focused.schedule, { title: `方案详情甘特图 · ${focused.name}`, canvasId: `gantt-plan-${focused.id}` }) : ""}
   `;
 }

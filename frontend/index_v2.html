@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>LLM4DRD 智能调度决策中枢</title>
-  <link rel="stylesheet" href="/static/app_v2.css?v=20260716-1">
+  <link rel="stylesheet" href="/static/app_v2.css?v=20260716-2">
   <link rel="stylesheet" href="/static/design-system.css?v=20260716-1">
   <link rel="stylesheet" href="/static/vendor/vis-timeline-graph2d.min.css?v=7.7.3">
 </head>
@@ -65,10 +65,6 @@
         <section class="page active" id="page-new-scene">
           <div class="page-body">
             <article class="surface-card">
-              <div class="card-head">
-                <h3>导入与模板</h3>
-                <p>用于接入真实业务数据、工艺结构和初始在制状态。</p>
-              </div>
               <div class="upload-panel">
                 <div class="upload-dropzone">
                   <strong>拖入 Excel 或点击选择文件</strong>
@@ -87,11 +83,6 @@
                   <div class="import-progress-track"><i id="import-progress-bar" style="width:0%"></i></div>
                   <p class="import-progress-note" id="import-progress-note">请勿关闭页面，导入完成后会在本页显示数据强校验结果。</p>
                 </div>
-              </div>
-              <div class="hint-list">
-                <div>模板已包含工装、人员、停机和初始在制状态字段。</div>
-                <div>任务层交期可留空，默认继承订单交期。</div>
-                <div>排产跨度天数由后端自动估算，并在不足时自动扩展。</div>
               </div>
             </article>
             <div id="new-scene-validation"></div>
@@ -157,6 +148,6 @@
   <script src="/static/vendor/dagre.min.js?v=0.8.5"></script>
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
   <script src="/static/vendor/vis-timeline-graph2d.min.js?v=7.7.3"></script>
-  <script src="/static/app_v2.js?v=20260716-7"></script>
+  <script src="/static/app_v2.js?v=20260716-8"></script>
 </body>
 </html>
