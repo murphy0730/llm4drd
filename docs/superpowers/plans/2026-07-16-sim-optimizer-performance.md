@@ -1234,7 +1234,15 @@ git commit -m "docs: record perf benchmark before/after"
 
 （Task 1 Step 0 与 Task 6 Step 2 在此追加）
 
-- baseline: <待填>
+基准脚本：`scratchpad/bench_perf.py`（`InstanceGenerator(seed=17)`，30 订单 / 109 任务 / 366 工序 / 19 机器）。
+计划正文 Global Constraints 里的原始命令有误——`exact_eval_time_total` 在 optimizer 实例上而非 `HybridResult` 上，
+且 `make_graph_context_shop()` 仅 4 道工序，测不出差异。以本脚本为准。
+
+- baseline (2026-07-16, main@bd8d9da):
+  - single_simulation_median_s: 0.0492（events=1110, feasible=True）
+  - optimizer_elapsed_s: 6.95
+  - exact_evaluations: 85, approx_evaluations: 60, exact_eval_time_total: 13.02
+  - found_solution_count: 1
 - optimized: <待填>
 
 ## 已知限制（本计划不处理）

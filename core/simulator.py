@@ -135,6 +135,7 @@ class Simulator:
         self._unschedulable_ops: set[str] = set()
         self._pdr_error_logged = False
         self._op_dispatch_type_ids: dict[str, set[str]] = {}
+        self._flow_gate_cache: dict[str, float] = {}
         # 仿真前检测出的依赖环(任务级前驱互锁/工序级前驱环/混合)，由 _compute_kpi 写入 SimResult
         self._dependency_cycles: list = []
 
@@ -153,6 +154,7 @@ class Simulator:
         self._task_remaining_ops = {task_id: len(task.operations) for task_id, task in shop.tasks.items()}
         self._unschedulable_ops = set()
         self._pdr_error_logged = False
+        self._flow_gate_cache = {}
         self._dependency_cycles = []
 
         self._op_dispatch_type_ids = {}
@@ -589,12 +591,17 @@ class Simulator:
         return True
 
     def _flow_ready_time(self, shop: ShopFloor, op: Operation) -> float:
-        """闸门取值，复用 _release_time_cache 避免重算放行时刻。
+        """闸门取值，首查后 memo——所有调用点都在 _is_op_ready 为真之后，
+        此时前驱 end_time 已终值化，闸门不再变化。
 
         实现单点在 ShopFloor.get_operation_flow_ready_time——此处只做缓存加速。
         """
-        release_time = self._release_time_cache.get(op.id)
-        return shop.get_operation_flow_ready_time(op, release_time=release_time)
+        gate = self._flow_gate_cache.get(op.id)
+        if gate is None:
+            release_time = self._release_time_cache.get(op.id)
+            gate = shop.get_operation_flow_ready_time(op, release_time=release_time)
+            self._flow_gate_cache[op.id] = gate
+        return gate
 
     def _queue_release_or_ready(
         self,
