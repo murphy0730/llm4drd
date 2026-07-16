@@ -10,3 +10,4 @@ run.stderr.log
 server.log
 .idea/
 .workbuddy/
+.worktrees/
