@@ -10,6 +10,7 @@ from pathlib import Path
 
 import openpyxl
 
+from llm4drd.api.server import _validate_instance
 from llm4drd.core.models import Machine, MachineType, Operation, OpStatus, Order, Shift, ShopFloor, Task
 from llm4drd.core.rules import BUILTIN_RULES
 from llm4drd.core.simulator import Simulator
@@ -483,6 +484,38 @@ class TestOnlineSchedulerTurnover(unittest.TestCase):
             entries["OP2"]["start"], 19.0 - 1e-9,
             "新窗口内重排时，OP2 不得早于原 turnover 折算后的时刻开工",
         )
+
+
+class TestTurnoverValidation(unittest.TestCase):
+    """turnover 允许 0、拒绝负值——与 processing_time 必须 > 0 的规则不同。"""
+
+    def test_zero_turnover_is_valid(self):
+        op = Operation(id="OP1", task_id="T1", name="OP1", process_type="turning",
+                       processing_time=5.0, turnover_time=0.0)
+        self.assertEqual(op.turnover_time, 0.0)
+
+    def test_negative_turnover_is_rejected_by_import_validation(self):
+        """turnover_time < 0 必须被 _validate_instance 报为 operations sheet 的数据完整性错误。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], -1.0)],
+            [("m1", "turning", _full_calendar())],
+        )
+        result = _validate_instance(shop)
+        matches = [
+            e for e in result["errors"]
+            if e["entity"] == "OP1" and e["sheet"] == "operations" and "流转等待时长非法" in e["message"]
+        ]
+        self.assertTrue(matches, f"未发现负值 turnover_time 的校验错误，实际 errors={result['errors']}")
+
+    def test_zero_turnover_produces_no_turnover_validation_error(self):
+        """零回归锚点：turnover=0 不得触发该校验。"""
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 0.0)],
+            [("m1", "turning", _full_calendar())],
+        )
+        result = _validate_instance(shop)
+        matches = [e for e in result["errors"] if "流转等待时长非法" in e["message"]]
+        self.assertEqual(matches, [])
 
 
 if __name__ == "__main__":

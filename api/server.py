@@ -1391,6 +1391,7 @@ async def update_operation(op_id: str, data: dict):
         "initial_status": _normalize_initial_status(data.get("initial_status")),
         "initial_start_time": initial_start_time if initial_start_time is not None else None,
         "initial_end_time": initial_end_time if initial_end_time is not None else None,
+        "turnover_time": float(data["turnover_time"]) if str(data.get("turnover_time", "")).strip() else 0.0,
         "initial_remaining_processing_time": float(data["initial_remaining_processing_time"]) if str(data.get("initial_remaining_processing_time", "")).strip() else None,
         "initial_assigned_machine_id": data.get("initial_assigned_machine_id", ""),
         "initial_assigned_tooling_ids": data.get("initial_assigned_tooling_ids", ""),
@@ -1540,6 +1541,7 @@ def _instance_details(s: ShopFloor):
                         "name": op.name,
                         "type": op.process_type,
                         "time": op.processing_time,
+                        "turnover_time": op.turnover_time,
                         "predecessors": op.predecessor_ops + op.predecessor_tasks,
                         "required_tooling_types": op.required_tooling_types,
                         "required_personnel_skills": op.required_personnel_skills,
@@ -1675,6 +1677,8 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
             err("关联关系", op_id, f"工序引用了不存在的任务 {op.task_id}", sheet="operations / tasks")
         if op.processing_time is None or float(op.processing_time) <= 0:
             err("数据完整性", op_id, f"加工时长非法（{op.processing_time}），必须大于 0", sheet="operations")
+        if op.turnover_time is not None and float(op.turnover_time) < 0:
+            err("数据完整性", op_id, f"流转等待时长非法（{op.turnover_time}），不能为负", sheet="operations")
         for predecessor_id in op.predecessor_ops:
             if predecessor_id not in current_shop.operations:
                 err("关联关系", op_id, f"前置工序 {predecessor_id} 不存在，该工序将永远无法就绪（仿真会输出空排程）", sheet="operations")
