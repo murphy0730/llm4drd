@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
+import pickle
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from threading import Lock
 
@@ -18,6 +21,12 @@ from .approx_eval import ApproximateScheduleEvaluator
 from .archive import ParetoArchive
 from .nsga3_core import fast_nondominated_sort, select_survivors
 from .objectives import ScheduleAnalytics, build_schedule_analytics, objective_summary_payload, validate_objective_selection
+from .parallel_eval import (
+    build_candidate_rule,
+    init_worker,
+    run_approx_evaluation,
+    run_exact_simulation,
+)
 from .solution_model import (
     DESTROY_OPERATORS,
     FEATURE_NAMES,
@@ -72,6 +81,8 @@ class HybridConfig:
     parallel_workers: int = 0
     seed: int = 42
     baseline_rule_name: str = "ATC"
+    # "process": 批量评估用进程池绕开 GIL；"thread": 沿用线程池。
+    parallel_backend: str = "process"
 
 
 @dataclass
@@ -288,6 +299,8 @@ class HybridNSGA3ALNSOptimizer:
         self.approx_parallel_workers = self._phase_parallel_workers("approx")
         self.exact_parallel_workers = self._phase_parallel_workers("exact")
         self.refine_parallel_workers = self._phase_parallel_workers("refine")
+        self._process_pool = None
+        self._process_backend_failed = False
         # 每个并发 worker 一个互不共享的 runtime；静态数据只构建一次。
         self._runtime_pool = SimulationRuntimePool(
             self.shop,
@@ -772,41 +785,10 @@ class HybridNSGA3ALNSOptimizer:
         return self._project_candidate_to_graph_space(child, child.graph_profile, blend=0.32)
 
     def _dispatch_rule(self, candidate: CandidateParameters):
-        built_in = BUILTIN_RULES.get(candidate.seed_rule_name or "")
-
-        def _rule(op, machine, features, shop):
-            graph_values = self.graph_features.get(op.id, {})
-            score_components = {
-                "urgency": features["urgency"] / self.time_scale,
-                "slack": -features["slack"] / self.time_scale,
-                "remaining": -features["remaining"] / self.time_scale,
-                "processing_time": -features["processing_time"] / self.time_scale,
-                "priority": features["priority"] / self.priority_scale,
-                "is_main": features["is_main"],
-                "wait_time": features["wait_time"] / self.time_scale,
-                "prereq_ratio": features["prereq_ratio"],
-                "machine_load": -features["machine_busy_time"] / self.busy_scale,
-                "tooling_demand": -features["tooling_demand"],
-                "personnel_demand": -features["personnel_demand"],
-                "predecessor_depth": graph_values.get("predecessor_depth", 0.0),
-                "assembly_criticality": graph_values.get("assembly_criticality", 0.0),
-                "shared_resource_degree": -graph_values.get("shared_resource_degree", 0.0),
-                "bottleneck_adjacency": graph_values.get("bottleneck_adjacency", 0.0),
-                "due_date": -features["due_date"] / self.due_scale,
-            }
-            score = sum(
-                candidate.feature_weights.get(name, 0.0) * score_components.get(name, 0.0)
-                for name in FEATURE_NAMES
-            )
-            score += candidate.op_bias.get(op.id, 0.0)
-            if built_in is not None:
-                try:
-                    score += 0.18 * built_in(op, machine, features, shop)
-                except Exception:
-                    pass
-            return score
-
-        return _rule
+        return build_candidate_rule(
+            candidate, self.graph_features, self.time_scale,
+            self.busy_scale, self.priority_scale, self.due_scale,
+        )
 
     def _enrich_schedule(self, schedule: list[dict]) -> list[dict]:
         payload: list[dict] = []
@@ -876,6 +858,9 @@ class HybridNSGA3ALNSOptimizer:
             sim_result = simulator.run()
         finally:
             self._runtime_pool.release(runtime)
+        return self._solution_from_sim_result(candidate, sim_result, source, generation)
+
+    def _solution_from_sim_result(self, candidate: CandidateParameters, sim_result, source: str, generation: int) -> OptimizationSolution:
         schedule = self._enrich_schedule(sim_result.schedule)
         analytics = build_schedule_analytics(self.shop, sim_result)
         metrics = sim_result.to_dict()
@@ -885,6 +870,47 @@ class HybridNSGA3ALNSOptimizer:
         metrics["feasible"] = analytics.feasible
         metrics["evaluation_mode"] = "exact"
         return self._make_solution(candidate, source, generation, schedule, analytics, metrics)
+
+    def _worker_payload_bytes(self) -> bytes:
+        return pickle.dumps(
+            {
+                "shop": self.shop,
+                "graph_features": self.graph_features,
+                "scales": {
+                    "time_scale": self.time_scale,
+                    "busy_scale": self.busy_scale,
+                    "priority_scale": self.priority_scale,
+                    "due_scale": self.due_scale,
+                },
+            },
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    def _ensure_process_pool(self, worker_count: int):
+        if self._process_backend_failed or self.config.parallel_backend != "process":
+            return None
+        if self._process_pool is None:
+            try:
+                self._process_pool = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    initializer=init_worker,
+                    initargs=(self._worker_payload_bytes(),),
+                )
+            except Exception as exc:
+                logging.warning("hybrid: process pool unavailable (%s), using threads", exc)
+                self._process_backend_failed = True
+                return None
+        return self._process_pool
+
+    def _shutdown_process_pool(self) -> None:
+        if self._process_pool is not None:
+            self._process_pool.shutdown(cancel_futures=True)
+            self._process_pool = None
+
+    def _abandon_process_backend(self, exc: BaseException) -> None:
+        logging.warning("hybrid: process backend failed (%s), falling back to threads", exc)
+        self._process_backend_failed = True
+        self._shutdown_process_pool()
 
     def _evaluate_candidate(self, candidate: CandidateParameters, source: str, generation: int) -> OptimizationSolution:
         signature = candidate.signature()
@@ -950,7 +976,40 @@ class HybridNSGA3ALNSOptimizer:
         pending = list(unique_candidates.items())
         if pending:
             worker_count = self._worker_count_for_batch("exact", len(pending))
-            if worker_count > 1:
+            executor = self._ensure_process_pool(worker_count) if worker_count > 1 else None
+            if executor is not None:
+                batch_started = time.time()
+                new_exact = 0
+                try:
+                    futures = {
+                        executor.submit(run_exact_simulation, candidate): signature
+                        for signature, candidate in pending
+                    }
+                    for future in as_completed(futures):
+                        signature = futures[future]
+                        sim_result = future.result()
+                        solution = self._solution_from_sim_result(
+                            unique_candidates[signature], sim_result, source, generation,
+                        )
+                        with self.cache_lock:
+                            existing = self.exact_cache.get(signature)
+                            if existing is None:
+                                self.exact_cache[signature] = solution.clone()
+                                self.total_evaluations += 1
+                                self.exact_evaluations += 1
+                                new_exact += 1
+                                results_by_signature[signature] = solution
+                            else:
+                                results_by_signature[signature] = self._clone_solution(existing, source, generation)
+                except (BrokenProcessPool, pickle.PicklingError) as exc:
+                    self._abandon_process_backend(exc)
+                if new_exact > 0:
+                    self.exact_eval_time_total += max(0.0, time.time() - batch_started)
+                # 进程池中途失败时，未完成的候选走缓存感知的串行路径补齐
+                for signature, candidate in pending:
+                    if signature not in results_by_signature:
+                        results_by_signature[signature] = self._evaluate_candidate(candidate, source, generation)
+            elif worker_count > 1:
                 batch_started = time.time()
                 new_exact = 0
                 with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -990,6 +1049,16 @@ class HybridNSGA3ALNSOptimizer:
 
         return [self._clone_solution(results_by_signature[signature], source, generation) for signature in ordered_signatures]
 
+    def _register_approx_solution(self, signature: str, solution: OptimizationSolution, source: str, generation: int) -> OptimizationSolution:
+        with self.cache_lock:
+            existing = self.approx_cache.get(signature)
+            if existing is None:
+                self.approx_cache[signature] = solution.clone()
+                self.total_evaluations += 1
+                self.approximate_evaluations += 1
+                return solution
+            return self._clone_solution(existing, source, generation)
+
     def _parallel_evaluate_candidates_approx(
         self,
         candidates: list[CandidateParameters],
@@ -999,8 +1068,35 @@ class HybridNSGA3ALNSOptimizer:
         if not candidates:
             return []
         worker_count = self._worker_count_for_batch("approx", len(candidates))
-        if worker_count > 1:
+        executor = self._ensure_process_pool(worker_count) if worker_count > 1 else None
+        if executor is not None:
             results: list[OptimizationSolution] = []
+            remaining: list[CandidateParameters] = []
+            for candidate in candidates:
+                signature = candidate.signature()
+                with self.cache_lock:
+                    cached = self.approx_cache.get(signature)
+                if cached is not None:
+                    results.append(self._clone_solution(cached, source, generation))
+                else:
+                    remaining.append(candidate)
+            submitted = list(remaining)
+            try:
+                futures = {
+                    executor.submit(run_approx_evaluation, candidate, source, generation): candidate
+                    for candidate in remaining
+                }
+                for future in as_completed(futures):
+                    candidate = futures[future]
+                    solution = future.result()
+                    results.append(self._register_approx_solution(candidate.signature(), solution, source, generation))
+                    submitted.remove(candidate)
+            except (BrokenProcessPool, pickle.PicklingError) as exc:
+                self._abandon_process_backend(exc)
+                for candidate in submitted:
+                    results.append(self._evaluate_candidate_approx(candidate, source, generation))
+        elif worker_count > 1:
+            results = []
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = [
                     executor.submit(self._evaluate_candidate_approx, candidate, source, generation)
@@ -1515,180 +1611,184 @@ class HybridNSGA3ALNSOptimizer:
         }
 
     def run(self, progress_callback=None) -> HybridResult:
-        self.time_started = time.time()
-        baseline_name = self.config.baseline_rule_name if self.config.baseline_rule_name in BUILTIN_RULES else "ATC"
-        baseline_candidate = self._project_candidate_to_graph_space(
-            self._default_candidate(baseline_name),
-            "balanced",
-            blend=0.18,
-        )
-        self.coarse_baseline_solution = self._evaluate_candidate_approx(baseline_candidate, "baseline_approx", 0)
-        self._record_coarse_solution(self.coarse_baseline_solution)
+        try:
+            self.time_started = time.time()
+            baseline_name = self.config.baseline_rule_name if self.config.baseline_rule_name in BUILTIN_RULES else "ATC"
+            baseline_candidate = self._project_candidate_to_graph_space(
+                self._default_candidate(baseline_name),
+                "balanced",
+                blend=0.18,
+            )
+            self.coarse_baseline_solution = self._evaluate_candidate_approx(baseline_candidate, "baseline_approx", 0)
+            self._record_coarse_solution(self.coarse_baseline_solution)
 
-        init_candidates = [baseline_candidate] + self._seed_population()
-        init_limit = min(len(init_candidates), max(6, self.config.population_size))
-        init_candidates = self._filter_candidate_batch(init_candidates[: init_limit * 2], init_limit)
-        population = self._parallel_evaluate_candidates_approx(init_candidates, "init", 0)
-        if not population:
-            population = [self.coarse_baseline_solution]
-        for solution in population:
-            self._record_coarse_solution(solution)
-        population = select_survivors(population, self.specs, self.config.population_size, self.config.seed)
-        scale_map = self._objective_scale_map(self.coarse_baseline_solution)
-
-        generations_completed = 0
-        coarse_deadline = self.time_started + self.config.time_limit_s * min(max(self.config.coarse_time_ratio, 0.45), 0.9)
-        stagnation = 0
-        previous_pool_size = len(self.coarse_solution_pool)
-        if progress_callback is not None:
-            progress_callback(self._snapshot_status(0, population, time.time() - self.time_started, phase="coarse"))
-
-        for generation in range(1, self.config.generations + 1):
-            if time.time() - self.time_started >= self.config.time_limit_s:
-                break
-            if time.time() >= coarse_deadline and generation > 1:
-                break
-
-            candidate_batch = self._build_offspring_batch(population, self.config.population_size)
-            if not candidate_batch:
-                break
-            offspring = self._parallel_evaluate_candidates_approx(candidate_batch, "coarse_offspring", generation)
-            for solution in offspring:
+            init_candidates = [baseline_candidate] + self._seed_population()
+            init_limit = min(len(init_candidates), max(6, self.config.population_size))
+            init_candidates = self._filter_candidate_batch(init_candidates[: init_limit * 2], init_limit)
+            population = self._parallel_evaluate_candidates_approx(init_candidates, "init", 0)
+            if not population:
+                population = [self.coarse_baseline_solution]
+            for solution in population:
                 self._record_coarse_solution(solution)
+            population = select_survivors(population, self.specs, self.config.population_size, self.config.seed)
+            scale_map = self._objective_scale_map(self.coarse_baseline_solution)
 
-            combined = population + offspring
-            population = select_survivors(combined, self.specs, self.config.population_size, self.config.seed + generation)
-            generations_completed = generation
-            snapshot = self._snapshot_status(generation, population, time.time() - self.time_started, phase="coarse")
+            generations_completed = 0
+            coarse_deadline = self.time_started + self.config.time_limit_s * min(max(self.config.coarse_time_ratio, 0.45), 0.9)
+            stagnation = 0
+            previous_pool_size = len(self.coarse_solution_pool)
             if progress_callback is not None:
-                progress_callback(snapshot)
-            current_pool_size = len(self.coarse_solution_pool)
-            if current_pool_size <= previous_pool_size:
-                stagnation += 1
-            else:
-                stagnation = 0
-            previous_pool_size = current_pool_size
-            if (
-                generations_completed >= 2
-                and len(self.coarse_solution_pool) >= self._candidate_pool_target()
-                and stagnation >= max(1, self.config.stagnation_generations)
-            ):
-                break
+                progress_callback(self._snapshot_status(0, population, time.time() - self.time_started, phase="coarse"))
 
-        coarse_pool = self._select_coarse_candidate_pool()
-        promotions = self._select_promotions(coarse_pool)
-        self.baseline_solution = self._evaluate_builtin_rule(baseline_name, "baseline", 0)
-        self._record_solution(self.baseline_solution)
-        scale_map = self._objective_scale_map(self.baseline_solution)
-
-        if progress_callback is not None:
-            progress_callback(
-                self._snapshot_status(
-                    generations_completed,
-                    promotions or population,
-                    time.time() - self.time_started,
-                    phase="exact_promotion",
-                )
-            )
-
-        promoted_candidates = [solution.candidate.clone() for solution in promotions]
-        requested_promotions = self._budget_limited_exact_count(
-            len(promoted_candidates),
-            minimum=min(2, len(promoted_candidates)),
-        )
-        promoted_candidates = promoted_candidates[:requested_promotions]
-        promoted_exact = self._parallel_evaluate_candidates_exact(
-            promoted_candidates,
-            "promoted_exact",
-            generations_completed + 1,
-        )
-        for solution in promoted_exact:
-            self._record_solution(solution)
-
-        candidate_pool = self._select_candidate_pool()
-        elites = self._select_elites(candidate_pool)
-        refined_solutions: list[OptimizationSolution] = []
-        if progress_callback is not None:
-            progress_callback(
-                self._snapshot_status(
-                    generations_completed,
-                    elites or population,
-                    time.time() - self.time_started,
-                    phase="elite_refine",
-                )
-            )
-        refine_budget = self._budget_limited_exact_count(
-            len(elites) * max(1, self.config.alns_iterations_per_candidate) * max(1, self.config.refine_rounds),
-            minimum=0,
-        )
-        if refine_budget > 0 and elites:
-            max_elites = max(
-                1,
-                refine_budget // max(1, self.config.alns_iterations_per_candidate * max(1, self.config.refine_rounds)),
-            )
-            elites = elites[:max_elites]
-        if elites and refine_budget > 0 and time.time() - self.time_started < self.config.time_limit_s:
-            working = elites
-            for round_index in range(max(1, self.config.refine_rounds)):
+            for generation in range(1, self.config.generations + 1):
                 if time.time() - self.time_started >= self.config.time_limit_s:
                     break
-                working = self._parallel_refine_elites(
-                    working,
-                    scale_map,
-                    generations_completed + 1 + round_index,
-                )
-                for solution in working:
-                    self._record_solution(solution)
-                refined_solutions = working
+                if time.time() >= coarse_deadline and generation > 1:
+                    break
+
+                candidate_batch = self._build_offspring_batch(population, self.config.population_size)
+                if not candidate_batch:
+                    break
+                offspring = self._parallel_evaluate_candidates_approx(candidate_batch, "coarse_offspring", generation)
+                for solution in offspring:
+                    self._record_coarse_solution(solution)
+
+                combined = population + offspring
+                population = select_survivors(combined, self.specs, self.config.population_size, self.config.seed + generation)
+                generations_completed = generation
+                snapshot = self._snapshot_status(generation, population, time.time() - self.time_started, phase="coarse")
+                if progress_callback is not None:
+                    progress_callback(snapshot)
+                current_pool_size = len(self.coarse_solution_pool)
+                if current_pool_size <= previous_pool_size:
+                    stagnation += 1
+                else:
+                    stagnation = 0
+                previous_pool_size = current_pool_size
+                if (
+                    generations_completed >= 2
+                    and len(self.coarse_solution_pool) >= self._candidate_pool_target()
+                    and stagnation >= max(1, self.config.stagnation_generations)
+                ):
+                    break
+
+            coarse_pool = self._select_coarse_candidate_pool()
+            promotions = self._select_promotions(coarse_pool)
+            self.baseline_solution = self._evaluate_builtin_rule(baseline_name, "baseline", 0)
+            self._record_solution(self.baseline_solution)
+            scale_map = self._objective_scale_map(self.baseline_solution)
+
             if progress_callback is not None:
                 progress_callback(
                     self._snapshot_status(
                         generations_completed,
-                        refined_solutions,
+                        promotions or population,
                         time.time() - self.time_started,
-                        phase="finalize",
+                        phase="exact_promotion",
                     )
                 )
 
-        selected = self.archive.select_diverse(self.config.target_solution_count, self.config.seed + 701)
-        if selected:
-            vectors = [
-                [solution.objectives[spec.key] if spec.direction == "min" else -solution.objectives[spec.key] for spec in self.specs]
-                for solution in selected
-            ]
-            ranks, _ = fast_nondominated_sort(vectors)
-            for solution, rank in zip(selected, ranks):
-                solution.rank = rank
-        selected.sort(
-            key=lambda solution: (
-                solution.rank,
-                tuple(solution.objectives[spec.key] if spec.direction == "min" else -solution.objectives[spec.key] for spec in self.specs),
+            promoted_candidates = [solution.candidate.clone() for solution in promotions]
+            requested_promotions = self._budget_limited_exact_count(
+                len(promoted_candidates),
+                minimum=min(2, len(promoted_candidates)),
             )
-        )
+            promoted_candidates = promoted_candidates[:requested_promotions]
+            promoted_exact = self._parallel_evaluate_candidates_exact(
+                promoted_candidates,
+                "promoted_exact",
+                generations_completed + 1,
+            )
+            for solution in promoted_exact:
+                self._record_solution(solution)
 
-        return HybridResult(
-            objective_keys=[spec.key for spec in self.specs],
-            baseline=self._format_baseline_payload(self.baseline_solution),
-            solutions=[self._format_solution_payload(solution, self.baseline_solution) for solution in selected],
-            archive_size=len(self.archive),
-            requested_solution_count=self.config.target_solution_count,
-            found_solution_count=len(selected),
-            coarse_pool_size=len(self.coarse_solution_pool),
-            promoted_solution_count=len(promoted_exact),
-            refined_solution_count=len(refined_solutions),
-            generations_completed=generations_completed,
-            total_evaluations=self.total_evaluations,
-            approximate_evaluations=self.approximate_evaluations,
-            exact_evaluations=self.exact_evaluations,
-            elapsed_s=time.time() - self.time_started,
-            parallel_workers={
-                "base": self.parallel_workers,
-                "approx": self.approx_parallel_workers,
-                "exact": self.exact_parallel_workers,
-                "refine": self.refine_parallel_workers,
-            },
-            hypervolume_history=self.hypervolume_history,
-            status_history=self.status_history,
-            baseline_export=self._format_baseline_payload(self.baseline_solution, schedule_limit=None),
-            solutions_export=[self._format_solution_payload(solution, self.baseline_solution, schedule_limit=None) for solution in selected],
-        )
+            candidate_pool = self._select_candidate_pool()
+            elites = self._select_elites(candidate_pool)
+            refined_solutions: list[OptimizationSolution] = []
+            if progress_callback is not None:
+                progress_callback(
+                    self._snapshot_status(
+                        generations_completed,
+                        elites or population,
+                        time.time() - self.time_started,
+                        phase="elite_refine",
+                    )
+                )
+            refine_budget = self._budget_limited_exact_count(
+                len(elites) * max(1, self.config.alns_iterations_per_candidate) * max(1, self.config.refine_rounds),
+                minimum=0,
+            )
+            if refine_budget > 0 and elites:
+                max_elites = max(
+                    1,
+                    refine_budget // max(1, self.config.alns_iterations_per_candidate * max(1, self.config.refine_rounds)),
+                )
+                elites = elites[:max_elites]
+            if elites and refine_budget > 0 and time.time() - self.time_started < self.config.time_limit_s:
+                working = elites
+                for round_index in range(max(1, self.config.refine_rounds)):
+                    if time.time() - self.time_started >= self.config.time_limit_s:
+                        break
+                    working = self._parallel_refine_elites(
+                        working,
+                        scale_map,
+                        generations_completed + 1 + round_index,
+                    )
+                    for solution in working:
+                        self._record_solution(solution)
+                    refined_solutions = working
+                if progress_callback is not None:
+                    progress_callback(
+                        self._snapshot_status(
+                            generations_completed,
+                            refined_solutions,
+                            time.time() - self.time_started,
+                            phase="finalize",
+                        )
+                    )
+
+            selected = self.archive.select_diverse(self.config.target_solution_count, self.config.seed + 701)
+            if selected:
+                vectors = [
+                    [solution.objectives[spec.key] if spec.direction == "min" else -solution.objectives[spec.key] for spec in self.specs]
+                    for solution in selected
+                ]
+                ranks, _ = fast_nondominated_sort(vectors)
+                for solution, rank in zip(selected, ranks):
+                    solution.rank = rank
+            selected.sort(
+                key=lambda solution: (
+                    solution.rank,
+                    tuple(solution.objectives[spec.key] if spec.direction == "min" else -solution.objectives[spec.key] for spec in self.specs),
+                )
+            )
+
+            return HybridResult(
+                objective_keys=[spec.key for spec in self.specs],
+                baseline=self._format_baseline_payload(self.baseline_solution),
+                solutions=[self._format_solution_payload(solution, self.baseline_solution) for solution in selected],
+                archive_size=len(self.archive),
+                requested_solution_count=self.config.target_solution_count,
+                found_solution_count=len(selected),
+                coarse_pool_size=len(self.coarse_solution_pool),
+                promoted_solution_count=len(promoted_exact),
+                refined_solution_count=len(refined_solutions),
+                generations_completed=generations_completed,
+                total_evaluations=self.total_evaluations,
+                approximate_evaluations=self.approximate_evaluations,
+                exact_evaluations=self.exact_evaluations,
+                elapsed_s=time.time() - self.time_started,
+                parallel_workers={
+                    "base": self.parallel_workers,
+                    "approx": self.approx_parallel_workers,
+                    "exact": self.exact_parallel_workers,
+                    "refine": self.refine_parallel_workers,
+                },
+                hypervolume_history=self.hypervolume_history,
+                status_history=self.status_history,
+                baseline_export=self._format_baseline_payload(self.baseline_solution, schedule_limit=None),
+                solutions_export=[self._format_solution_payload(solution, self.baseline_solution, schedule_limit=None) for solution in selected],
+            )
+        finally:
+            # 进程池的生命周期与一次 run() 对齐——避免 worker 泄漏到调用方。
+            self._shutdown_process_pool()
