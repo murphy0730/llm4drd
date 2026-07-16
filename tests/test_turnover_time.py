@@ -16,6 +16,7 @@ from llm4drd.core.rules import BUILTIN_RULES
 from llm4drd.core.simulator import Simulator
 from llm4drd.data.db import InstanceStore, _float_or_default, init_db
 from llm4drd.data.template_builder import build_instance_template_bytes
+from llm4drd.knowledge.canonical import CanonicalGraphBuilder
 from llm4drd.scheduling.online import OnlineSchedulerV3
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 from llm4drd.tests.test_simulator_robustness import _build_shop, _full_calendar
@@ -516,6 +517,33 @@ class TestTurnoverValidation(unittest.TestCase):
         result = _validate_instance(shop)
         matches = [e for e in result["errors"] if "流转等待时长非法" in e["message"]]
         self.assertEqual(matches, [])
+
+
+class TestGraphNodeTurnover(unittest.TestCase):
+    """OP 节点属性须暴露 turnover_time，与既有 processing_time 并列。"""
+
+    def _op_node_attrs(self, shop: ShopFloor, operation_id: str) -> dict:
+        graph = CanonicalGraphBuilder().build(shop)
+        node_id = f"OP:{operation_id}"
+        for node in graph.nodes:
+            if node.node_id == node_id:
+                return dict(node.attrs)
+        raise AssertionError(f"node {node_id} not found in built graph")
+
+    def test_op_node_exposes_nonzero_turnover_time(self):
+        shop = _build_shop(
+            [("OP1", "turning", 5.0, [], 4.0)],
+            [("m1", "turning", _full_calendar())],
+        )
+        shop.build_indexes()
+        attrs = self._op_node_attrs(shop, "OP1")
+        self.assertEqual(attrs["turnover_time"], 4.0)
+
+    def test_op_node_exposes_zero_turnover_time_by_default(self):
+        """零回归锚点：未显式设置 turnover_time 的工序节点落 0。"""
+        shop = make_graph_context_shop()
+        attrs = self._op_node_attrs(shop, "OP-11")
+        self.assertEqual(attrs["turnover_time"], 0.0)
 
 
 if __name__ == "__main__":

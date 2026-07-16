@@ -97,6 +97,7 @@ class HeterogeneousGraphTests(unittest.TestCase):
             "OP:OP-11": {
                 "node_type": "operation", "entity_id": "OP-11", "label": "Cut",
                 "task_id": "T-11", "process_type": "cut", "processing_time": 4.0,
+                "turnover_time": 0.0,
                 "required_tooling_types": "", "required_personnel_skills": "",
                 "status": "pending", "derived_due_date": 22.0,
                 "derived_due_at": shop.time_label(22.0), "derived_start_time": 18.0,
@@ -105,6 +106,7 @@ class HeterogeneousGraphTests(unittest.TestCase):
             "OP:OP-12": {
                 "node_type": "operation", "entity_id": "OP-12", "label": "Finish",
                 "task_id": "T-11", "process_type": "cut", "processing_time": 2.0,
+                "turnover_time": 0.0,
                 "required_tooling_types": "", "required_personnel_skills": "",
                 "status": "pending", "derived_due_date": 24.0,
                 "derived_due_at": shop.time_label(24.0), "derived_start_time": 22.0,
@@ -113,6 +115,7 @@ class HeterogeneousGraphTests(unittest.TestCase):
             "OP:OP-13": {
                 "node_type": "operation", "entity_id": "OP-13", "label": "Assemble",
                 "task_id": "T-12", "process_type": "asm", "processing_time": 3.0,
+                "turnover_time": 0.0,
                 "required_tooling_types": "TL-CUT",
                 "required_personnel_skills": "SK-ASM", "status": "pending",
                 "derived_due_date": 40.0, "derived_due_at": shop.time_label(40.0),
@@ -122,6 +125,7 @@ class HeterogeneousGraphTests(unittest.TestCase):
             "OP:OP-21": {
                 "node_type": "operation", "entity_id": "OP-21", "label": "Other cut",
                 "task_id": "T-21", "process_type": "cut", "processing_time": 5.0,
+                "turnover_time": 0.0,
                 "required_tooling_types": "", "required_personnel_skills": "",
                 "status": "pending", "derived_due_date": 48.0,
                 "derived_due_at": shop.time_label(48.0), "derived_start_time": 43.0,

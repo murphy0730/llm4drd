@@ -510,6 +510,7 @@ class CanonicalGraphBuilder:
                     "task_id": operation.task_id,
                     "process_type": operation.process_type,
                     "processing_time": operation.processing_time,
+                    "turnover_time": operation.turnover_time,
                     "required_tooling_types": ";".join(operation.required_tooling_types),
                     "required_personnel_skills": ";".join(
                         operation.required_personnel_skills
