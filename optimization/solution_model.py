@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -139,10 +138,13 @@ class OptimizationSolution:
             candidate=self.candidate.clone(),
             objectives=dict(self.objectives),
             metrics=dict(self.metrics),
-            schedule=copy.deepcopy(self.schedule),
+            # schedule / analytics_summary 构建后按不可变约定共享，克隆不复制；
+            # 需要修改的调用方必须先自行 list()/dict() 复制（审计见
+            # docs/superpowers/plans/2026-07-16-sim-optimizer-performance.md Task 5）
+            schedule=self.schedule,
             feasible=self.feasible,
             schedule_signature=self.schedule_signature,
-            analytics_summary=copy.deepcopy(self.analytics_summary),
+            analytics_summary=self.analytics_summary,
             rank=self.rank,
             reference_index=self.reference_index,
             niche_distance=self.niche_distance,
