@@ -433,6 +433,30 @@ class TestExactSolverTurnover(unittest.TestCase):
             "CP-SAT 必须与仿真器同口径地满足 turnover 约束",
         )
 
+    def test_exact_clamps_gate_not_end_time_for_negative_history(self):
+        """历史完工 end_time=-2、turnover=1：闸门 = max(0, -2+1) = 0。
+
+        仿真器对 end_time + turnover 的整体做非负截断；ExactSolver 若先把
+        end_time 截为 0 再加 turnover，会得到 1，与仿真器不一致。
+        """
+        from llm4drd.optimization.exact import ExactSolver
+        shop = _build_shop(
+            [("OP1", "turning", 1.0, [], 1.0),
+             ("OP2", "milling", 1.0, ["OP1"])],
+            [("m1", "turning", _full_calendar()), ("m2", "milling", _full_calendar())],
+        )
+        op1 = shop.operations["OP1"]
+        op1.status = OpStatus.COMPLETED
+        op1.start_time = -3.0
+        op1.end_time = -2.0
+        self.assertLessEqual(shop.get_operation_flow_ready_time(shop.operations["OP2"]), 0.0)
+        result = ExactSolver(shop).solve()
+        entries = {e["op_id"]: e for e in result.schedule}
+        self.assertLessEqual(
+            entries["OP2"]["start"], 1e-6,
+            "ExactSolver 必须与仿真器一致：闸门整体截断后为 0，OP2 应从 0 开工",
+        )
+
 
 class TestOnlineSchedulerTurnover(unittest.TestCase):
     def test_probe_and_ready_gate_respect_turnover(self):

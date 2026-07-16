@@ -148,10 +148,16 @@ class ExactSolver:
         op_end_exprs: dict[str, object] = {}
         fixed_schedule: list[dict] = []
 
+        # 历史 end_time 可为负；turnover 闸门须对 end + turnover 的整体截断，
+        # 与仿真器一致，故这里同时保留未截断的真实完工时刻。
+        fixed_end_hours: dict[str, float] = {}
+
         for op in completed_ops:
+            fixed_end_hours[op.id] = self._fixed_end_hours(op)
             op_end_exprs[op.id] = model.NewConstant(int(round(self._fixed_end_hours(op, clamp_nonnegative=True) * scale)))
 
         for op in fixed_processing_ops:
+            fixed_end_hours[op.id] = self._fixed_end_hours(op)
             op_end_exprs[op.id] = model.NewConstant(int(round(self._fixed_end_hours(op, clamp_nonnegative=True) * scale)))
             fixed_schedule.append(self._fixed_schedule_entry(op, status="in_progress"))
 
@@ -278,21 +284,29 @@ class ExactSolver:
             if intervals:
                 model.AddNoOverlap(intervals)
 
+        def add_flow_precedence(start_var, predecessor_op) -> None:
+            predecessor_end = op_end_exprs.get(predecessor_op.id)
+            if predecessor_end is None:
+                return
+            if predecessor_op.id in fixed_end_hours:
+                # 固定前驱：对 end + turnover 的整体做非负截断，与仿真器闸门一致
+                gate_hours = fixed_end_hours[predecessor_op.id] + predecessor_op.turnover_time
+                model.Add(start_var >= max(0, int(round(gate_hours * scale))))
+            else:
+                model.Add(start_var >= predecessor_end + int(round(predecessor_op.turnover_time * scale)))
+
         for op in decision_ops:
             start_var = op_vars[op.id]["start"]
             for predecessor_id in op.predecessor_ops:
-                predecessor_end = op_end_exprs.get(predecessor_id)
                 predecessor = self.shop.operations.get(predecessor_id)
-                if predecessor_end is not None and predecessor is not None:
-                    model.Add(start_var >= predecessor_end + int(round(predecessor.turnover_time * scale)))
+                if predecessor is not None:
+                    add_flow_precedence(start_var, predecessor)
             for predecessor_task_id in op.predecessor_tasks:
                 predecessor_task = self.shop.tasks.get(predecessor_task_id)
                 if not predecessor_task:
                     continue
                 for predecessor_op in predecessor_task.operations:
-                    predecessor_end = op_end_exprs.get(predecessor_op.id)
-                    if predecessor_end is not None:
-                        model.Add(start_var >= predecessor_end + int(round(predecessor_op.turnover_time * scale)))
+                    add_flow_precedence(start_var, predecessor_op)
 
         makespan_var = model.NewIntVar(0, horizon, "makespan")
         all_end_exprs = list(op_end_exprs.values())
