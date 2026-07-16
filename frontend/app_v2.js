@@ -4205,8 +4205,13 @@ function renderLegacyCytoscapeGraph() {
 
 function mountGantts() {
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
-  app.ganttInstances.forEach((t) => { try { t.destroy(); } catch (_) {} });
-  app.ganttInstances = [];
+  const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
+  // Destroy only orphaned instances (canvas no longer in the active DOM); keep bound, still-visible instances intact so a redundant mountGantts call never blanks a live canvas.
+  app.ganttInstances = app.ganttInstances.filter((entry) => {
+    if (liveCanvasIds.has(entry.canvasId)) return true;
+    try { entry.timeline.destroy(); } catch (_) {}
+    return false;
+  });
   document.querySelectorAll(".page.active .gantt-canvas:not([data-bound='1'])").forEach((el) => {
     const payload = app.pendingGantts.get(el.id);
     if (!payload) return;
@@ -4231,9 +4236,10 @@ function mountGantts() {
         start: data.window.start,
         end: data.window.end,
         showTooltips: true,
+        locale: "zh-cn",
       }
     );
-    app.ganttInstances.push(timeline);
+    app.ganttInstances.push({ canvasId: el.id, timeline });
   });
 }
 
