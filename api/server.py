@@ -2099,6 +2099,17 @@ async def graph_order(order_id: str):
         raise HTTPException(404, f"图谱中不存在订单 {order_id}")
     return result
 
+@app.get("/api/graph/orders/search")
+async def graph_order_search(q: str = ""):
+    """按订单号/名称在数据库做模糊解析并返回其完整关联子图（OS_ 机器在 SQL 层过滤）。"""
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(400, "请输入订单号")
+    result = graph_store.search_order_subgraph(query)
+    if not result["order_id"]:
+        raise HTTPException(404, f"没有找到该订单：{query}")
+    return result
+
 @app.get("/api/graph/node/{node_id:path}/neighbors")
 async def node_neighbors(node_id: str):
     return graph_store.get_node_neighbors(node_id)

@@ -273,6 +273,7 @@ const api = {
   },
   getGraphEdges(limit = 80, offset = 0) { return this.json(`/graph/edges?limit=${limit}&offset=${offset}`); },
   getGraphOrder(orderId) { return this.json(`/graph/order/${encodeURIComponent(orderId)}`); },
+  searchGraphOrder(query) { return this.json(`/graph/orders/search?q=${encodeURIComponent(query)}`); },
   simulate(ruleName) { return this.json("/simulate", "POST", { rule_name: ruleName }); },
   exportSimExcel() { return this.request("/simulate/export-excel"); },
   simulateReferenceSolutions(ruleNames, objectiveKeys) {
@@ -4167,11 +4168,10 @@ function focusLegacyCytoscapeNode(nodeId, options = {}) {
 
   app.selectedGraphNodeId = node.id();
   cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
-  cy.elements().addClass("cy-dimmed");
   const neighborhood = node.neighborhood();
-  node.removeClass("cy-dimmed").addClass("cy-selected");
-  neighborhood.nodes().removeClass("cy-dimmed").addClass("cy-neighbor");
-  node.connectedEdges().removeClass("cy-dimmed").addClass("cy-neighbor-edge");
+  node.addClass("cy-selected");
+  neighborhood.nodes().addClass("cy-neighbor");
+  node.connectedEdges().addClass("cy-neighbor-edge");
 
   const { nodes, edges } = legacyGraphDataset();
   const selectedNode = nodes.find((item) => item.id === node.id()) || null;
@@ -4208,23 +4208,31 @@ function renderLegacyCytoscapeGraph() {
     <div class="surface-card graph-workbench legacy-graph-workbench">
       <div class="card-head">
         <h3>订单关联图谱</h3>
-        <p>展示当前订单的任务、工序依赖与可用资源。</p>
+        <p>从上到下展开 · 仅展示当前订单完整关联</p>
       </div>
       <div class="graph-toolbar legacy-graph-toolbar">
-        <label class="graph-search graph-order-filter">
-          <span>筛选订单</span>
-          <input type="search" data-cy-order-filter list="graph-order-options" value="${escapeHtml(selectedOrderValue)}" placeholder="输入订单 ID 或名称" autocomplete="off">
-          <datalist id="graph-order-options">
-            ${asArray(app.graphOrderOptions).map((node) => {
-              const order = normalizeGraphNode(node);
-              return `<option value="${escapeHtml(order.entity_id)}">${escapeHtml(order.label || order.entity_id)}</option>`;
-            }).join("")}
-          </datalist>
-        </label>
-        <span class="subtle-note">从上到下展开 · 仅展示当前订单完整关联</span>
-        <label class="legacy-graph-switch"><input type="checkbox" data-cy-resource-edges checked> 显示资源可行边</label>
-        <button class="btn btn-ghost" type="button" data-cy-fit>适配视图</button>
-        <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen" aria-pressed="false">全屏查看</button>
+        <div class="graph-order-bar">
+          <label class="graph-order-filter">
+            <span>筛选订单</span>
+            <select data-cy-order-select>
+              ${asArray(app.graphOrderOptions).map((node) => {
+                const order = normalizeGraphNode(node);
+                const selected = order.id === app.selectedGraphOrderId ? " selected" : "";
+                return `<option value="${escapeHtml(order.entity_id)}"${selected}>${escapeHtml(order.label || order.entity_id)}</option>`;
+              }).join("")}
+            </select>
+          </label>
+          <label class="graph-order-input">
+            <span>筛选输入框</span>
+            <input type="search" data-cy-order-input placeholder="输入订单号" autocomplete="off">
+          </label>
+          <button class="btn btn-primary" type="button" data-cy-order-search>搜索</button>
+        </div>
+        <div class="graph-toolbar-actions">
+          <label class="legacy-graph-switch"><input type="checkbox" data-cy-resource-edges checked> 显示资源可行边</label>
+          <button class="btn btn-ghost" type="button" data-cy-fit>适配视图</button>
+          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen" aria-pressed="false">全屏查看</button>
+        </div>
       </div>
       <div class="graph-stage-meta">
         <span>当前订单 ${escapeHtml(selectedOrderValue || "-")}</span>
@@ -4336,17 +4344,17 @@ function mountLegacyCytoscapeGraph() {
     container,
     elements,
     style: [
-      { selector: "node", style: { "label": "data(label)", "font-size": 9, "color": "#32485a", "text-valign": "bottom", "text-margin-y": 7, "text-max-width": 100, "text-wrap": "ellipsis", "width": 24, "height": 24, "border-width": 2, "border-color": "#ffffff" } },
+      { selector: "node", style: { "label": "data(label)", "font-size": 9, "color": "#1f3b53", "text-valign": "bottom", "text-margin-y": 7, "text-max-width": 100, "text-wrap": "ellipsis", "width": 24, "height": 24, "border-width": 2, "border-color": "#243b53" } },
       { selector: 'node[node_type="order"]', style: { "background-color": graphTypeColor("order"), "shape": "diamond", "width": 38, "height": 38, "font-size": 11, "font-weight": 700 } },
       { selector: 'node[node_type="task"]', style: { "background-color": graphTypeColor("task"), "shape": "round-rectangle", "width": 32, "height": 22 } },
       { selector: 'node[node_type="operation"]', style: { "background-color": graphTypeColor("operation"), "shape": "ellipse", "width": 19, "height": 19, "font-size": 8 } },
       { selector: 'node[node_type="machine"]', style: { "background-color": graphTypeColor("machine"), "shape": "hexagon", "width": 32, "height": 32 } },
       { selector: 'node[node_type="tooling"]', style: { "background-color": graphTypeColor("tooling"), "shape": "round-diamond", "width": 29, "height": 29 } },
       { selector: 'node[node_type="personnel"]', style: { "background-color": graphTypeColor("personnel"), "shape": "pentagon", "width": 29, "height": 29 } },
-      { selector: "edge", style: { "width": 1.2, "line-color": "#9caebe", "target-arrow-color": "#9caebe", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 0.7, "opacity": 0.62 } },
-      { selector: 'edge[edge_group="structure"]', style: { "line-color": "#0f4c81", "target-arrow-color": "#0f4c81", "opacity": 0.72 } },
+      { selector: "edge", style: { "width": 1.4, "line-color": "#5b7387", "target-arrow-color": "#5b7387", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 0.7, "opacity": 0.9 } },
+      { selector: 'edge[edge_group="structure"]', style: { "line-color": "#0f4c81", "target-arrow-color": "#0f4c81", "opacity": 0.95 } },
       { selector: 'edge[edge_type="operation_sequence"]', style: { "width": 2.4, "line-color": "#0b5f8a", "target-arrow-color": "#0b5f8a", "opacity": 0.95 } },
-      { selector: 'edge[edge_group="resource"]', style: { "line-style": "dashed", "line-color": "#b76800", "target-arrow-color": "#b76800", "opacity": 0.58 } },
+      { selector: 'edge[edge_group="resource"]', style: { "line-style": "dashed", "line-color": "#b76800", "target-arrow-color": "#b76800", "opacity": 0.8 } },
       { selector: ".cy-selected", style: { "border-width": 5, "border-color": "#102f4c", "width": 46, "height": 46, "font-size": 12, "font-weight": 700, "z-index": 9999 } },
       { selector: ".cy-neighbor", style: { "border-width": 3, "border-color": "#0f4c81", "opacity": 1, "z-index": 100 } },
       { selector: ".cy-neighbor-edge", style: { "width": 3, "opacity": 1, "z-index": 100 } },
@@ -4388,8 +4396,8 @@ function mountLegacyCytoscapeGraph() {
   const initial = cy.getElementById(app.selectedGraphNodeId || "");
   if (initial.length) {
     focusLegacyCytoscapeNode(initial.id());
-    cy.fit(initial.union(initial.neighborhood()), 70);
   }
+  cy.fit(undefined, 40);
 
   cy.on("tap", "node", (event) => {
     focusLegacyCytoscapeNode(event.target.id());
@@ -4409,31 +4417,38 @@ function mountLegacyCytoscapeGraph() {
     cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
   });
 
-  const orderFilter = root?.querySelector("[data-cy-order-filter]");
-  const applyOrderFilter = async () => {
-    const value = String(orderFilter?.value || "").trim().toLowerCase();
-    if (!value) return;
-    const orders = asArray(app.graphOrderOptions).map(normalizeGraphNode);
-    const fields = (node) => [node.id, node.entity_id, node.label].map((item) => String(item || "").toLowerCase());
-    const match = orders.find((node) => fields(node).includes(value))
-      || orders.find((node) => fields(node).some((item) => item.includes(value)));
-    if (!match) {
-      toast(`未找到订单：${orderFilter.value}`, "warning");
+  const orderSelect = root?.querySelector("[data-cy-order-select]");
+  const orderInput = root?.querySelector("[data-cy-order-input]");
+  const runOrderSearch = async (query) => {
+    const value = String(query || "").trim();
+    if (!value) {
+      toast("请输入或选择订单号", "warning");
       return;
     }
-    if (match.id === app.selectedGraphOrderId) return;
+    const currentEntityId = entityIdFromGraphId(app.selectedGraphOrderId || "");
+    if (value === app.selectedGraphOrderId || value === currentEntityId) return;
     try {
-      await loadGraphOrder(match.entity_id);
+      const payload = await api.searchGraphOrder(value);
+      app.graphNodes = asArray(payload?.nodes);
+      app.graphEdges = asArray(payload?.edges);
+      app.selectedGraphOrderId = payload?.order_id || `O:${value}`;
+      app.selectedGraphNodeId = app.selectedGraphOrderId;
+      resetGraphView({ preserveFilters: true });
       await renderCurrentPage();
     } catch (error) {
-      toast(`加载订单图谱失败：${error.message}`, "warning");
+      toast(error.message || `没有找到该订单：${value}`, "warning");
     }
   };
-  orderFilter?.addEventListener("change", applyOrderFilter);
-  orderFilter?.addEventListener("keydown", (event) => {
+  root?.querySelector("[data-cy-order-search]")?.addEventListener("click", () => {
+    runOrderSearch(String(orderInput?.value || "").trim() || String(orderSelect?.value || "").trim());
+  });
+  orderInput?.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    applyOrderFilter();
+    runOrderSearch(String(orderInput.value || "").trim() || String(orderSelect?.value || "").trim());
+  });
+  orderSelect?.addEventListener("change", (event) => {
+    runOrderSearch(event.target.value);
   });
   root?.querySelector("[data-cy-fit]")?.addEventListener("click", () => cy.fit(undefined, 40));
   root?.querySelector("[data-cy-resource-edges]")?.addEventListener("change", (event) => {
@@ -4706,14 +4721,9 @@ async function loadGraphOrder(orderId) {
 }
 
 async function initializeGraphOrderView(meta, preferredOrderId = null) {
-  const total = Number(meta?.node_type_counts?.order || 0);
-  const requests = [];
-  for (let offset = 0; offset < total; offset += 1000) {
-    requests.push(api.getGraphNodes(Math.min(1000, total - offset), offset, "order"));
-  }
-  const pages = requests.length ? await Promise.all(requests) : [];
-  app.graphOrderOptions = pages
-    .flatMap((page) => asArray(page?.nodes || page))
+  // 仅拉取有限条订单用于下拉选择；任意订单都通过搜索按钮走后端解析，不在前端全量加载/筛选。
+  const payload = await api.getGraphNodes(200, 0, "order");
+  app.graphOrderOptions = asArray(payload?.nodes || payload)
     .sort((a, b) => String(a.entity_id || a.node_id).localeCompare(String(b.entity_id || b.node_id), "zh-CN", { numeric: true }));
   if (!app.graphOrderOptions.length) {
     app.graphNodes = [];

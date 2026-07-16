@@ -965,6 +965,95 @@ class GraphStore:
                 edge["attrs"] = json.loads(edge["attrs"]) if edge["attrs"] else {}
             return {"outgoing": outgoing, "incoming": incoming}
 
+    def _build_order_subgraph(self, conn, order_node_id: str) -> dict:
+        """根据订单节点 ID，拉取其任务/工序/资源与相关边；OS_ 开头的机器在 SQL 层直接过滤。"""
+        task_rows = conn.execute(
+            "SELECT target FROM graph_edges WHERE source=? AND edge_type='order_has_task'",
+            (order_node_id,),
+        ).fetchall()
+        task_ids = [row["target"] for row in task_rows]
+
+        operation_ids = []
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            operation_ids = [
+                row["target"]
+                for row in conn.execute(
+                    f"SELECT target FROM graph_edges WHERE source IN ({placeholders}) AND edge_type='task_has_operation'",
+                    task_ids,
+                ).fetchall()
+            ]
+
+        resource_ids = []
+        if operation_ids:
+            placeholders = ",".join("?" for _ in operation_ids)
+            # 机器：在 SQL 层排除 OS_ 开头的机器（按 entity_id 与 node_id 双判），其余资源不过滤
+            machine_rows = conn.execute(
+                f"""
+                SELECT DISTINCT e.target FROM graph_edges e
+                WHERE e.source IN ({placeholders})
+                  AND e.edge_type = 'machine_eligible'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM graph_nodes n
+                    WHERE n.node_id = e.target
+                      AND n.node_type = 'machine'
+                      AND (n.entity_id LIKE 'OS_%' OR n.node_id LIKE 'OS_%')
+                  )
+                """,
+                operation_ids,
+            ).fetchall()
+            resource_ids += [row["target"] for row in machine_rows]
+            other_rows = conn.execute(
+                f"""
+                SELECT DISTINCT target FROM graph_edges
+                WHERE source IN ({placeholders})
+                  AND edge_type IN ('tooling_eligible','personnel_eligible')
+                """,
+                operation_ids,
+            ).fetchall()
+            resource_ids += [row["target"] for row in other_rows]
+
+        node_ids = list(dict.fromkeys([order_node_id, *task_ids, *operation_ids, *resource_ids]))
+        placeholders = ",".join("?" for _ in node_ids)
+        nodes = [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT * FROM graph_nodes WHERE node_id IN ({placeholders}) ORDER BY rowid",
+                node_ids,
+            ).fetchall()
+        ]
+        edges = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT * FROM graph_edges
+                WHERE source IN ({placeholders}) AND target IN ({placeholders})
+                ORDER BY id
+                """,
+                [*node_ids, *node_ids],
+            ).fetchall()
+        ]
+        for item in nodes + edges:
+            item["attrs"] = json.loads(item["attrs"]) if item["attrs"] else {}
+        return {"order_id": order_node_id, "nodes": nodes, "edges": edges}
+
+    def _find_order_row(self, conn, query: str):
+        """按订单号精确/模糊解析订单节点（精确 entity_id/node_id 优先，再 LIKE 模糊匹配）。"""
+        q = (query or "").strip()
+        if not q:
+            return None
+        exact = conn.execute(
+            "SELECT * FROM graph_nodes WHERE node_type='order' AND (entity_id=? OR node_id=? OR node_id=?) LIMIT 1",
+            (q, q, f"O:{q}"),
+        ).fetchone()
+        if exact:
+            return exact
+        like = f"%{q}%"
+        return conn.execute(
+            "SELECT * FROM graph_nodes WHERE node_type='order' AND (entity_id LIKE ? OR node_id LIKE ? OR attrs LIKE ?) ORDER BY entity_id LIMIT 1",
+            (like, like, like),
+        ).fetchone()
+
     def load_order_subgraph(self, order_id: str) -> dict:
         """Load one order, its tasks/operations, and resources used by those operations."""
         with get_db(self.db_path) as conn:
@@ -979,60 +1068,12 @@ class GraphStore:
             ).fetchone()
             if not order_row:
                 return {"order_id": None, "nodes": [], "edges": []}
+            return self._build_order_subgraph(conn, order_row["node_id"])
 
-            order_node_id = order_row["node_id"]
-            task_rows = conn.execute(
-                "SELECT target FROM graph_edges WHERE source=? AND edge_type='order_has_task'",
-                (order_node_id,),
-            ).fetchall()
-            task_ids = [row["target"] for row in task_rows]
-
-            operation_ids = []
-            if task_ids:
-                placeholders = ",".join("?" for _ in task_ids)
-                operation_ids = [
-                    row["target"]
-                    for row in conn.execute(
-                        f"SELECT target FROM graph_edges WHERE source IN ({placeholders}) AND edge_type='task_has_operation'",
-                        task_ids,
-                    ).fetchall()
-                ]
-
-            resource_ids = []
-            if operation_ids:
-                placeholders = ",".join("?" for _ in operation_ids)
-                resource_ids = [
-                    row["target"]
-                    for row in conn.execute(
-                        f"""
-                        SELECT DISTINCT target FROM graph_edges
-                        WHERE source IN ({placeholders})
-                          AND edge_type IN ('machine_eligible','tooling_eligible','personnel_eligible')
-                        """,
-                        operation_ids,
-                    ).fetchall()
-                ]
-
-            node_ids = list(dict.fromkeys([order_node_id, *task_ids, *operation_ids, *resource_ids]))
-            placeholders = ",".join("?" for _ in node_ids)
-            nodes = [
-                dict(row)
-                for row in conn.execute(
-                    f"SELECT * FROM graph_nodes WHERE node_id IN ({placeholders}) ORDER BY rowid",
-                    node_ids,
-                ).fetchall()
-            ]
-            edges = [
-                dict(row)
-                for row in conn.execute(
-                    f"""
-                    SELECT * FROM graph_edges
-                    WHERE source IN ({placeholders}) AND target IN ({placeholders})
-                    ORDER BY id
-                    """,
-                    [*node_ids, *node_ids],
-                ).fetchall()
-            ]
-            for item in nodes + edges:
-                item["attrs"] = json.loads(item["attrs"]) if item["attrs"] else {}
-            return {"order_id": order_node_id, "nodes": nodes, "edges": edges}
+    def search_order_subgraph(self, query: str) -> dict:
+        """按订单号/名称模糊解析订单并返回其子图（OS_ 机器在 SQL 层过滤）。无匹配返回空子图。"""
+        with get_db(self.db_path) as conn:
+            order_row = self._find_order_row(conn, query)
+            if not order_row:
+                return {"order_id": None, "nodes": [], "edges": []}
+            return self._build_order_subgraph(conn, order_row["node_id"])

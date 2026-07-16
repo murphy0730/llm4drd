@@ -40,6 +40,56 @@ class HeterogeneousGraphTests(unittest.TestCase):
         self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1", "M:M-1"})
         self.assertEqual(len(result["edges"]), 3)
 
+    def _build_order_with_machine(self, machine_node_id, machine_entity_id):
+        graph = HeterogeneousGraph()
+        for node_id, node_type, entity_id in [
+            ("O:O-1", "order", "O-1"),
+            ("T:T-1", "task", "T-1"),
+            ("OP:OP-1", "operation", "OP-1"),
+            (machine_node_id, "machine", machine_entity_id),
+        ]:
+            graph.graph.add_node(
+                node_id, node_type=node_type, entity_id=entity_id, label=entity_id
+            )
+        graph.graph.add_edge("O:O-1", "T:T-1", edge_type="order_has_task")
+        graph.graph.add_edge("T:T-1", "OP:OP-1", edge_type="task_has_operation")
+        graph.graph.add_edge("OP:OP-1", machine_node_id, edge_type="machine_eligible")
+        return graph
+
+    def test_order_subgraph_filters_os_machines(self):
+        # 机器 entity_id 以 OS_ 开头，子图应在 SQL 层过滤掉该机器及其关联边。
+        graph = self._build_order_with_machine("M:OS_stub", "OS_stub")
+        with TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "graph.db")
+            init_db(db_path)
+            store = GraphStore(db_path)
+            store.save_graph(graph)
+            result = store.load_order_subgraph("O-1")
+
+        node_ids = {node["node_id"] for node in result["nodes"]}
+        self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1"})
+        self.assertTrue(all(edge["target"] != "M:OS_stub" for edge in result["edges"]))
+
+    def test_search_order_subgraph_resolves_and_filters_os_machines(self):
+        graph = self._build_order_with_machine("M:OS_stub", "OS_stub")
+        with TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "graph.db")
+            init_db(db_path)
+            store = GraphStore(db_path)
+            store.save_graph(graph)
+            # 精确解析 + 模糊解析都应命中，且 OS_ 机器被过滤。
+            exact = store.search_order_subgraph("O-1")
+            fuzzy = store.search_order_subgraph("O")
+            missing = store.search_order_subgraph("not-exist")
+
+        self.assertEqual(exact["order_id"], "O:O-1")
+        self.assertEqual(fuzzy["order_id"], "O:O-1")
+        for result in (exact, fuzzy):
+            node_ids = {node["node_id"] for node in result["nodes"]}
+            self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1"})
+        self.assertIsNone(missing["order_id"])
+        self.assertEqual(missing["nodes"], [])
+
     def test_operation_predecessor_tasks_create_all_task_level_edges(self):
         predecessor_ids = ["T-P1", "T-P2", "T-P3"]
         target_task = Task(
