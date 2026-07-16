@@ -206,7 +206,56 @@ def init_db(db_path: str = DB_PATH):
                 total_edges INTEGER DEFAULT 0,
                 node_type_counts TEXT DEFAULT '{}',
                 edge_type_counts TEXT DEFAULT '{}',
-                created_at REAL DEFAULT (strftime('%s','now'))
+                created_at REAL DEFAULT (strftime('%s','now')),
+                instance_hash TEXT DEFAULT '',
+                topology_hash TEXT DEFAULT '',
+                feature_hash TEXT DEFAULT '',
+                schema_version INTEGER DEFAULT 0,
+                builder_version TEXT DEFAULT '',
+                build_time_ms REAL DEFAULT 0,
+                invalid_reason TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS graph_context_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                instance_hash TEXT NOT NULL,
+                topology_hash TEXT NOT NULL,
+                feature_hash TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                builder_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                operation_count INTEGER NOT NULL,
+                relation_count INTEGER NOT NULL,
+                feature_count INTEGER NOT NULL,
+                build_time_ms REAL NOT NULL,
+                created_at REAL NOT NULL,
+                invalid_reason TEXT DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS graph_entity_index (
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                PRIMARY KEY (entity_type, entity_id),
+                UNIQUE (entity_type, ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS graph_context_relations (
+                relation_type TEXT NOT NULL,
+                source_ordinal INTEGER NOT NULL,
+                target_ordinal INTEGER NOT NULL,
+                PRIMARY KEY (relation_type, source_ordinal, target_ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS graph_operation_features (
+                op_ordinal INTEGER PRIMARY KEY,
+                predecessor_depth REAL NOT NULL,
+                assembly_criticality REAL NOT NULL,
+                shared_resource_degree REAL NOT NULL,
+                bottleneck_adjacency REAL NOT NULL,
+                graph_out_degree REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS graph_operation_groups (
+                group_type TEXT NOT NULL,
+                group_key TEXT NOT NULL,
+                op_ordinal INTEGER NOT NULL,
+                PRIMARY KEY (group_type, group_key, op_ordinal)
             );
             CREATE TABLE IF NOT EXISTS machine_downtime (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,6 +271,12 @@ def init_db(db_path: str = DB_PATH):
             CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type);
             CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(source);
             CREATE INDEX IF NOT EXISTS idx_graph_edges_tgt ON graph_edges(target);
+            CREATE INDEX IF NOT EXISTS idx_graph_context_rel_src
+                ON graph_context_relations(relation_type, source_ordinal);
+            CREATE INDEX IF NOT EXISTS idx_graph_context_rel_tgt
+                ON graph_context_relations(relation_type, target_ordinal);
+            CREATE INDEX IF NOT EXISTS idx_graph_operation_groups_lookup
+                ON graph_operation_groups(group_type, group_key);
             """
         )
         _safe_add_column(conn, "inst_operations", "required_tooling_types", "TEXT DEFAULT ''")
@@ -233,6 +288,14 @@ def init_db(db_path: str = DB_PATH):
         _safe_add_column(conn, "inst_operations", "initial_assigned_machine_id", "TEXT DEFAULT ''")
         _safe_add_column(conn, "inst_operations", "initial_assigned_tooling_ids", "TEXT DEFAULT ''")
         _safe_add_column(conn, "inst_operations", "initial_assigned_personnel_ids", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "graph_meta", "instance_hash", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "graph_meta", "topology_hash", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "graph_meta", "feature_hash", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "graph_meta", "schema_version", "INTEGER DEFAULT 0")
+        _safe_add_column(conn, "graph_meta", "builder_version", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "graph_meta", "build_time_ms", "REAL DEFAULT 0")
+        _safe_add_column(conn, "graph_meta", "invalid_reason", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "graph_context_meta", "invalid_reason", "TEXT DEFAULT ''")
         conn.execute(
             "INSERT OR IGNORE INTO planning_context (id, plan_start_at) VALUES (1, ?)",
             (isoformat_or_none(default_plan_start()),),
@@ -903,7 +966,20 @@ class GraphStore:
                     progress_callback(written, total_rows)
 
             stats = graph_wrapper.get_graph_stats()
-            conn.execute("INSERT OR REPLACE INTO graph_meta VALUES (1,?,?,?,?,?)", (stats["total_nodes"], stats["total_edges"], json.dumps(stats["node_types"]), json.dumps(stats["edge_types"]), time.time()))
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO graph_meta
+                (id, total_nodes, total_edges, node_type_counts, edge_type_counts, created_at)
+                VALUES (1,?,?,?,?,?)
+                """,
+                (
+                    stats["total_nodes"],
+                    stats["total_edges"],
+                    json.dumps(stats["node_types"]),
+                    json.dumps(stats["edge_types"]),
+                    time.time(),
+                ),
+            )
 
     def load_nodes(self, node_type: str = None, search: str = None, limit: int = 200, offset: int = 0) -> tuple[int, list[dict]]:
         with get_db(self.db_path) as conn:
