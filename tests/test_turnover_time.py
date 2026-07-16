@@ -676,6 +676,20 @@ class TestTurnoverValidation(unittest.TestCase):
                 with self.assertRaises(HTTPException):
                     asyncio.run(update_operation("OP1", {"turnover_time": bad}))
 
+    def test_update_operation_rejects_malformed_turnover_with_400(self):
+        """非数字输入须报 400，而不是 float() 抛 ValueError/TypeError 冒泡成 500。"""
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from llm4drd.api.server import update_operation
+
+        for bad in ("abc", {"x": 1}, [1, 2]):
+            with self.subTest(turnover=bad):
+                with self.assertRaises(HTTPException) as ctx:
+                    asyncio.run(update_operation("OP1", {"turnover_time": bad}))
+                self.assertEqual(ctx.exception.status_code, 400)
+
 
 class TestGraphNodeTurnover(unittest.TestCase):
     """OP 节点属性须暴露 turnover_time，与既有 processing_time 并列。"""

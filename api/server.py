@@ -1385,7 +1385,10 @@ async def update_task(task_id: str, data: dict):
 async def update_operation(op_id: str, data: dict):
     global shop
     if str(data.get("turnover_time", "")).strip():
-        turnover_value = float(data["turnover_time"])
+        try:
+            turnover_value = float(data["turnover_time"])
+        except (TypeError, ValueError):
+            turnover_value = float("nan")
         if not (math.isfinite(turnover_value) and turnover_value >= 0):
             raise HTTPException(400, f"流转等待时长非法（{data['turnover_time']}），必须是不小于 0 的有限数")
     initial_start_time = datetime_to_offset_hours(_plan_start_ref(), data.get("initial_start_at", data.get("initial_start_time")))
