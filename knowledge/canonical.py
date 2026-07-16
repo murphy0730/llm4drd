@@ -12,7 +12,7 @@ from ..core.models import ShopFloor
 
 ScalarValue: TypeAlias = str | int | float | bool | None
 GRAPH_SCHEMA_VERSION = 1
-GRAPH_BUILDER_VERSION = "canonical-v1"
+GRAPH_BUILDER_VERSION = "canonical-v2"
 
 
 @dataclass(frozen=True)
@@ -189,6 +189,9 @@ def _normalized_instance_payload(shop: ShopFloor) -> dict:
                 "processing_time": _finite(
                     operation.processing_time, f"operations.{operation_id}.processing_time"
                 ),
+                "turnover_time": _finite(
+                    operation.turnover_time, f"operations.{operation_id}.turnover_time"
+                ),
                 "predecessor_ops": sorted(operation.predecessor_ops),
                 "predecessor_tasks": sorted(operation.predecessor_tasks),
                 "eligible_machine_ids": sorted(operation.eligible_machine_ids),
@@ -311,6 +314,9 @@ def _normalized_feature_payload(shop: ShopFloor) -> dict:
                 "process_type": operation.process_type,
                 "processing_time": _finite(
                     operation.processing_time, f"operations.{operation_id}.processing_time"
+                ),
+                "turnover_time": _finite(
+                    operation.turnover_time, f"operations.{operation_id}.turnover_time"
                 ),
                 "predecessor_ops": sorted(operation.predecessor_ops),
                 "predecessor_tasks": sorted(operation.predecessor_tasks),

@@ -379,6 +379,7 @@ L3：CanonicalGraphBuilder 完整重建
 ### 7.3 feature_hash 输入
 
 - 加工时间；
+- 流转等待时间；
 - 订单和任务交期；
 - 发布时间；
 - 优先级；

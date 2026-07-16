@@ -26,6 +26,21 @@ class GraphFingerprintTests(unittest.TestCase):
         self.assertEqual(a.topology_hash, b.topology_hash)
         self.assertNotEqual(a.feature_hash, b.feature_hash)
 
+    def test_turnover_time_changes_feature_not_topology(self):
+        """turnover_time 进入 instance_hash/feature_hash 输入清单，但不改变 topology_hash。
+
+        对应 docs/superpowers/specs/2026-07-16-unified-graph-context-design.md §7.3：
+        流转等待时间与加工时间并列为 feature_hash 输入，不改变任何边的存在性。
+        """
+        left = make_graph_context_shop()
+        right = copy.deepcopy(left)
+        right.operations["OP-11"].turnover_time = 2.0
+        a = compute_graph_fingerprint(left)
+        b = compute_graph_fingerprint(right)
+        self.assertNotEqual(a.instance_hash, b.instance_hash)
+        self.assertEqual(a.topology_hash, b.topology_hash)
+        self.assertNotEqual(a.feature_hash, b.feature_hash)
+
     def test_predecessor_change_changes_topology(self):
         left = make_graph_context_shop()
         right = copy.deepcopy(left)
