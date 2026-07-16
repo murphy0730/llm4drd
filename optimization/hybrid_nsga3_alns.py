@@ -10,6 +10,7 @@ from threading import Lock
 
 from ..core.rules import BUILTIN_RULES
 from ..core.simulator import Simulator
+from ..knowledge.context import GraphContext, compare_legacy_context
 from ..knowledge.graph import HeterogeneousGraph
 from .alns_core import ALNSCore
 from .approx_eval import ApproximateScheduleEvaluator
@@ -227,16 +228,40 @@ def build_legacy_graph_features(shop, graph) -> dict[str, dict[str, float]]:
 
 
 class HybridNSGA3ALNSOptimizer:
-    def __init__(self, shop, config: HybridConfig):
+    def __init__(
+        self,
+        shop,
+        config: HybridConfig,
+        graph_context: GraphContext | None = None,
+        graph_context_mode="legacy",
+    ):
         self.shop = shop
         self.shop.build_indexes()
         self.config = config
+        self.graph_context_mode = getattr(
+            graph_context_mode, "value", graph_context_mode
+        )
+        if self.graph_context_mode not in {"legacy", "shadow", "active"}:
+            raise ValueError(f"invalid graph context mode: {self.graph_context_mode}")
+        if self.graph_context_mode in {"shadow", "active"} and graph_context is None:
+            raise ValueError(
+                f"GraphContext is required for {self.graph_context_mode} mode"
+            )
+        self.graph_context = graph_context
+        self.graph_context_diff = None
+        self.operation_order_rank = {
+            op_id: rank for rank, op_id in enumerate(self.shop.operations)
+        }
         self.specs = validate_objective_selection(config.objective_keys)
         self.rng = random.Random(config.seed)
         self.archive = ParetoArchive(self.specs)
-        self.graph_model = HeterogeneousGraph()
-        self.graph_model.build_from_shopfloor(self.shop)
-        self.graph = self.graph_model.graph
+        if self.graph_context_mode == "active":
+            self.graph_model = None
+            self.graph = None
+        else:
+            self.graph_model = HeterogeneousGraph()
+            self.graph_model.build_from_shopfloor(self.shop)
+            self.graph = self.graph_model.graph
         self.exact_cache: dict[str, OptimizationSolution] = {}
         self.approx_cache: dict[str, OptimizationSolution] = {}
         self.solution_pool: dict[str, OptimizationSolution] = {}
@@ -263,7 +288,17 @@ class HybridNSGA3ALNSOptimizer:
         self.due_scale = max(due_dates, default=self.time_scale)
         self.priority_scale = max(priorities, default=1)
         self.busy_scale = max(self.time_scale * max(1, len(self.shop.machines)), 1.0)
-        self.graph_features = self._build_graph_features()
+        if self.graph_context_mode == "active":
+            context_features = graph_context.feature_view_by_operation_id()
+            self.graph_features = {
+                op_id: context_features[op_id] for op_id in self.shop.operations
+            }
+        else:
+            self.graph_features = self._build_graph_features()
+        if self.graph_context_mode == "shadow":
+            self.graph_context_diff = compare_legacy_context(
+                self.shop, graph_context
+            )
         self.graph_guides = self._build_graph_guides()
         self.approx_evaluator = ApproximateScheduleEvaluator(
             self.shop,
@@ -332,6 +367,34 @@ class HybridNSGA3ALNSOptimizer:
     def _build_graph_features(self) -> dict[str, dict[str, float]]:
         return build_legacy_graph_features(self.shop, self.graph)
 
+    def _legacy_related_operations(self, current_id: str) -> list[str]:
+        op = self.shop.operations[current_id]
+        task = self.shop.tasks[op.task_id]
+        related = list(op.predecessor_ops)
+        related.extend(
+            other.id for other in task.operations if other.id != current_id
+        )
+        for other_id, other in self.shop.operations.items():
+            if other_id == current_id:
+                continue
+            if other.process_type == op.process_type:
+                related.append(other_id)
+            if set(other.required_tooling_types) & set(op.required_tooling_types):
+                related.append(other_id)
+            if set(other.required_personnel_skills) & set(
+                op.required_personnel_skills
+            ):
+                related.append(other_id)
+        node_id = f"OP:{current_id}"
+        if self.graph.has_node(node_id):
+            for predecessor in self.graph.predecessors(node_id):
+                if predecessor.startswith("OP:"):
+                    related.append(predecessor[3:])
+            for successor in self.graph.successors(node_id):
+                if successor.startswith("OP:"):
+                    related.append(successor[3:])
+        return related
+
     def _expand_operation_cluster(self, seed_ops: list[str], max_size: int) -> list[str]:
         cluster: list[str] = []
         seen: set[str] = set()
@@ -344,31 +407,32 @@ class HybridNSGA3ALNSOptimizer:
             seen.add(current_id)
             cluster.append(current_id)
             op = self.shop.operations[current_id]
-            task = self.shop.tasks[op.task_id]
-
-            related = list(op.predecessor_ops)
-            related.extend(
-                other.id
-                for other in task.operations
-                if other.id != current_id
-            )
-            for other_id, other in self.shop.operations.items():
-                if other_id == current_id:
-                    continue
-                if other.process_type == op.process_type:
-                    related.append(other_id)
-                if set(other.required_tooling_types) & set(op.required_tooling_types):
-                    related.append(other_id)
-                if set(other.required_personnel_skills) & set(op.required_personnel_skills):
-                    related.append(other_id)
-            node_id = f"OP:{current_id}"
-            if self.graph.has_node(node_id):
-                for predecessor in self.graph.predecessors(node_id):
-                    if predecessor.startswith("OP:"):
-                        related.append(predecessor[3:])
-                for successor in self.graph.successors(node_id):
-                    if successor.startswith("OP:"):
-                        related.append(successor[3:])
+            if self.graph_context_mode == "active":
+                related = list(self.graph_context.predecessors(current_id))
+                related.extend(self.graph_context.successors(current_id))
+                related.extend(
+                    self.graph_context.operations_in_group(
+                        "process_type", op.process_type
+                    )
+                )
+                for tooling_type in op.required_tooling_types:
+                    related.extend(
+                        self.graph_context.operations_in_group(
+                            "tooling_type", tooling_type
+                        )
+                    )
+                for skill_id in op.required_personnel_skills:
+                    related.extend(
+                        self.graph_context.operations_in_group(
+                            "personnel_skill", skill_id
+                        )
+                    )
+                related = sorted(
+                    dict.fromkeys(related),
+                    key=self.operation_order_rank.__getitem__,
+                )
+            else:
+                related = self._legacy_related_operations(current_id)
             for op_id in related:
                 if len(cluster) >= max_size:
                     break

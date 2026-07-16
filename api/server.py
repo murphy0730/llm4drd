@@ -22,7 +22,11 @@ from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore, shifts_
 from ..data.graph_artifact_store import GraphArtifactStore
 from ..data.template_builder import build_instance_template_bytes
 from ..knowledge.canonical import compute_graph_fingerprint
-from ..knowledge.context_service import GraphContextService
+from ..knowledge.context_service import (
+    GraphContextMode,
+    GraphContextService,
+    resolve_graph_context_mode,
+)
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
 from ..scheduling.online import OnlineSchedulerV3
 from ..core.time_utils import datetime_to_offset_hours
@@ -2706,6 +2710,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
         raise HTTPException(400, "请先生成实例")
 
     current_shop = inst_store.build_shopfloor() if inst_store.has_data() else shop
+    graph_context_mode = resolve_graph_context_mode()
     task_id = str(uuid.uuid4())[:8]
     _latest_hybrid_task_id = task_id
     _hybrid_tasks[task_id] = {
@@ -2729,11 +2734,36 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
         "history": [],
         "result": None,
         "reference_solutions": [],
+        "graph_context_mode": graph_context_mode.value,
+        "graph_context": None,
     }
 
     def _run():
         global _latest_hybrid_task_id
         try:
+            graph_context = None
+            graph_context_diagnostics = None
+            if graph_context_mode != GraphContextMode.LEGACY:
+                task = _hybrid_tasks[task_id]
+                task["phase"] = "graph_context_loading"
+                task["message"] = "正在加载或构建统一图上下文"
+                task["updated_at"] = time.time()
+                graph_context, graph_context_diagnostics = (
+                    graph_context_service.get_or_build(
+                        current_shop,
+                        current_fingerprint_provider=lambda: compute_graph_fingerprint(
+                            _active_shop()
+                        ),
+                    )
+                )
+                task["graph_context"] = _graph_context_diagnostics_payload(
+                    graph_context_diagnostics
+                )
+                if graph_context_diagnostics.cache_level == "built":
+                    task["phase"] = "graph_context_building"
+                    task["message"] = "统一图上下文已构建并完成完整性校验"
+                task["updated_at"] = time.time()
+
             optimizer = HybridNSGA3ALNSOptimizer(
                 current_shop,
                 HybridConfig(
@@ -2757,7 +2787,22 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                     seed=req.seed,
                     baseline_rule_name=req.baseline_rule_name,
                 ),
+                graph_context,
+                graph_context_mode,
             )
+            if optimizer.graph_context_diff is not None:
+                _hybrid_tasks[task_id]["graph_context_diff"] = {
+                    "total_differences": optimizer.graph_context_diff.total_differences,
+                    "relation_differences": list(
+                        optimizer.graph_context_diff.relation_differences
+                    ),
+                    "feature_differences": list(
+                        optimizer.graph_context_diff.feature_differences
+                    ),
+                    "group_differences": list(
+                        optimizer.graph_context_diff.group_differences
+                    ),
+                }
 
             def _progress(snapshot: dict):
                 task = _hybrid_tasks[task_id]
@@ -2788,6 +2833,14 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             result = optimizer.run(progress_callback=_progress)
             payload = result.to_dict()
             export_payload = result.to_export_dict()
+            if graph_context_diagnostics is not None:
+                graph_context_payload = _graph_context_diagnostics_payload(
+                    graph_context_diagnostics
+                )
+                payload["graph_context"] = graph_context_payload
+                export_payload["graph_context"] = graph_context_payload
+            payload["graph_context_mode"] = graph_context_mode.value
+            export_payload["graph_context_mode"] = graph_context_mode.value
             _hybrid_tasks[task_id]["status"] = "done"
             _hybrid_tasks[task_id]["phase"] = "done"
             _hybrid_tasks[task_id]["message"] = "优化完成，方案已可用于评审"
@@ -2846,6 +2899,9 @@ async def optimize_hybrid_status(task_id: str):
         "error": task.get("error"),
         "error_type": task.get("error_type"),
         "technical_detail": task.get("technical_detail"),
+        "graph_context_mode": task.get("graph_context_mode", "legacy"),
+        "graph_context": task.get("graph_context"),
+        "graph_context_diff": task.get("graph_context_diff"),
     }
 
 @app.get("/api/optimize/hybrid/result/{task_id}")
@@ -2866,6 +2922,7 @@ async def optimize_hybrid_result(task_id: str):
                 "feasible_ratio": task.get("feasible_ratio", 0.0),
                 "hypervolume": task.get("hypervolume", 0.0),
                 "elapsed_s": task.get("elapsed_s", 0.0),
+                "graph_context": task.get("graph_context"),
             },
         }
     return {
