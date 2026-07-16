@@ -70,10 +70,10 @@ a {
 .topbar {
   height: var(--topbar-h);
   display: grid;
-  grid-template-columns: minmax(280px, 1.5fr) minmax(220px, 1fr) minmax(320px, 1fr) auto;
+  grid-template-columns: minmax(260px, 1.25fr) minmax(200px, 0.85fr) minmax(460px, 1.6fr);
   gap: 18px;
   align-items: center;
-  padding: 18px 24px;
+  padding: 14px 24px;
   background: rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--line);
@@ -147,29 +147,29 @@ a {
 
 .topbar-status {
   display: grid;
-  grid-template-columns: repeat(3, minmax(90px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .status-box {
-  padding: 10px 12px;
-  border-radius: 14px;
+  padding: 8px 10px;
+  border-radius: 12px;
   background: rgba(243, 247, 251, 0.95);
   border: 1px solid var(--line);
 }
 
 .status-box span {
   display: block;
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   color: var(--text-faint);
 }
 
 .status-box strong {
   display: block;
-  margin-top: 6px;
-  font-size: 15px;
+  margin-top: 4px;
+  font-size: 14px;
 }
 
 .workspace {
@@ -294,16 +294,24 @@ a {
 .main-stage {
   min-width: 0;
   overflow: auto;
-  padding: 22px;
+  padding: 0;
 }
 
 .page {
   display: none;
   min-width: 0;
+  padding: 22px;
 }
 
 .page.active {
   display: block;
+}
+
+/* 贴顶贴左：数据导入 / 仿真与洞察 / 优化求解 / 方案评审 */
+#page-new-scene,
+#page-workflow,
+#page-review {
+  padding: 0;
 }
 
 .page-header {
@@ -1805,7 +1813,7 @@ a {
   }
 
   .topbar {
-    grid-template-columns: minmax(240px, 1.4fr) minmax(190px, 1fr) minmax(250px, 1fr);
+    grid-template-columns: minmax(220px, 1.2fr) minmax(170px, 0.8fr) minmax(440px, 1.5fr);
   }
 }
 
@@ -1837,6 +1845,10 @@ a {
   }
 
   .main-stage {
+    padding: 0;
+  }
+
+  .page {
     padding: 16px;
   }
 
@@ -1996,4 +2008,101 @@ a {
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* -- vis-timeline 融入 design-system -- */
+.gantt-canvas { width: 100%; min-height: 220px; }
+.gantt-canvas .vis-timeline {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  font-family: var(--font);
+  background: var(--surface);
+  overflow: hidden;
+}
+.gantt-canvas .vis-panel,
+.gantt-canvas .vis-labelset .vis-label,
+.gantt-canvas .vis-time-axis .vis-grid.vis-minor { border-color: var(--line); }
+.gantt-canvas .vis-time-axis .vis-text,
+.gantt-canvas .vis-labelset .vis-label { color: var(--text-soft); }
+.gantt-canvas .vis-labelset .vis-label .vis-inner { font-weight: 600; color: var(--text); padding: 4px 8px; }
+
+/* 条块：复用现有状态渐变，去掉 vis 默认边框 */
+.gantt-canvas .vis-item {
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-size: 11px;
+  box-shadow: var(--shadow-sm);
+}
+.gantt-canvas .vis-item.status-completed { background: linear-gradient(135deg, #7e8da0, #566779); }
+.gantt-canvas .vis-item.status-processing { background: linear-gradient(135deg, var(--accent-soft), var(--accent)); }
+.gantt-canvas .vis-item.status-future { background: linear-gradient(135deg, var(--primary), #3479b4); }
+.gantt-canvas .vis-item .vis-item-content { padding: 2px 6px; font-weight: 700; }
+
+/* 背景遮罩：复用现有斜纹 */
+.gantt-canvas .vis-item.vis-background.offshift { background: repeating-linear-gradient(135deg, rgba(123,142,163,0.55), rgba(123,142,163,0.55) 8px, rgba(123,142,163,0.28) 8px, rgba(123,142,163,0.28) 16px); }
+.gantt-canvas .vis-item.vis-background.planned { background: repeating-linear-gradient(135deg, rgba(204,122,0,0.5), rgba(204,122,0,0.5) 8px, rgba(204,122,0,0.24) 8px, rgba(204,122,0,0.24) 16px); }
+.gantt-canvas .vis-item.vis-background.unplanned { background: repeating-linear-gradient(135deg, rgba(179,58,47,0.5), rgba(179,58,47,0.5) 8px, rgba(179,58,47,0.24) 8px, rgba(179,58,47,0.24) 16px); }
+
+/* tooltip 融入 */
+.gantt-canvas .vis-tooltip {
+  background: var(--surface-strong);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font);
+  white-space: pre-line;
+}
+.gantt-canvas .vis-current-time { background: var(--danger); }
+
+/* === 界面优化补充 === */
+.subtle-note {
+  margin: 12px 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 图谱构建：节点/边/创建时间/节点类型 四卡一行 */
+.context-grid.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* 方案库引导条：标题一行 + 四统计卡下方一行 */
+.decision-band--inline {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1fr;
+}
+
+.decision-band--inline .decision-band-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* 规则 label + 下拉框左右排列 */
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.field-inline > span {
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.field-inline > select {
+  flex: 1;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  border-radius: 12px;
+  padding: 11px 12px;
+  color: var(--text);
+}
+
+/* 构建图谱按钮与上方内容留间隔 */
+.form-actions--gap {
+  margin-top: 16px;
 }
