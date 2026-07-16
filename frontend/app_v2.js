@@ -1266,10 +1266,14 @@ function buildMachineOverlays(machine, horizonStart, horizonEnd) {
     const start = Number(item.start_time ?? item.start ?? item.start_hour);
     const end = Number(item.end_time ?? item.end ?? item.end_hour);
     if (Number.isNaN(start) || Number.isNaN(end) || end <= horizonStart || start >= horizonEnd) return;
+    const clampedStart = Math.max(start, horizonStart);
+    const clampedEnd = Math.min(end, horizonEnd);
     overlays.push({
       className: `timeline-overlay ${item.downtime_type === "unplanned" ? "unplanned" : "planned"}`,
-      left: `${((Math.max(start, horizonStart) - horizonStart) / totalSpan) * 100}%`,
-      width: `${((Math.min(end, horizonEnd) - Math.max(start, horizonStart)) / totalSpan) * 100}%`,
+      left: `${((clampedStart - horizonStart) / totalSpan) * 100}%`,
+      width: `${((clampedEnd - clampedStart) / totalSpan) * 100}%`,
+      startOffset: clampedStart,
+      endOffset: clampedEnd,
       title: `${item.downtime_type === "unplanned" ? "非计划停机" : "计划停机"} · ${formatTimelineLabel(start)} ~ ${formatTimelineLabel(end)}`,
     });
   });
@@ -1295,6 +1299,8 @@ function buildMachineOverlays(machine, horizonStart, horizonEnd) {
           className: "timeline-overlay offshift",
           left: `${((cursor - horizonStart) / totalSpan) * 100}%`,
           width: `${((item.start - cursor) / totalSpan) * 100}%`,
+          startOffset: cursor,
+          endOffset: item.start,
           title: `班次外 · ${formatTimelineLabel(cursor)} ~ ${formatTimelineLabel(item.start)}`,
         });
       }
@@ -1305,11 +1311,86 @@ function buildMachineOverlays(machine, horizonStart, horizonEnd) {
         className: "timeline-overlay offshift",
         left: `${((cursor - horizonStart) / totalSpan) * 100}%`,
         width: `${((horizonEnd - cursor) / totalSpan) * 100}%`,
+        startOffset: cursor,
+        endOffset: horizonEnd,
         title: `班次外 · ${formatTimelineLabel(cursor)} ~ ${formatTimelineLabel(horizonEnd)}`,
       });
     }
   }
   return overlays;
+}
+
+const GANTT_FALLBACK_BASE = "2000-01-01T00:00:00.000Z";
+
+function ganttOffsetToISO(offset, base) {
+  return new Date(new Date(base).getTime() + Number(offset) * 3600 * 1000).toISOString();
+}
+
+function buildGanttData(entries, options = {}) {
+  const planStartAt = tryParseDate(app.instanceDetails?.plan_start_at);
+  const hasRealBase = Boolean(planStartAt);
+  const base = hasRealBase ? planStartAt.toISOString() : GANTT_FALLBACK_BASE;
+
+  const normalized = asArray(entries)
+    .map((item) => ({
+      machineId: item.machine_id || item.machine_name || item.resource_id || "unknown",
+      machineName: item.machine_name || item.machine_id || item.resource_name || "未知资源",
+      opId: item.op_id || item.operation_id || item.id || "-",
+      orderId: item.order_id || "-",
+      taskId: item.task_id || "-",
+      start: Number(item.start ?? item.start_time ?? 0),
+      end: Number(item.end ?? item.end_time ?? 0),
+      status: normalizeScheduleStatus(item.status),
+      statusLabel: item.status_label || (normalizeScheduleStatus(item.status) === "completed" ? "已完成" : normalizeScheduleStatus(item.status) === "processing" ? "进行中" : "未来排产"),
+    }))
+    .filter((item) => !Number.isNaN(item.start) && !Number.isNaN(item.end) && item.end > item.start);
+
+  if (!normalized.length) return null;
+
+  const groupsMap = new Map();
+  normalized.forEach((item) => { if (!groupsMap.has(item.machineId)) groupsMap.set(item.machineId, item.machineName); });
+  const groups = Array.from(groupsMap, ([id, content]) => ({ id, content }));
+
+  const machineMap = getMachineMap();
+  const horizonStart = Math.min(...normalized.map((i) => i.start));
+  const horizonEnd = Math.max(...normalized.map((i) => i.end));
+
+  const items = [];
+  normalized.forEach((item, index) => {
+    items.push({
+      id: `op-${index}`,
+      group: item.machineId,
+      start: ganttOffsetToISO(item.start, base),
+      end: ganttOffsetToISO(item.end, base),
+      content: escapeHtml(item.opId),
+      className: `status-${item.status}`,
+      title: `${item.statusLabel} · ${item.opId}\n订单:${item.orderId} 任务:${item.taskId}\n${hasRealBase ? `${formatDateTime(ganttOffsetToISO(item.start, base))} ~ ${formatDateTime(ganttOffsetToISO(item.end, base))}` : `相对 ${item.start}h ~ ${item.end}h`}`,
+    });
+  });
+
+  // 遮罩：班次外 / 停机 -> background 项
+  groups.forEach((g) => {
+    const overlays = buildMachineOverlays(machineMap.get(g.id), horizonStart, horizonEnd);
+    overlays.forEach((ov, i) => {
+      const cls = ov.className.includes("unplanned") ? "unplanned" : ov.className.includes("planned") ? "planned" : "offshift";
+      items.push({
+        id: `bg-${g.id}-${i}`,
+        group: g.id,
+        start: ganttOffsetToISO(ov.startOffset, base),
+        end: ganttOffsetToISO(ov.endOffset, base),
+        type: "background",
+        className: cls,
+      });
+    });
+  });
+
+  const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
+  return {
+    groups,
+    items,
+    hasRealBase,
+    window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
+  };
 }
 
 function renderTimeline(entries, options = {}) {
