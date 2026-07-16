@@ -390,6 +390,54 @@ class TestDerivedTimesWithTurnover(unittest.TestCase):
         self.assertAlmostEqual(shop.operations["OPA"].derived_due_date, 99.0, places=6)
         self.assertAlmostEqual(shop.operations["OPB1"].derived_due_date, 97.0, places=6)
 
+    def _cross_task_op_dep_shop(self):
+        """T2.S 经 predecessor_ops 只依赖 T1.A；T1.B 是旁路工序，与 S 无关但 turnover 很大。
+
+        A(proc=1, turnover=0) 与 B(proc=1, turnover=100) 在 T1 内并行，
+        S(proc=1, due=100) 在 T2，predecessor_ops=["A"]。
+        """
+        op_a = Operation(id="A", task_id="T1", name="A", process_type="turning",
+                         processing_time=1.0, turnover_time=0.0)
+        op_b = Operation(id="B", task_id="T1", name="B", process_type="turning",
+                         processing_time=1.0, turnover_time=100.0)
+        task1 = Task(id="T1", order_id="O1", name="T1", operations=[op_a, op_b])
+        op_s = Operation(id="S", task_id="T2", name="S", process_type="turning",
+                         processing_time=1.0, predecessor_ops=["A"])
+        task2 = Task(id="T2", order_id="O1", name="T2", due_date=100.0, operations=[op_s])
+        shop = ShopFloor(
+            orders={"O1": Order(id="O1", name="O1", task_ids=["T1", "T2"])},
+            tasks={"T1": task1, "T2": task2},
+            operations={"A": op_a, "B": op_b, "S": op_s},
+        )
+        shop.build_indexes()
+        return shop
+
+    def test_cross_task_op_dep_does_not_widen_to_whole_task(self):
+        """跨任务 predecessor_ops 只应引入被引用工序的约束，不得取整个前驱任务的流转完工。
+
+        只有 A 约束 S；B 的 turnover=100 与 S 无关。若把跨任务工序依赖折叠成
+        任务边再取整个任务的 critical_path_with_turnover，S.earliest_start 会
+        被误算为 101（= B 的 1+100）。
+        """
+        shop = self._cross_task_op_dep_shop()
+        self.assertAlmostEqual(shop.operations["A"].earliest_start_time, 0.0, places=6)
+        self.assertAlmostEqual(
+            shop.operations["S"].earliest_start_time, 1.0, places=6,
+            msg="S 只依赖 A（1h 完工、无 turnover），不应受旁路工序 B 的 turnover 影响",
+        )
+
+    def test_cross_task_op_dep_backward_spares_unreferenced_sibling(self):
+        """反推同理：未被引用的旁路工序 B 不得继承 S 的流转反推界。"""
+        shop = self._cross_task_op_dep_shop()
+        # S.derived_start = 100 - 1 = 99；A 须在 99 - 0 = 99 前完工
+        self.assertAlmostEqual(shop.operations["S"].derived_start_time, 99.0, places=6)
+        self.assertAlmostEqual(shop.operations["A"].derived_due_date, 99.0, places=6)
+        # B 无任何后继、任务也无外部交期 => 无界。修复前为 99 - 100 = -1。
+        self.assertEqual(
+            shop.operations["B"].derived_due_date, float("inf"),
+            "B 未被 S 引用，不应被扣除其 turnover 而得到负的 derived_due_date",
+        )
+
     def test_cross_task_backward_zero_turnover_unchanged(self):
         """零回归锚点：turnover=0 时跨任务反推与旧口径一致。"""
         shop = self._two_task_shop([("OPA", 5.0, 0.0)])

@@ -589,45 +589,54 @@ class ShopFloor:
 
     def derive_internal_targets(self) -> None:
         task_predecessors: dict[str, set[str]] = {task_id: set() for task_id in self.tasks}
-        task_successors: dict[str, set[str]] = {task_id: set() for task_id in self.tasks}
 
         def add_task_edge(predecessor_id: str, successor_id: str) -> None:
             if predecessor_id == successor_id:
                 return
             if predecessor_id not in self.tasks or successor_id not in self.tasks:
                 return
-            if predecessor_id in task_predecessors[successor_id]:
-                return
             task_predecessors[successor_id].add(predecessor_id)
-            task_successors[predecessor_id].add(successor_id)
+
+        # 任务边只用于拓扑定序与环检测。派生时刻的约束粒度按依赖类型区分：
+        #   task.predecessor_task_ids  -> 整个后继任务依赖整个前驱任务
+        #   op.predecessor_tasks       -> 该工序依赖整个前驱任务
+        #   op.predecessor_ops         -> 该工序只依赖被点名的那道工序
+        # 若统一折叠到任务级，跨任务工序依赖会被放大成整个前驱任务的约束。
+        task_whole_successors: dict[str, set[str]] = {task_id: set() for task_id in self.tasks}
+        task_dependent_successor_ops: dict[str, set[str]] = {task_id: set() for task_id in self.tasks}
+        op_successor_ops: dict[str, set[str]] = {op_id: set() for op_id in self.operations}
 
         for task_id, task in self.tasks.items():
             for predecessor_id in task.predecessor_task_ids:
                 add_task_edge(predecessor_id, task_id)
+                if predecessor_id in self.tasks and predecessor_id != task_id:
+                    task_whole_successors[predecessor_id].add(task_id)
 
         for op in self.operations.values():
             for predecessor_task_id in op.predecessor_tasks:
                 add_task_edge(predecessor_task_id, op.task_id)
+                if predecessor_task_id in self.tasks and predecessor_task_id != op.task_id:
+                    task_dependent_successor_ops[predecessor_task_id].add(op.id)
             for predecessor_op_id in op.predecessor_ops:
                 predecessor_op = self.operations.get(predecessor_op_id)
-                if predecessor_op and predecessor_op.task_id != op.task_id:
+                if not predecessor_op:
+                    continue
+                op_successor_ops[predecessor_op_id].add(op.id)
+                if predecessor_op.task_id != op.task_id:
                     add_task_edge(predecessor_op.task_id, op.task_id)
 
         task_meta: dict[str, dict] = {}
         for task_id, task in self.tasks.items():
             op_ids = [op.id for op in task.operations if op.id in self.operations]
             predecessors = {op_id: set() for op_id in op_ids}
-            successors = {op_id: set() for op_id in op_ids}
             for op_id in op_ids:
                 op = self.operations[op_id]
                 for predecessor_id in op.predecessor_ops:
                     if predecessor_id in predecessors:
                         predecessors[op_id].add(predecessor_id)
-                        successors[predecessor_id].add(op_id)
             topo = _topological_order(predecessors, op_ids)
             earliest_offsets: dict[str, float] = {}
             critical_path = 0.0
-            critical_path_with_turnover = 0.0
             for op_id in topo:
                 op = self.operations[op_id]
                 # 环内工序(工序级前驱互锁)的前驱可能尚未计算(拓扑序对环不完整)，
@@ -642,96 +651,57 @@ class ShopFloor:
                 )
                 earliest_offsets[op_id] = offset
                 critical_path = max(critical_path, offset + op.processing_time)
-                critical_path_with_turnover = max(
-                    critical_path_with_turnover, offset + op.processing_time + op.turnover_time
-                )
             task_meta[task_id] = {
                 "op_ids": op_ids,
                 "predecessors": predecessors,
-                "successors": successors,
                 "topo": topo,
-                "earliest_offsets": earliest_offsets,
                 "critical_path": critical_path,
-                "critical_path_with_turnover": critical_path_with_turnover,
             }
 
         task_topo = _topological_order(task_predecessors, list(self.tasks.keys()))
-        # 反推分两个通道：外部交期约束任务自身完工（不扣 turnover）；
-        # 后继任务开工约束本任务各工序的 end + 各自 turnover（流转通道）。
-        # 不同工序 turnover 不同，流转通道必须保留到工序级再逐一扣减。
-        task_external_due: dict[str, float] = {}
-        task_flow_due: dict[str, float] = {}
+        # 反推逐工序进行：外部交期约束工序自身完工（不扣 turnover）；任何后继
+        # （工序/任务）的开工时刻则扣本工序自己的 turnover。任务级标量由其工序
+        # 归纳而来。任务按逆拓扑序、任务内按逆工序拓扑序，保证后继先算。
         for task_id in reversed(task_topo):
             task = self.tasks[task_id]
             order = self.orders.get(task.order_id)
             external_due = task.due_date
             if not math.isfinite(external_due) and order is not None:
                 external_due = order.due_date
-            flow_due = min(
-                (self.tasks[successor_id].derived_start_time
-                 for successor_id in task_successors.get(task_id, set())
-                 if math.isfinite(self.tasks[successor_id].derived_start_time)),
-                default=float("inf"),
-            )
-            task_external_due[task_id] = external_due
-            task_flow_due[task_id] = flow_due
             meta = task_meta.get(task_id, {})
             task.critical_path_time = meta.get("critical_path", 0.0)
-            critical_path_with_turnover = meta.get("critical_path_with_turnover", task.critical_path_time)
-            start_candidates = []
-            if math.isfinite(external_due):
-                start_candidates.append(external_due - task.critical_path_time)
-            if math.isfinite(flow_due):
-                start_candidates.append(flow_due - critical_path_with_turnover)
-            task.derived_start_time = min(start_candidates) if start_candidates else float("inf")
-            task.derived_due_date = (
-                task.derived_start_time + task.critical_path_time
-                if math.isfinite(task.derived_start_time)
-                else float("inf")
-            )
-
-        task_flow_finish: dict[str, float] = {}
-        for task_id in task_topo:
-            task = self.tasks[task_id]
-            order = self.orders.get(task.order_id)
-            base_release = max(task.release_time, order.release_time if order else 0.0)
-            predecessor_finish = max(
-                (task_flow_finish[predecessor_id]
-                 for predecessor_id in task_predecessors.get(task_id, set())
-                 if predecessor_id in task_flow_finish),
-                default=base_release,
-            )
-            task.earliest_start_time = max(base_release, predecessor_finish)
-            task.earliest_finish_time = task.earliest_start_time + task.critical_path_time
-            task_flow_finish[task_id] = task.earliest_start_time + task_meta.get(task_id, {}).get(
-                "critical_path_with_turnover", task.critical_path_time
-            )
-            task.critical_slack = (
-                task.derived_due_date - task.earliest_finish_time
-                if math.isfinite(task.derived_due_date)
-                else float("inf")
-            )
-
-        for task_id, task in self.tasks.items():
-            meta = task_meta.get(task_id, {})
             topo = meta.get("topo", [])
-            successors = meta.get("successors", {})
-            earliest_offsets = meta.get("earliest_offsets", {})
+
+            # 整任务级后继：后继任务开工前，本任务每道工序都必须流转完毕
+            whole_successor_starts = [
+                self.tasks[successor_id].derived_start_time
+                for successor_id in task_whole_successors.get(task_id, set())
+                if math.isfinite(self.tasks[successor_id].derived_start_time)
+            ]
+            # 点名依赖本任务整体的后继工序：同样约束本任务每道工序
+            whole_successor_starts += [
+                self.operations[successor_op_id].derived_start_time
+                for successor_op_id in task_dependent_successor_ops.get(task_id, set())
+                if successor_op_id in self.operations
+                and math.isfinite(self.operations[successor_op_id].derived_start_time)
+            ]
+            whole_flow_due = min(whole_successor_starts, default=float("inf"))
 
             for op_id in reversed(topo):
                 op = self.operations[op_id]
+                # 本工序被点名的后继（含跨任务）：只有它们约束本工序
                 successor_starts = [
-                    self.operations[successor_id].derived_start_time - op.turnover_time
-                    for successor_id in successors.get(op_id, set())
-                    if math.isfinite(self.operations[successor_id].derived_start_time)
+                    self.operations[successor_id].derived_start_time
+                    for successor_id in op_successor_ops.get(op_id, set())
+                    if successor_id in self.operations
+                    and math.isfinite(self.operations[successor_id].derived_start_time)
                 ]
-                # 外部交期不扣 turnover；后继任务开工（流转通道）扣本工序自己的 turnover
-                external_bound = task_external_due.get(task_id, float("inf"))
-                flow_bound = task_flow_due.get(task_id, float("inf")) - op.turnover_time
-                candidates = [
-                    value for value in [external_bound, flow_bound, *successor_starts]
-                    if math.isfinite(value)
-                ]
+                flow_due = min([whole_flow_due, *successor_starts], default=float("inf"))
+                candidates = []
+                if math.isfinite(external_due):
+                    candidates.append(external_due)
+                if math.isfinite(flow_due):
+                    candidates.append(flow_due - op.turnover_time)
                 op.derived_due_date = min(candidates) if candidates else float("inf")
                 op.derived_start_time = (
                     op.derived_due_date - op.processing_time
@@ -739,15 +709,73 @@ class ShopFloor:
                     else float("inf")
                 )
 
+            op_starts = [
+                self.operations[op_id].derived_start_time
+                for op_id in topo
+                if math.isfinite(self.operations[op_id].derived_start_time)
+            ]
+            task.derived_start_time = min(op_starts, default=float("inf"))
+            if not topo and math.isfinite(external_due):
+                task.derived_start_time = external_due - task.critical_path_time
+            task.derived_due_date = (
+                task.derived_start_time + task.critical_path_time
+                if math.isfinite(task.derived_start_time)
+                else float("inf")
+            )
+
+        # 前推同样逐工序算绝对时刻，口径与 get_operation_flow_ready_time 一致：
+        # 本工序不早于 max(放行, 各前驱工序 end+turnover, 各前驱任务全部工序 end+turnover)。
+        task_flow_finish: dict[str, float] = {}
+        op_flow_finish: dict[str, float] = {}
+        for task_id in task_topo:
+            task = self.tasks[task_id]
+            order = self.orders.get(task.order_id)
+            base_release = max(task.release_time, order.release_time if order else 0.0)
+            # 整任务级前驱：整个后继任务都不早于前驱任务全部工序流转完毕
+            task_start_floor = max(
+                (task_flow_finish[predecessor_id]
+                 for predecessor_id in task.predecessor_task_ids
+                 if predecessor_id in task_flow_finish),
+                default=base_release,
+            )
+            task_start_floor = max(task_start_floor, base_release)
+
+            meta = task_meta.get(task_id, {})
+            topo = meta.get("topo", [])
+
             for op_id in topo:
                 op = self.operations[op_id]
-                op.earliest_start_time = task.earliest_start_time + earliest_offsets.get(op_id, 0.0)
-                op.earliest_finish_time = op.earliest_start_time + op.processing_time
+                bound = max(task_start_floor, op.flow_release_floor)
+                # 环内工序的前驱可能尚未计算（拓扑序对环不完整），跳过避免 KeyError；
+                # 仿真器会单独做 SCC 环检测并标记 feasible=False。
+                for predecessor_id in op.predecessor_ops:
+                    if predecessor_id in op_flow_finish:
+                        bound = max(bound, op_flow_finish[predecessor_id])
+                for predecessor_task_id in op.predecessor_tasks:
+                    if predecessor_task_id in task_flow_finish:
+                        bound = max(bound, task_flow_finish[predecessor_task_id])
+                op.earliest_start_time = bound
+                op.earliest_finish_time = bound + op.processing_time
+                op_flow_finish[op_id] = bound + op.processing_time + op.turnover_time
                 op.critical_slack = (
                     op.derived_start_time - op.earliest_start_time
                     if math.isfinite(op.derived_start_time)
                     else float("inf")
                 )
+
+            op_starts = [self.operations[op_id].earliest_start_time for op_id in topo]
+            op_finishes = [self.operations[op_id].earliest_finish_time for op_id in topo]
+            task.earliest_start_time = min(op_starts, default=task_start_floor)
+            task.earliest_finish_time = max(op_finishes, default=task_start_floor)
+            task_flow_finish[task_id] = max(
+                (op_flow_finish[op_id] for op_id in topo if op_id in op_flow_finish),
+                default=task_start_floor,
+            )
+            task.critical_slack = (
+                task.derived_due_date - task.earliest_finish_time
+                if math.isfinite(task.derived_due_date)
+                else float("inf")
+            )
 
     def get_machines_for_type(self, type_id: str) -> list[Machine]:
         return [self.machines[mid] for mid in self._machine_by_type.get(type_id, []) if mid in self.machines]
