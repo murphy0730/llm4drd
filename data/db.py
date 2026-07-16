@@ -147,6 +147,7 @@ def init_db(db_path: str = DB_PATH):
                 op_name TEXT,
                 process_type TEXT,
                 processing_time REAL,
+                turnover_time REAL DEFAULT 0,
                 predecessor_ops TEXT DEFAULT '',
                 predecessor_tasks TEXT DEFAULT '',
                 eligible_machine_ids TEXT DEFAULT '',
@@ -288,6 +289,7 @@ def init_db(db_path: str = DB_PATH):
         _safe_add_column(conn, "inst_operations", "initial_assigned_machine_id", "TEXT DEFAULT ''")
         _safe_add_column(conn, "inst_operations", "initial_assigned_tooling_ids", "TEXT DEFAULT ''")
         _safe_add_column(conn, "inst_operations", "initial_assigned_personnel_ids", "TEXT DEFAULT ''")
+        _safe_add_column(conn, "inst_operations", "turnover_time", "REAL DEFAULT 0")
         _safe_add_column(conn, "graph_meta", "instance_hash", "TEXT DEFAULT ''")
         _safe_add_column(conn, "graph_meta", "topology_hash", "TEXT DEFAULT ''")
         _safe_add_column(conn, "graph_meta", "feature_hash", "TEXT DEFAULT ''")
@@ -456,12 +458,12 @@ class InstanceStore:
                     """
                     INSERT INTO inst_operations
                     (
-                        op_id, task_id, op_name, process_type, processing_time, predecessor_ops, predecessor_tasks,
+                        op_id, task_id, op_name, process_type, processing_time, turnover_time, predecessor_ops, predecessor_tasks,
                         eligible_machine_ids, required_tooling_types, required_personnel_skills, initial_status,
                         initial_start_time, initial_end_time, initial_remaining_processing_time, initial_assigned_machine_id,
                         initial_assigned_tooling_ids, initial_assigned_personnel_ids
                     )
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         op_id,
@@ -469,6 +471,7 @@ class InstanceStore:
                         op.name,
                         op.process_type,
                         op.processing_time,
+                        op.turnover_time,
                         ";".join(op.predecessor_ops),
                         ";".join(op.predecessor_tasks),
                         ";".join(op.eligible_machine_ids),
@@ -540,12 +543,12 @@ class InstanceStore:
                     """
                     INSERT INTO inst_operations
                     (
-                        op_id, task_id, op_name, process_type, processing_time, predecessor_ops, predecessor_tasks,
+                        op_id, task_id, op_name, process_type, processing_time, turnover_time, predecessor_ops, predecessor_tasks,
                         eligible_machine_ids, required_tooling_types, required_personnel_skills, initial_status,
                         initial_start_time, initial_end_time, initial_remaining_processing_time, initial_assigned_machine_id,
                         initial_assigned_tooling_ids, initial_assigned_personnel_ids
                     )
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         op_id,
@@ -553,6 +556,7 @@ class InstanceStore:
                         _clean_scalar(row.get("op_name"), ""),
                         _clean_scalar(row.get("process_type"), ""),
                         _float_or_default(row.get("processing_time_hrs", row.get("processing_time", 0)), 0.0),
+                        _float_or_default(row.get("turnover_time_hrs", row.get("turnover_time", 0)), 0.0),
                         _clean_scalar(row.get("predecessor_ops"), ""),
                         _clean_scalar(row.get("predecessor_tasks"), ""),
                         _clean_scalar(row.get("eligible_machine_ids"), ""),
@@ -629,7 +633,7 @@ class InstanceStore:
             conn.execute(
                 """
                 UPDATE inst_operations
-                SET task_id=?, op_name=?, process_type=?, processing_time=?, predecessor_ops=?, predecessor_tasks=?, eligible_machine_ids=?, required_tooling_types=?, required_personnel_skills=?, initial_status=?, initial_start_time=?, initial_end_time=?, initial_remaining_processing_time=?, initial_assigned_machine_id=?, initial_assigned_tooling_ids=?, initial_assigned_personnel_ids=?
+                SET task_id=?, op_name=?, process_type=?, processing_time=?, turnover_time=?, predecessor_ops=?, predecessor_tasks=?, eligible_machine_ids=?, required_tooling_types=?, required_personnel_skills=?, initial_status=?, initial_start_time=?, initial_end_time=?, initial_remaining_processing_time=?, initial_assigned_machine_id=?, initial_assigned_tooling_ids=?, initial_assigned_personnel_ids=?
                 WHERE op_id=?
                 """,
                 (
@@ -637,6 +641,7 @@ class InstanceStore:
                     data["op_name"],
                     data["process_type"],
                     float(data["processing_time"]),
+                    _float_or_default(data.get("turnover_time"), 0.0),
                     data.get("predecessor_ops", ""),
                     data.get("predecessor_tasks", ""),
                     data.get("eligible_machine_ids", ""),
@@ -683,7 +688,7 @@ class InstanceStore:
                 if task.is_main:
                     shop.orders[task.order_id].main_task_id = task.id
         for row in data["operations"]:
-            op = Operation(id=row["op_id"], task_id=row["task_id"], name=row["op_name"], process_type=row["process_type"], processing_time=float(row["processing_time"]), predecessor_ops=[token.strip() for token in row["predecessor_ops"].split(";") if token.strip()], predecessor_tasks=[token.strip() for token in row["predecessor_tasks"].split(";") if token.strip()], eligible_machine_ids=[token.strip() for token in row["eligible_machine_ids"].replace(",", ";").replace("，", ";").split(";") if token.strip()], required_tooling_types=[token.strip() for token in row.get("required_tooling_types", "").split(";") if token.strip()], required_personnel_skills=[token.strip() for token in row.get("required_personnel_skills", "").split(";") if token.strip()])
+            op = Operation(id=row["op_id"], task_id=row["task_id"], name=row["op_name"], process_type=row["process_type"], processing_time=float(row["processing_time"]), turnover_time=_float_or_default(row.get("turnover_time"), 0.0), predecessor_ops=[token.strip() for token in row["predecessor_ops"].split(";") if token.strip()], predecessor_tasks=[token.strip() for token in row["predecessor_tasks"].split(";") if token.strip()], eligible_machine_ids=[token.strip() for token in row["eligible_machine_ids"].replace(",", ";").replace("，", ";").split(";") if token.strip()], required_tooling_types=[token.strip() for token in row.get("required_tooling_types", "").split(";") if token.strip()], required_personnel_skills=[token.strip() for token in row.get("required_personnel_skills", "").split(";") if token.strip()])
             op._initial_status = _clean_scalar(row.get("initial_status"), "")
             op._initial_start_time = row.get("initial_start_time")
             op._initial_end_time = row.get("initial_end_time")
