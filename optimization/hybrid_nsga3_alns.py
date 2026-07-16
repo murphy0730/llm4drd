@@ -227,6 +227,60 @@ def build_legacy_graph_features(shop, graph) -> dict[str, dict[str, float]]:
     return features
 
 
+def _shop_indexes_are_current(shop) -> bool:
+    resources = (
+        *shop.machines.values(),
+        *shop.toolings.values(),
+        *shop.personnel.values(),
+    )
+    if any(not resource._calendar_compiled for resource in resources):
+        return False
+
+    expected_machine_entries = len(shop.machines)
+    if sum(map(len, shop._machine_by_type.values())) != expected_machine_entries:
+        return False
+    if any(
+        machine_id not in shop._machine_by_type.get(machine.type_id, ())
+        for machine_id, machine in shop.machines.items()
+    ):
+        return False
+
+    if sum(map(len, shop._tooling_by_type.values())) != len(shop.toolings):
+        return False
+    if any(
+        tooling_id not in shop._tooling_by_type.get(tooling.type_id, ())
+        for tooling_id, tooling in shop.toolings.items()
+    ):
+        return False
+
+    expected_skill_entries = sum(
+        len(person.skills) for person in shop.personnel.values()
+    )
+    if sum(map(len, shop._personnel_by_skill.values())) != expected_skill_entries:
+        return False
+    if any(
+        person_id not in shop._personnel_by_skill.get(skill_id, ())
+        for person_id, person in shop.personnel.items()
+        for skill_id in person.skills
+    ):
+        return False
+
+    if sum(map(len, shop._ops_by_task.values())) != len(shop.operations):
+        return False
+    if any(
+        op_id not in shop._ops_by_task.get(operation.task_id, ())
+        for op_id, operation in shop.operations.items()
+    ):
+        return False
+
+    if sum(map(len, shop._tasks_by_order.values())) != len(shop.tasks):
+        return False
+    return all(
+        task_id in shop._tasks_by_order.get(task.order_id, ())
+        for task_id, task in shop.tasks.items()
+    )
+
+
 class HybridNSGA3ALNSOptimizer:
     def __init__(
         self,
@@ -236,7 +290,6 @@ class HybridNSGA3ALNSOptimizer:
         graph_context_mode="legacy",
     ):
         self.shop = shop
-        self.shop.build_indexes()
         self.config = config
         self.graph_context_mode = getattr(
             graph_context_mode, "value", graph_context_mode
@@ -247,11 +300,22 @@ class HybridNSGA3ALNSOptimizer:
             raise ValueError(
                 f"GraphContext is required for {self.graph_context_mode} mode"
             )
+        if self.graph_context_mode != "active" or not _shop_indexes_are_current(
+            self.shop
+        ):
+            self.shop.build_indexes()
         self.graph_context = graph_context
         self.graph_context_diff = None
         self.operation_order_rank = {
             op_id: rank for rank, op_id in enumerate(self.shop.operations)
         }
+        self._direct_successors: dict[str, list[str]] = {
+            op_id: [] for op_id in self.shop.operations
+        }
+        for successor_id, operation in self.shop.operations.items():
+            for predecessor_id in dict.fromkeys(operation.predecessor_ops):
+                if predecessor_id in self._direct_successors:
+                    self._direct_successors[predecessor_id].append(successor_id)
         self.specs = validate_objective_selection(config.objective_keys)
         self.rng = random.Random(config.seed)
         self.archive = ParetoArchive(self.specs)
@@ -299,7 +363,11 @@ class HybridNSGA3ALNSOptimizer:
             self.graph_context_diff = compare_legacy_context(
                 self.shop, graph_context
             )
-        self.graph_guides = self._build_graph_guides()
+        self._graph_guides = (
+            None
+            if self.graph_context_mode == "active"
+            else self._build_graph_guides()
+        )
         self.approx_evaluator = ApproximateScheduleEvaluator(
             self.shop,
             self.graph_features,
@@ -308,6 +376,12 @@ class HybridNSGA3ALNSOptimizer:
             self.priority_scale,
             keep_schedule_limit=0,
         )
+
+    @property
+    def graph_guides(self) -> dict[str, dict]:
+        if self._graph_guides is None:
+            self._graph_guides = self._build_graph_guides()
+        return self._graph_guides
 
     def _resolve_parallel_workers(self) -> int:
         if self.config.parallel_workers and self.config.parallel_workers > 0:
@@ -395,6 +469,44 @@ class HybridNSGA3ALNSOptimizer:
                     related.append(successor[3:])
         return related
 
+    def _active_related_operations(self, current_id: str) -> list[str]:
+        op = self.shop.operations[current_id]
+        task = self.shop.tasks[op.task_id]
+        related = list(op.predecessor_ops)
+        related.extend(
+            other.id for other in task.operations if other.id != current_id
+        )
+
+        group_members = set(
+            self.graph_context.operations_in_group("process_type", op.process_type)
+        )
+        for tooling_type in op.required_tooling_types:
+            group_members.update(
+                self.graph_context.operations_in_group("tooling_type", tooling_type)
+            )
+        for skill_id in op.required_personnel_skills:
+            group_members.update(
+                self.graph_context.operations_in_group("personnel_skill", skill_id)
+            )
+        tooling_types = set(op.required_tooling_types)
+        personnel_skills = set(op.required_personnel_skills)
+        for other_id in sorted(
+            group_members, key=self.operation_order_rank.__getitem__
+        ):
+            if other_id == current_id:
+                continue
+            other = self.shop.operations[other_id]
+            if other.process_type == op.process_type:
+                related.append(other_id)
+            if set(other.required_tooling_types) & tooling_types:
+                related.append(other_id)
+            if set(other.required_personnel_skills) & personnel_skills:
+                related.append(other_id)
+
+        related.extend(op.predecessor_ops)
+        related.extend(self._direct_successors[current_id])
+        return related
+
     def _expand_operation_cluster(self, seed_ops: list[str], max_size: int) -> list[str]:
         cluster: list[str] = []
         seen: set[str] = set()
@@ -406,31 +518,8 @@ class HybridNSGA3ALNSOptimizer:
                 continue
             seen.add(current_id)
             cluster.append(current_id)
-            op = self.shop.operations[current_id]
             if self.graph_context_mode == "active":
-                related = list(self.graph_context.predecessors(current_id))
-                related.extend(self.graph_context.successors(current_id))
-                related.extend(
-                    self.graph_context.operations_in_group(
-                        "process_type", op.process_type
-                    )
-                )
-                for tooling_type in op.required_tooling_types:
-                    related.extend(
-                        self.graph_context.operations_in_group(
-                            "tooling_type", tooling_type
-                        )
-                    )
-                for skill_id in op.required_personnel_skills:
-                    related.extend(
-                        self.graph_context.operations_in_group(
-                            "personnel_skill", skill_id
-                        )
-                    )
-                related = sorted(
-                    dict.fromkeys(related),
-                    key=self.operation_order_rank.__getitem__,
-                )
+                related = self._active_related_operations(current_id)
             else:
                 related = self._legacy_related_operations(current_id)
             for op_id in related:

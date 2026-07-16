@@ -53,6 +53,25 @@ def _relation_count(context: GraphContext) -> int:
     )
 
 
+def _log_event(
+    event: str,
+    fingerprint: GraphFingerprint,
+    *,
+    cache_level: str = "",
+    context: GraphContext | None = None,
+    elapsed_ms: float = 0.0,
+) -> None:
+    logger.info(
+        "%s fingerprint=%s cache_level=%s operation_count=%d relation_count=%d elapsed_ms=%.3f",
+        event,
+        fingerprint.instance_hash[:12],
+        cache_level,
+        len(context.operation_ids) if context else 0,
+        _relation_count(context) if context else 0,
+        elapsed_ms,
+    )
+
+
 class GraphContextService:
     def __init__(
         self,
@@ -111,7 +130,7 @@ class GraphContextService:
         build_time_ms = (time.perf_counter() - started) * 1000.0
 
         validation_started = time.perf_counter()
-        validate_graph_context(shop, context)
+        validate_graph_context(shop, context, fingerprint)
         validation_time_ms = (time.perf_counter() - validation_started) * 1000.0
 
         precommit_check = None
@@ -148,10 +167,24 @@ class GraphContextService:
                 load_time_ms = (time.perf_counter() - load_started) * 1000.0
                 if context is not None:
                     validation_started = time.perf_counter()
-                    validate_graph_context(shop, context)
+                    if context.operation_ids != tuple(sorted(shop.operations)):
+                        raise GraphContextCorruptError(
+                            "missing operations or operation order mismatch"
+                        )
+                    if context.machine_ids != tuple(sorted(shop.machines)):
+                        raise GraphContextCorruptError(
+                            "machine metadata count mismatch"
+                        )
                     validation_time_ms = (
                         time.perf_counter() - validation_started
                     ) * 1000.0
+                    _log_event(
+                        "graph_context.sqlite_hit",
+                        fingerprint,
+                        cache_level="sqlite",
+                        context=context,
+                        elapsed_ms=load_time_ms,
+                    )
                     return context, self._diagnostics(
                         context,
                         "sqlite",
@@ -159,6 +192,7 @@ class GraphContextService:
                         validation_time_ms=validation_time_ms,
                     )
             except GraphContextCorruptError as exc:
+                _log_event("graph_context.corrupt", fingerprint)
                 original_corruption = exc
                 invalid_reason = str(exc)
                 self.store.clear_all()
@@ -167,16 +201,27 @@ class GraphContextService:
                 if meta:
                     invalid_reason = meta.get("invalid_reason", "")
 
+        _log_event("graph_context.miss", fingerprint, cache_level="built")
+
         attempts = 0
         while attempts < 2:
             attempts += 1
             try:
+                build_started = time.perf_counter()
+                _log_event("graph_context.build_started", fingerprint)
                 context, build_time_ms, validation_time_ms = self._build_once(
                     shop,
                     fingerprint,
                     progress_callback,
                     deadline,
                     current_fingerprint_provider,
+                )
+                _log_event(
+                    "graph_context.build_completed",
+                    fingerprint,
+                    cache_level="built",
+                    context=context,
+                    elapsed_ms=(time.perf_counter() - build_started) * 1000.0,
                 )
                 return context, self._diagnostics(
                     context,
@@ -194,6 +239,7 @@ class GraphContextService:
                 error = GraphContextBuildError(
                     f"graph context rebuild failed: {exc}"
                 )
+                _log_event("graph_context.rebuild_failed", fingerprint)
                 raise error from original_corruption
             except GraphContextStaleError:
                 raise
@@ -202,6 +248,7 @@ class GraphContextService:
                     error = GraphContextBuildError(
                         f"graph context rebuild failed: {exc}"
                     )
+                    _log_event("graph_context.rebuild_failed", fingerprint)
                     raise error from original_corruption
                 raise
 
@@ -223,6 +270,12 @@ class GraphContextService:
                 and self._memory_context is not None
                 and self._memory_context.fingerprint == fingerprint
             ):
+                _log_event(
+                    "graph_context.l1_hit",
+                    fingerprint,
+                    cache_level="l1",
+                    context=self._memory_context,
+                )
                 return self._memory_context, self._diagnostics(
                     self._memory_context, "l1"
                 )
@@ -237,6 +290,12 @@ class GraphContextService:
                     self._memory_context is not None
                     and self._memory_context.fingerprint == fingerprint
                 ):
+                    _log_event(
+                        "graph_context.l1_hit",
+                        fingerprint,
+                        cache_level="l1",
+                        context=self._memory_context,
+                    )
                     return self._memory_context, self._diagnostics(
                         self._memory_context, "l1"
                     )
@@ -269,8 +328,14 @@ class GraphContextService:
 
     def invalidate(self, reason: str) -> None:
         with self._lock:
+            fingerprint = (
+                self._memory_context.fingerprint
+                if self._memory_context is not None
+                else GraphFingerprint("", "", "")
+            )
             self._memory_context = None
         self.store.mark_invalid(reason)
+        _log_event("graph_context.invalidated", fingerprint)
 
     def clear_memory_cache(self) -> None:
         with self._lock:
@@ -278,7 +343,7 @@ class GraphContextService:
 
 
 def resolve_graph_context_mode() -> GraphContextMode:
-    value = os.environ.get("LLM4DRD_GRAPH_CONTEXT_MODE", "legacy").strip().lower()
+    value = os.environ.get("LLM4DRD_GRAPH_CONTEXT_MODE", "active").strip().lower()
     try:
         return GraphContextMode(value)
     except ValueError:

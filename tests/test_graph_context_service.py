@@ -36,24 +36,42 @@ class GraphContextServiceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_miss_then_l1_hit_then_sqlite_hit(self):
-        first, a = self.service.get_or_build(self.shop)
+        with self.assertLogs(
+            "llm4drd.knowledge.context_service", level="INFO"
+        ) as captured:
+            first, a = self.service.get_or_build(self.shop)
+            second, b = self.service.get_or_build(self.shop)
+            self.service.clear_memory_cache()
+            third, c = self.service.get_or_build(self.shop)
         self.assertEqual(a.cache_level, "built")
-        second, b = self.service.get_or_build(self.shop)
         self.assertIs(second, first)
         self.assertEqual(b.cache_level, "l1")
-        self.service.clear_memory_cache()
-        third, c = self.service.get_or_build(self.shop)
         self.assertEqual(third, first)
         self.assertEqual(c.cache_level, "sqlite")
         self.assertTrue(c.cache_hit)
+        output = "\n".join(captured.output)
+        for event in (
+            "graph_context.miss",
+            "graph_context.build_started",
+            "graph_context.build_completed",
+            "graph_context.l1_hit",
+            "graph_context.sqlite_hit",
+        ):
+            self.assertIn(event, output)
+        self.assertIn("operation_count=4", output)
+        self.assertIn("elapsed_ms=", output)
 
     def test_invalidation_forces_rebuild(self):
         _, first = self.service.get_or_build(self.shop)
-        self.service.invalidate("operation_updated")
+        with self.assertLogs(
+            "llm4drd.knowledge.context_service", level="INFO"
+        ) as captured:
+            self.service.invalidate("operation_updated")
         _, second = self.service.get_or_build(self.shop)
         self.assertEqual(first.cache_level, "built")
         self.assertEqual(second.cache_level, "built")
         self.assertEqual(second.invalid_reason, "operation_updated")
+        self.assertIn("graph_context.invalidated", "\n".join(captured.output))
 
     def test_force_rebuild_bypasses_l1_and_sqlite(self):
         self.service.get_or_build(self.shop)
@@ -92,11 +110,15 @@ class GraphContextServiceTests(unittest.TestCase):
             conn.execute("DELETE FROM graph_operation_features WHERE op_ordinal=0")
             conn.commit()
 
-        rebuilt, diagnostics = self.service.get_or_build(self.shop)
+        with self.assertLogs(
+            "llm4drd.knowledge.context_service", level="INFO"
+        ) as captured:
+            rebuilt, diagnostics = self.service.get_or_build(self.shop)
 
         self.assertEqual(rebuilt, expected)
         self.assertEqual(diagnostics.cache_level, "built")
         self.assertIn("feature", diagnostics.invalid_reason)
+        self.assertIn("graph_context.corrupt", "\n".join(captured.output))
 
     def test_second_corrupt_build_failure_is_not_retried(self):
         class CorruptBuilder:
@@ -110,10 +132,14 @@ class GraphContextServiceTests(unittest.TestCase):
         builder = CorruptBuilder()
         service = GraphContextService(self.store, builder=builder)
 
-        with self.assertRaises(GraphContextBuildError):
-            service.get_or_build(self.shop)
+        with self.assertLogs(
+            "llm4drd.knowledge.context_service", level="INFO"
+        ) as captured:
+            with self.assertRaises(GraphContextBuildError):
+                service.get_or_build(self.shop)
 
         self.assertEqual(builder.calls, 2)
+        self.assertIn("graph_context.rebuild_failed", "\n".join(captured.output))
 
     def test_instance_change_before_save_aborts_persistence(self):
         changed = GraphFingerprint("changed", "changed", "changed")
@@ -130,7 +156,7 @@ class GraphContextServiceTests(unittest.TestCase):
 class GraphContextModeTests(unittest.TestCase):
     def test_mode_resolution_accepts_known_values_and_rejects_unknown(self):
         for value, expected in (
-            (None, GraphContextMode.LEGACY),
+            (None, GraphContextMode.ACTIVE),
             ("legacy", GraphContextMode.LEGACY),
             ("shadow", GraphContextMode.SHADOW),
             ("active", GraphContextMode.ACTIVE),

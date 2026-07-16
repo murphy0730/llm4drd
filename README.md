@@ -204,9 +204,11 @@ scheduler.on_repair("turning_1")
 status = scheduler.reschedule("COMPOSITE")  # 动态切换规则
 ```
 
-### 7. 异构图 (`knowledge/graph.py`)
+### 7. 统一图上下文 (`knowledge/`)
 
-NetworkX 有向异构图，5 类节点（order/task/operation/machine）、6 类边，用于图神经网络扩展。
+`CanonicalGraphBuilder` 是订单、任务、工序与资源关系的唯一业务解释器。在同一份规范图之上，系统生成两个投影：展示投影继续兼容现有 NetworkX/图谱 API；不可变计算投影 `GraphContext` 为混合优化器提供紧凑关系、特征和分组索引。
+
+计算上下文无需预构建。首次请求自动构建并原子写入 SQLite，后续请求依次命中进程内 L1 或 SQLite L2；指纹、版本或完整性不匹配时会清除两份投影并自动完整重建一次，第二次仍失败则显式终止。
 
 ### 8. 数据库 (`data/db.py`)
 
@@ -215,6 +217,7 @@ SQLite（WAL 模式）：
 - `RuleStore`：规则库增删改查
 - `InstanceStore`：车间实例序列化存储
 - `GraphStore`：图数据存储
+- `GraphArtifactStore`：展示/计算图投影的原子持久化
 - `DowntimeStore`：机器停机记录管理
 
 ---
@@ -266,6 +269,22 @@ SQLite（WAL 模式）：
 ```
 
 环境变量（优先级高于配置文件）：`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM4DRD_DB`, `LLM4DRD_CONFIG`
+
+图上下文发布模式：
+
+- `LLM4DRD_GRAPH_CONTEXT_MODE=legacy`：回退到原 NetworkX 优化路径。
+- `LLM4DRD_GRAPH_CONTEXT_MODE=shadow`：比较新旧关系和特征，但仍用旧路径求解。
+- `LLM4DRD_GRAPH_CONTEXT_MODE=active`：优化器直接使用缓存的不可变上下文（默认）。
+
+`/api/graph/meta` 和 `/api/optimize/hybrid/status/{id}` 会返回缓存层级、指纹前缀、构建/加载时间及失效原因。回滚只需设置 `LLM4DRD_GRAPH_CONTEXT_MODE=legacy` 并重启服务；SQLite 新表可保留，无需降级数据库。
+
+基准命令：
+
+```bash
+python -m llm4drd.tools.benchmark_graph_context --sizes 80,500,2500 --runs 7 --warmup 2 --seed 42 --mode compare --output-dir llm4drd/docs/benchmarks
+```
+
+验收阈值：中/大型实例温启动至少加速 2 倍，固定评估端到端回退不超过 3%，峰值内存不超过 legacy 的 1.25 倍，序列化方案签名必须一致。
 
 大规模图谱构建保护可通过以下环境变量调整：
 

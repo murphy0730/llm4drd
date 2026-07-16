@@ -409,14 +409,20 @@ def _validate_csr(
         raise GraphContextCorruptError(f"{name} relation ordinal out of bounds")
 
 
-def validate_graph_context(shop: ShopFloor, context: GraphContext) -> None:
+def validate_graph_context(
+    shop: ShopFloor,
+    context: GraphContext,
+    expected_fingerprint: GraphFingerprint | None = None,
+) -> None:
     expected_operations = tuple(sorted(shop.operations))
     expected_machines = tuple(sorted(shop.machines))
     if context.operation_ids != expected_operations:
         raise GraphContextCorruptError("missing operations or operation order mismatch")
     if context.machine_ids != expected_machines:
         raise GraphContextCorruptError("machine metadata count mismatch")
-    if context.fingerprint != compute_graph_fingerprint(shop):
+    if context.fingerprint != (
+        expected_fingerprint or compute_graph_fingerprint(shop)
+    ):
         raise GraphContextCorruptError("graph fingerprint mismatch")
 
     _validate_index("operation", context.operation_ids, context.operation_index)

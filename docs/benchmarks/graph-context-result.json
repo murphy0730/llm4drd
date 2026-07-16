@@ -1,0 +1,521 @@
+{
+  "acceptance": {
+    "failures": [],
+    "passed": true,
+    "speedup_sizes": [
+      500,
+      2500
+    ]
+  },
+  "baseline_reference": {
+    "commit_hash": "57e57e6227622245acae78e249c1f64167799000",
+    "generated_at": "2026-07-16T10:38:49.915265+00:00"
+  },
+  "environment": {
+    "commit_hash": "57e57e6227622245acae78e249c1f64167799000",
+    "cpu_count": 10,
+    "platform": "macOS-26.3-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python_version": "3.14.3"
+  },
+  "generated_at": "2026-07-16T10:52:06.060752+00:00",
+  "mode": "compare",
+  "parameters": {
+    "runs": 7,
+    "seed": 42,
+    "sizes": [
+      80,
+      500,
+      2500
+    ],
+    "warmup": 2
+  },
+  "results": {
+    "2500": {
+      "active_end_to_end": {
+        "elapsed_seconds_samples": [
+          3.98389725,
+          4.020637375,
+          3.870512583,
+          3.862457667,
+          3.958826917,
+          3.975183542,
+          3.908294125
+        ],
+        "median_elapsed_seconds": 3.958826917,
+        "median_peak_memory_bytes": 44660322,
+        "peak_memory_bytes_samples": [
+          44660322,
+          44660322,
+          44660322,
+          44660322,
+          44660322,
+          44660322,
+          44660322
+        ],
+        "signature_samples": [
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550"
+        ]
+      },
+      "cold_build_and_sqlite_write": {
+        "elapsed_seconds_samples": [
+          0.222032792,
+          0.211098209,
+          0.210410208,
+          0.212397375,
+          0.21138575,
+          0.211154625,
+          0.214363666
+        ],
+        "median_elapsed_seconds": 0.21138575,
+        "median_peak_memory_bytes": 20332568,
+        "peak_memory_bytes_samples": [
+          20332568,
+          20332568,
+          20332568,
+          20332568,
+          20332568,
+          20332568,
+          20332568
+        ]
+      },
+      "derived": {
+        "l1_warm_initialization_speedup": 3.7107,
+        "peak_memory_ratio": 0.8229,
+        "runtime_regression_percent": -0.8331,
+        "signatures_equal": true,
+        "sqlite_warm_initialization_speedup": 2.5293
+      },
+      "l1_hit_and_optimizer_initialization": {
+        "elapsed_seconds_samples": [
+          0.0250555,
+          0.024926583,
+          0.024899958,
+          0.024766125,
+          0.027535417,
+          0.025080291,
+          0.024951917
+        ],
+        "median_elapsed_seconds": 0.024951917,
+        "median_peak_memory_bytes": 8164666,
+        "peak_memory_bytes_samples": [
+          8164666,
+          8164666,
+          8164666,
+          8164666,
+          8164666,
+          8164666,
+          8164666
+        ]
+      },
+      "legacy_end_to_end": {
+        "elapsed_seconds_samples": [
+          4.057141291,
+          3.99213725,
+          3.986074625,
+          3.992083709,
+          4.008324708,
+          3.943790875,
+          3.975457375
+        ],
+        "median_elapsed_seconds": 3.992083709,
+        "median_peak_memory_bytes": 54274032,
+        "peak_memory_bytes_samples": [
+          54274032,
+          54274032,
+          54273982,
+          54273982,
+          54274032,
+          54274032,
+          54274032
+        ],
+        "signature_samples": [
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550"
+        ]
+      },
+      "legacy_initialization": {
+        "elapsed_seconds_samples": [
+          0.092066041,
+          0.091878291,
+          0.09276425,
+          0.092590208,
+          0.091456291,
+          0.092627625,
+          0.094513209
+        ],
+        "median_elapsed_seconds": 0.092590208,
+        "median_peak_memory_bytes": 19342574,
+        "peak_memory_bytes_samples": [
+          19342574,
+          19342574,
+          19342574,
+          19342574,
+          19342574,
+          19342574,
+          19342574
+        ]
+      },
+      "operation_count": 2500,
+      "sqlite_load_and_optimizer_initialization": {
+        "elapsed_seconds_samples": [
+          0.036817167,
+          0.036606791,
+          0.0368515,
+          0.036375583,
+          0.03617425,
+          0.036302583,
+          0.038241875
+        ],
+        "median_elapsed_seconds": 0.036606791,
+        "median_peak_memory_bytes": 8166626,
+        "peak_memory_bytes_samples": [
+          8166626,
+          8166626,
+          8166626,
+          8166626,
+          8166626,
+          8166626,
+          8166626
+        ]
+      }
+    },
+    "500": {
+      "active_end_to_end": {
+        "elapsed_seconds_samples": [
+          0.481120709,
+          0.456671083,
+          0.4626625,
+          0.475678833,
+          0.459913042,
+          0.459558916,
+          0.4653245
+        ],
+        "median_elapsed_seconds": 0.4626625,
+        "median_peak_memory_bytes": 9377808,
+        "peak_memory_bytes_samples": [
+          9377758,
+          9377758,
+          9378208,
+          9378008,
+          9378008,
+          9377808,
+          9377758
+        ],
+        "signature_samples": [
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3"
+        ]
+      },
+      "cold_build_and_sqlite_write": {
+        "elapsed_seconds_samples": [
+          0.043718042,
+          0.043507833,
+          0.042734083,
+          0.043092417,
+          0.0429615,
+          0.043539666,
+          0.043545542
+        ],
+        "median_elapsed_seconds": 0.043507833,
+        "median_peak_memory_bytes": 4257273,
+        "peak_memory_bytes_samples": [
+          4257471,
+          4257055,
+          4256681,
+          4257273,
+          4257323,
+          4257323,
+          4257273
+        ]
+      },
+      "derived": {
+        "l1_warm_initialization_speedup": 2.8992,
+        "peak_memory_ratio": 0.8236,
+        "runtime_regression_percent": -3.4564,
+        "signatures_equal": true,
+        "sqlite_warm_initialization_speedup": 2.0647
+      },
+      "l1_hit_and_optimizer_initialization": {
+        "elapsed_seconds_samples": [
+          0.00722225,
+          0.006515792,
+          0.006818041,
+          0.006756041,
+          0.006713209,
+          0.0065685,
+          0.00659575
+        ],
+        "median_elapsed_seconds": 0.006713209,
+        "median_peak_memory_bytes": 1905118,
+        "peak_memory_bytes_samples": [
+          1905118,
+          1905118,
+          1905118,
+          1905118,
+          1905118,
+          1905118,
+          1905118
+        ]
+      },
+      "legacy_end_to_end": {
+        "elapsed_seconds_samples": [
+          0.481208292,
+          0.483833583,
+          0.4993665,
+          0.479226333,
+          0.475122,
+          0.478823583,
+          0.475207167
+        ],
+        "median_elapsed_seconds": 0.479226333,
+        "median_peak_memory_bytes": 11385952,
+        "peak_memory_bytes_samples": [
+          11386102,
+          11385952,
+          11385952,
+          11386002,
+          11385852,
+          11386002,
+          11385802
+        ],
+        "signature_samples": [
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3"
+        ]
+      },
+      "legacy_initialization": {
+        "elapsed_seconds_samples": [
+          0.019754333,
+          0.019276292,
+          0.019488042,
+          0.019463166,
+          0.019787583,
+          0.019278709,
+          0.019229583
+        ],
+        "median_elapsed_seconds": 0.019463166,
+        "median_peak_memory_bytes": 4211036,
+        "peak_memory_bytes_samples": [
+          4210336,
+          4211036,
+          4211536,
+          4211136,
+          4210936,
+          4210986,
+          4211586
+        ]
+      },
+      "operation_count": 500,
+      "sqlite_load_and_optimizer_initialization": {
+        "elapsed_seconds_samples": [
+          0.009927208,
+          0.009916916,
+          0.0094315,
+          0.009105584,
+          0.009400833,
+          0.009426542,
+          0.009166375
+        ],
+        "median_elapsed_seconds": 0.009426542,
+        "median_peak_memory_bytes": 1907078,
+        "peak_memory_bytes_samples": [
+          1907078,
+          1907078,
+          1907078,
+          1907078,
+          1907078,
+          1907078,
+          1907078
+        ]
+      }
+    },
+    "80": {
+      "active_end_to_end": {
+        "elapsed_seconds_samples": [
+          0.076934292,
+          0.076907833,
+          0.076227167,
+          0.076776292,
+          0.076736208,
+          0.076748209,
+          0.079800875
+        ],
+        "median_elapsed_seconds": 0.076776292,
+        "median_peak_memory_bytes": 1821242,
+        "peak_memory_bytes_samples": [
+          1821892,
+          1820692,
+          1821242,
+          1822042,
+          1820892,
+          1821242,
+          1820542
+        ],
+        "signature_samples": [
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d"
+        ]
+      },
+      "cold_build_and_sqlite_write": {
+        "elapsed_seconds_samples": [
+          0.011102042,
+          0.010628,
+          0.0106365,
+          0.01150475,
+          0.011007916,
+          0.01119025,
+          0.010680458
+        ],
+        "median_elapsed_seconds": 0.011007916,
+        "median_peak_memory_bytes": 1023385,
+        "peak_memory_bytes_samples": [
+          1023073,
+          1023453,
+          1023393,
+          1022781,
+          1023385,
+          1023531,
+          1023269
+        ]
+      },
+      "derived": {
+        "l1_warm_initialization_speedup": 2.257,
+        "peak_memory_ratio": 0.8246,
+        "runtime_regression_percent": -2.6302,
+        "signatures_equal": true,
+        "sqlite_warm_initialization_speedup": 1.641
+      },
+      "l1_hit_and_optimizer_initialization": {
+        "elapsed_seconds_samples": [
+          0.002560917,
+          0.002789292,
+          0.002649125,
+          0.002626792,
+          0.0026825,
+          0.002611458,
+          0.002660958
+        ],
+        "median_elapsed_seconds": 0.002649125,
+        "median_peak_memory_bytes": 590834,
+        "peak_memory_bytes_samples": [
+          590834,
+          590834,
+          590834,
+          590834,
+          590834,
+          590834,
+          590834
+        ]
+      },
+      "legacy_end_to_end": {
+        "elapsed_seconds_samples": [
+          0.07892225,
+          0.078581667,
+          0.078795833,
+          0.078859916,
+          0.078850208,
+          0.078536083,
+          0.07897075
+        ],
+        "median_elapsed_seconds": 0.078850208,
+        "median_peak_memory_bytes": 2208758,
+        "peak_memory_bytes_samples": [
+          2208956,
+          2208758,
+          2208694,
+          2208970,
+          2208204,
+          2208896,
+          2207046
+        ],
+        "signature_samples": [
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d"
+        ]
+      },
+      "legacy_initialization": {
+        "elapsed_seconds_samples": [
+          0.0053385,
+          0.006031167,
+          0.006113583,
+          0.005268,
+          0.005979041,
+          0.00747075,
+          0.005376208
+        ],
+        "median_elapsed_seconds": 0.005979041,
+        "median_peak_memory_bytes": 1003670,
+        "peak_memory_bytes_samples": [
+          1003330,
+          1003950,
+          1003638,
+          1004058,
+          1003670,
+          1003490,
+          1003828
+        ]
+      },
+      "operation_count": 80,
+      "sqlite_load_and_optimizer_initialization": {
+        "elapsed_seconds_samples": [
+          0.003643458,
+          0.00375425,
+          0.003572167,
+          0.003814042,
+          0.003993583,
+          0.003507791,
+          0.003538542
+        ],
+        "median_elapsed_seconds": 0.003643458,
+        "median_peak_memory_bytes": 592826,
+        "peak_memory_bytes_samples": [
+          592922,
+          592882,
+          592842,
+          592826,
+          592810,
+          592794,
+          592744
+        ]
+      }
+    }
+  },
+  "schema_version": 1,
+  "thresholds": {
+    "maximum_peak_memory_ratio": 1.25,
+    "maximum_runtime_regression_percent": 3.0,
+    "minimum_warm_initialization_speedup": 2.0
+  }
+}

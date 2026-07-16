@@ -293,12 +293,12 @@ class GraphArtifactStore:
 
     @staticmethod
     def _rows_to_csr(
-        size: int, rows: list[sqlite3.Row], target_size: int, name: str
+        size: int, rows: list[tuple[int, int]], target_size: int, name: str
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         buckets: list[list[int]] = [[] for _ in range(size)]
-        for row in rows:
-            source = int(row["source_ordinal"])
-            target = int(row["target_ordinal"])
+        for source_value, target_value in rows:
+            source = int(source_value)
+            target = int(target_value)
             if not 0 <= source < size or not 0 <= target < target_size:
                 raise GraphContextCorruptError(f"{name} relation ordinal out of bounds")
             buckets[source].append(target)
@@ -309,74 +309,79 @@ class GraphArtifactStore:
             offsets.append(len(indices))
         return tuple(offsets), tuple(indices)
 
-    @staticmethod
-    def _load_entity_ids(
-        conn: sqlite3.Connection, entity_type: str
-    ) -> tuple[str, ...]:
-        rows = conn.execute(
-            """
-            SELECT entity_id, ordinal FROM graph_entity_index
-            WHERE entity_type=? ORDER BY ordinal
-            """,
-            (entity_type,),
-        ).fetchall()
-        if any(int(row["ordinal"]) != ordinal for ordinal, row in enumerate(rows)):
-            raise GraphContextCorruptError(
-                f"{entity_type} ordinals are not contiguous"
-            )
-        return tuple(row["entity_id"] for row in rows)
-
     def load_context(self, fingerprint: GraphFingerprint) -> GraphContext | None:
         with get_db(self.db_path) as conn:
+            conn.row_factory = None
             meta = conn.execute(
-                "SELECT * FROM graph_context_meta WHERE id=1"
+                """
+                SELECT status, instance_hash, topology_hash, feature_hash,
+                       schema_version, builder_version, operation_count,
+                       relation_count, feature_count
+                FROM graph_context_meta WHERE id=1
+                """
             ).fetchone()
-            if not meta or meta["status"] != "ready":
+            if not meta or meta[0] != "ready":
                 return None
             stored_fingerprint = GraphFingerprint(
-                instance_hash=meta["instance_hash"],
-                topology_hash=meta["topology_hash"],
-                feature_hash=meta["feature_hash"],
-                schema_version=int(meta["schema_version"]),
-                builder_version=meta["builder_version"],
+                instance_hash=meta[1],
+                topology_hash=meta[2],
+                feature_hash=meta[3],
+                schema_version=int(meta[4]),
+                builder_version=meta[5],
             )
             if stored_fingerprint != fingerprint:
                 return None
 
             display_meta = conn.execute(
-                "SELECT * FROM graph_meta WHERE id=1"
+                """
+                SELECT instance_hash, topology_hash, feature_hash,
+                       schema_version, builder_version, invalid_reason,
+                       total_nodes, total_edges,
+                       (SELECT COUNT(*) FROM graph_nodes),
+                       (SELECT COUNT(*) FROM graph_edges)
+                FROM graph_meta WHERE id=1
+                """
             ).fetchone()
             if not display_meta:
                 raise GraphContextCorruptError("display graph metadata is missing")
             display_fingerprint = GraphFingerprint(
-                instance_hash=display_meta["instance_hash"],
-                topology_hash=display_meta["topology_hash"],
-                feature_hash=display_meta["feature_hash"],
-                schema_version=int(display_meta["schema_version"]),
-                builder_version=display_meta["builder_version"],
+                instance_hash=display_meta[0],
+                topology_hash=display_meta[1],
+                feature_hash=display_meta[2],
+                schema_version=int(display_meta[3]),
+                builder_version=display_meta[4],
             )
             if display_fingerprint != stored_fingerprint:
                 raise GraphContextCorruptError(
                     "display and compute fingerprints differ"
                 )
-            if display_meta["invalid_reason"]:
+            if display_meta[5]:
                 raise GraphContextCorruptError("display graph is marked invalid")
-            display_counts = conn.execute(
-                """
-                SELECT
-                    (SELECT COUNT(*) FROM graph_nodes) AS node_count,
-                    (SELECT COUNT(*) FROM graph_edges) AS edge_count
-                """
-            ).fetchone()
             if (
-                int(display_meta["total_nodes"]) != display_counts["node_count"]
-                or int(display_meta["total_edges"]) != display_counts["edge_count"]
+                int(display_meta[6]) != display_meta[8]
+                or int(display_meta[7]) != display_meta[9]
             ):
                 raise GraphContextCorruptError("display graph metadata count mismatch")
 
-            operation_ids = self._load_entity_ids(conn, "operation")
-            machine_ids = self._load_entity_ids(conn, "machine")
-            if len(operation_ids) != int(meta["operation_count"]):
+            entity_rows = conn.execute(
+                """
+                SELECT entity_type, entity_id, ordinal
+                FROM graph_entity_index
+                WHERE entity_type IN ('machine', 'operation')
+                ORDER BY entity_type, ordinal
+                """
+            ).fetchall()
+            entity_ids: dict[str, list[str]] = {"machine": [], "operation": []}
+            for entity_type, entity_id, ordinal in entity_rows:
+                values = entity_ids[entity_type]
+                if int(ordinal) != len(values):
+                    raise GraphContextCorruptError(
+                        f"{entity_type} ordinals are not contiguous"
+                    )
+                values.append(entity_id)
+            operation_ids = tuple(entity_ids["operation"])
+            machine_ids = tuple(entity_ids["machine"])
+            if len(operation_ids) != int(meta[6]):
                 raise GraphContextCorruptError("operation metadata count mismatch")
 
             relation_rows = conn.execute(
@@ -386,17 +391,17 @@ class GraphArtifactStore:
                 ORDER BY relation_type, source_ordinal, target_ordinal
                 """
             ).fetchall()
-            if len(relation_rows) != int(meta["relation_count"]):
+            if len(relation_rows) != int(meta[7]):
                 raise GraphContextCorruptError("relation metadata count mismatch")
-            relations: dict[str, list[sqlite3.Row]] = {
+            relations: dict[str, list[tuple[int, int]]] = {
                 "predecessor": [],
                 "successor": [],
                 "eligible_machine": [],
             }
-            for row in relation_rows:
-                if row["relation_type"] not in relations:
+            for relation_type, source, target in relation_rows:
+                if relation_type not in relations:
                     raise GraphContextCorruptError("unknown graph relation type")
-                relations[row["relation_type"]].append(row)
+                relations[relation_type].append((source, target))
 
             predecessor_offsets, predecessor_indices = self._rows_to_csr(
                 len(operation_ids),
@@ -418,20 +423,25 @@ class GraphArtifactStore:
             )
 
             feature_rows = conn.execute(
-                "SELECT * FROM graph_operation_features ORDER BY op_ordinal"
+                """
+                SELECT op_ordinal, predecessor_depth, assembly_criticality,
+                       shared_resource_degree, bottleneck_adjacency,
+                       graph_out_degree
+                FROM graph_operation_features ORDER BY op_ordinal
+                """
             ).fetchall()
             if (
                 len(feature_rows) != len(operation_ids)
-                or len(feature_rows) != int(meta["feature_count"])
+                or len(feature_rows) != int(meta[8])
                 or any(
-                    int(row["op_ordinal"]) != ordinal
+                    int(row[0]) != ordinal
                     for ordinal, row in enumerate(feature_rows)
                 )
             ):
                 raise GraphContextCorruptError("feature metadata count mismatch")
             feature_names = ComputeGraphProjection.FEATURE_NAMES
             feature_matrix = tuple(
-                tuple(float(row[name]) for name in feature_names)
+                tuple(float(value) for value in row[1:])
                 for row in feature_rows
             )
             if any(
@@ -449,13 +459,11 @@ class GraphArtifactStore:
                 """
             ).fetchall()
             groups: dict[tuple[str, str], list[int]] = {}
-            for row in group_rows:
-                ordinal = int(row["op_ordinal"])
+            for group_type, group_key, ordinal_value in group_rows:
+                ordinal = int(ordinal_value)
                 if not 0 <= ordinal < len(operation_ids):
                     raise GraphContextCorruptError("group ordinal out of bounds")
-                groups.setdefault((row["group_type"], row["group_key"]), []).append(
-                    ordinal
-                )
+                groups.setdefault((group_type, group_key), []).append(ordinal)
 
             return GraphContext(
                 fingerprint=stored_fingerprint,
