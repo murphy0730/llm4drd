@@ -52,11 +52,20 @@ def canonical_graph_signature(graph) -> tuple:
     return nodes, edges
 
 
+def _remove_wall_time(value) -> None:
+    if isinstance(value, dict):
+        value.pop("wall_time_ms", None)
+        for nested in value.values():
+            _remove_wall_time(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _remove_wall_time(nested)
+
+
 def hybrid_result_signature(result) -> dict:
     payload = deepcopy(result.to_export_dict())
-    payload["baseline"]["metrics"]["wall_time_ms"] = 0.0
-    for solution in payload["solutions"]:
-        solution["metrics"]["wall_time_ms"] = 0.0
+    _remove_wall_time(payload["baseline"])
+    _remove_wall_time(payload["solutions"])
     return {
         "baseline": payload["baseline"],
         "solutions": payload["solutions"],

@@ -8,6 +8,46 @@ from llm4drd.tests.shop_fixtures import (
 
 
 class LegacyGraphBaselineTests(unittest.TestCase):
+    def test_hybrid_signature_recursively_removes_only_wall_time(self):
+        payload = {
+            "baseline": {
+                "metrics": {
+                    "wall_time_ms": 0.4,
+                    "makespan": 9.0,
+                    "diagnostics": {"wall_time_ms": 0.2, "event_count": 13},
+                },
+            },
+            "solutions": [{
+                "metrics": {
+                    "wall_time_ms": 0.3,
+                    "total_evaluations": 7,
+                    "phases": [{"wall_time_ms": 0.1, "name": "exact"}],
+                },
+            }],
+            "archive_size": 1,
+            "found_solution_count": 1,
+            "generations_completed": 1,
+            "total_evaluations": 7,
+            "approximate_evaluations": 5,
+            "exact_evaluations": 2,
+        }
+
+        class Result:
+            def to_export_dict(self):
+                return payload
+
+        signature = hybrid_result_signature(Result())
+
+        self.assertEqual(
+            signature["baseline"]["metrics"],
+            {"makespan": 9.0, "diagnostics": {"event_count": 13}},
+        )
+        self.assertEqual(
+            signature["solutions"][0]["metrics"],
+            {"total_evaluations": 7, "phases": [{"name": "exact"}]},
+        )
+        self.assertEqual(payload["baseline"]["metrics"]["wall_time_ms"], 0.4)
+
     def test_legacy_graph_is_deterministic(self):
         left = HeterogeneousGraph(); left.build_from_shopfloor(make_graph_context_shop())
         right = HeterogeneousGraph(); right.build_from_shopfloor(make_graph_context_shop())
