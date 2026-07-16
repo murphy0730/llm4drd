@@ -4236,7 +4236,10 @@ function mountGantts() {
         start: data.window.start,
         end: data.window.end,
         showTooltips: true,
-        locale: "zh-cn",
+        format: {
+          minorLabels: { minute: "HH:mm", hour: "HH:mm", day: "D日", week: "w周", month: "M月", year: "YYYY" },
+          majorLabels: { minute: "M月D日", hour: "M月D日", day: "YYYY年M月", week: "YYYY年M月", month: "YYYY年", year: "" },
+        },
       }
     );
     app.ganttInstances.push({ canvasId: el.id, timeline });
