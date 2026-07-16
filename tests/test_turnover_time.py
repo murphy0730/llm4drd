@@ -518,6 +518,34 @@ class TestTurnoverValidation(unittest.TestCase):
         matches = [e for e in result["errors"] if "流转等待时长非法" in e["message"]]
         self.assertEqual(matches, [])
 
+    def test_nonfinite_turnover_is_rejected_by_import_validation(self):
+        """nan/inf 不能通过校验：inf 会让 ExactSolver 抛 OverflowError，nan 让闸门失效。"""
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(turnover=bad):
+                shop = _build_shop(
+                    [("OP1", "turning", 5.0, [], bad)],
+                    [("m1", "turning", _full_calendar())],
+                )
+                result = _validate_instance(shop)
+                matches = [
+                    e for e in result["errors"]
+                    if e["entity"] == "OP1" and "流转等待时长非法" in e["message"]
+                ]
+                self.assertTrue(matches, f"turnover={bad} 未被校验拦截")
+
+    def test_update_operation_rejects_invalid_turnover(self):
+        """编辑写入边界：负值与非有限值都必须被拒，不能落库。"""
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from llm4drd.api.server import update_operation
+
+        for bad in ("-1", "nan", "inf"):
+            with self.subTest(turnover=bad):
+                with self.assertRaises(HTTPException):
+                    asyncio.run(update_operation("OP1", {"turnover_time": bad}))
+
 
 class TestGraphNodeTurnover(unittest.TestCase):
     """OP 节点属性须暴露 turnover_time，与既有 processing_time 并列。"""

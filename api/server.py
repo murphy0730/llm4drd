@@ -1384,6 +1384,10 @@ async def update_task(task_id: str, data: dict):
 @app.put("/api/instance/operation/{op_id}")
 async def update_operation(op_id: str, data: dict):
     global shop
+    if str(data.get("turnover_time", "")).strip():
+        turnover_value = float(data["turnover_time"])
+        if not (math.isfinite(turnover_value) and turnover_value >= 0):
+            raise HTTPException(400, f"流转等待时长非法（{data['turnover_time']}），必须是不小于 0 的有限数")
     initial_start_time = datetime_to_offset_hours(_plan_start_ref(), data.get("initial_start_at", data.get("initial_start_time")))
     initial_end_time = datetime_to_offset_hours(_plan_start_ref(), data.get("initial_end_at", data.get("initial_end_time")))
     data = {
@@ -1677,8 +1681,8 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
             err("关联关系", op_id, f"工序引用了不存在的任务 {op.task_id}", sheet="operations / tasks")
         if op.processing_time is None or float(op.processing_time) <= 0:
             err("数据完整性", op_id, f"加工时长非法（{op.processing_time}），必须大于 0", sheet="operations")
-        if op.turnover_time is not None and float(op.turnover_time) < 0:
-            err("数据完整性", op_id, f"流转等待时长非法（{op.turnover_time}），不能为负", sheet="operations")
+        if op.turnover_time is not None and not (math.isfinite(float(op.turnover_time)) and float(op.turnover_time) >= 0):
+            err("数据完整性", op_id, f"流转等待时长非法（{op.turnover_time}），必须是不小于 0 的有限数", sheet="operations")
         for predecessor_id in op.predecessor_ops:
             if predecessor_id not in current_shop.operations:
                 err("关联关系", op_id, f"前置工序 {predecessor_id} 不存在，该工序将永远无法就绪（仿真会输出空排程）", sheet="operations")
