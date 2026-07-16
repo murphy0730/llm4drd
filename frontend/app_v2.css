@@ -1941,6 +1941,31 @@ a {
   color: var(--ink-soft, #5b6c7c);
 }
 
+.import-progress.is-warning {
+  border-color: #b76800;
+  background: rgba(183, 104, 0, 0.07);
+}
+
+.import-progress.is-warning .import-progress-track i { background: #b76800; }
+
+.sim-status-icon {
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1;
+  flex: none;
+}
+
+.import-progress.is-success .sim-status-icon { color: var(--success); }
+.import-progress.is-warning .sim-status-icon { color: #b76800; }
+.import-progress.is-error .sim-status-icon { color: var(--danger); }
+
+.sim-elapsed {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft, #5b6c7c);
+  font-size: 12px;
+}
+
 /* === 数据强校验面板（阶段二） === */
 .validation-panel.danger { border-color: var(--danger); }
 .validation-panel.warning { border-color: #b76800; }
@@ -1959,7 +1984,83 @@ a {
 }
 
 .sim-infeasible-banner strong { color: var(--danger); }
-.sim-infeasible-banner span { font-size: 13px; color: var(--ink-soft, #5b6c7c); }
+.sim-infeasible-banner > span { font-size: 13px; color: var(--ink-soft, #5b6c7c); }
+
+/* 逐工序根因明细（可展开） */
+.sim-infeasible-detail { font-size: 13px; }
+.sim-infeasible-detail > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--danger);
+  padding: 4px 0;
+  user-select: none;
+}
+.sim-reason-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.sim-reason {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-left: 3px solid var(--ink-soft, #98a6b3);
+}
+.sim-reason--root { border-left-color: var(--danger); }
+.sim-reason--derived { border-left-color: var(--ink-soft, #98a6b3); opacity: 0.9; }
+.sim-reason-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sim-reason-label { font-weight: 600; color: var(--ink, #26333f); }
+.sim-reason-count { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--ink-soft, #5b6c7c); }
+.sim-reason-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.sim-reason-tag--root { color: #fff; background: var(--danger); }
+.sim-reason-tag--derived { color: var(--ink-soft, #5b6c7c); background: rgba(152, 166, 179, 0.22); }
+.sim-reason-ids,
+.sim-reason-examples {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ink-soft, #5b6c7c);
+  word-break: break-all;
+}
+.sim-reason-tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft, #5b6c7c);
+}
+.sim-bottleneck-block {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--danger);
+  background: rgba(179, 58, 47, 0.05);
+}
+.sim-bottleneck-title {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--danger);
+  margin-bottom: 4px;
+}
+.sim-bottleneck-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--ink, #26333f);
+  display: grid;
+  gap: 4px;
+}
 
 /* === 错误弹窗（阶段四） === */
 .error-modal-overlay {

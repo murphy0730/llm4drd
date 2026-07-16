@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 import openpyxl
 
 from ..config import get_config, reload_config
-from ..core.models import OpStatus, ShopFloor
+from ..core.models import OpStatus, Operation, ShopFloor
 from ..data.generator import InstanceGenerator
 from ..core.rules import BUILTIN_RULES, get_all_rule_names
 from ..core.simulator import Simulator, SimResult
@@ -18,7 +18,7 @@ from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
-from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore
+from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore, shifts_to_payload
 from ..data.template_builder import build_instance_template_bytes
 from ..knowledge.graph import HeterogeneousGraph
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
@@ -35,6 +35,7 @@ if os.path.isdir(FRONT):
 
 shop: Optional[ShopFloor] = None
 last_result = None
+last_sim_payload = None
 last_engine: Optional[EvolutionEngine] = None
 inst_store = InstanceStore()
 graph_store = GraphStore()
@@ -242,10 +243,19 @@ def _serialize_schedule_entry(current_shop: ShopFloor, entry: dict) -> dict:
     payload = dict(entry)
     start_value = entry.get("start")
     end_value = entry.get("end")
-    if start_value is not None:
+    # 仿真不可行时，部分工序的 start/end 可能是 inf（资源日历容量不足等），
+    # 这里做有限性校验，避免 time_label -> timedelta(hours=inf) 抛 OverflowError，
+    # 同时把 inf 数值也置为 None，防止 JSON 输出 Infinity 污染前端。
+    if start_value is not None and math.isfinite(float(start_value)):
         payload["start_at"] = current_shop.time_label(start_value)
-    if end_value is not None:
+    else:
+        payload["start"] = None
+        payload["start_at"] = None
+    if end_value is not None and math.isfinite(float(end_value)):
         payload["end_at"] = current_shop.time_label(end_value)
+    else:
+        payload["end"] = None
+        payload["end_at"] = None
     return payload
 
 
@@ -699,6 +709,23 @@ def _build_exact_reference_solution(
         "exact_info": exact_info,
         "schedule": schedule,
     }
+
+
+def _json_safe(value: Any) -> Any:
+    """递归地将 inf/-inf/nan 等非 JSON 合规的浮点值替换为 None。
+
+    不可行排程会产生 makespan=inf、total_tardiness=inf 等指标，
+    starlette 默认的 json.dumps 无法序列化这些值，会抛出
+    "Out of range float values are not JSON compliant: inf" 并返回 500。
+    前端已将 null 渲染为 "-"，因此此处统一转换为 None。
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _active_shop() -> Optional[ShopFloor]:
@@ -1280,6 +1307,11 @@ async def get_instance_from_db():
     if not inst_store.has_data():
         raise HTTPException(400, "数据库中无实例数据")
     data = inst_store.load_all()
+    # 班次在库里是紧凑字符串（"day/start/hours;..."），前端"机器维护"页按 JSON 数组渲染，
+    # 这里统一解析成结构化数组，避免文本框显示成空的 []。
+    for resource_key in ("machines", "toolings", "personnel"):
+        for row in data.get(resource_key, []):
+            row["shifts"] = shifts_to_payload(row.get("shifts"))
     # 构建 shop 并返回概览
     if not shop:
         shop = inst_store.build_shopfloor()
@@ -1622,6 +1654,29 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
     if ops_without_machine > 20:
         err("约束条件", "operations", f"另有 {ops_without_machine - 20} 道工序同样没有可用机器（已省略明细）", sheet="operations / machines")
 
+    # --- 资源日历可用性：某类资源有实例、但全部没有任何可用工作窗口 ---
+    # （班次可能都落在计划起点之前，或被停机完全占满；仿真会因此永远排不出相关工序。
+    #   "完全没有实例" 的情况已在上面的按工序检查里覆盖，这里只查 "有实例但排不了班"。）
+    used_process_types = {op.process_type for op in current_shop.operations.values()}
+    for process_type in sorted(used_process_types):
+        machines = current_shop.get_machines_for_type(process_type)
+        if machines and all(not _resource_has_calendar(machine) for machine in machines):
+            err("约束条件", process_type, f"工艺类型 {process_type} 的全部机器都没有任何可用排班窗口（班次可能都落在计划起点之前或被停机占满），相关工序无法开工", sheet="machines")
+
+    used_tooling_types: set[str] = set()
+    used_skills: set[str] = set()
+    for op in current_shop.operations.values():
+        used_tooling_types.update(op.required_tooling_types)
+        used_skills.update(op.required_personnel_skills)
+    for tooling_type in sorted(used_tooling_types):
+        toolings = current_shop.get_toolings_for_type(tooling_type)
+        if toolings and all(not _resource_has_calendar(tooling) for tooling in toolings):
+            err("约束条件", tooling_type, f"工装类型 {tooling_type} 的全部实例都没有任何可用排班窗口，需要该工装的工序无法开工", sheet="toolings")
+    for skill_id in sorted(used_skills):
+        people = current_shop.get_personnel_for_skill(skill_id)
+        if people and all(not _resource_has_calendar(person) for person in people):
+            err("约束条件", skill_id, f"技能 {skill_id} 的全部人员都没有任何可用排班窗口，需要该技能的工序无法开工", sheet="personnel")
+
     # --- 工序前驱环检测（有环则整条链永远无法就绪）---
     color: dict[str, int] = {}
     cycle_reported = False
@@ -1745,6 +1800,142 @@ async def export_validation_excel():
     filename = f"validation_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return Response(
         content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
+    """把一次仿真结果（/api/simulate 返回的 payload）导出为多 sheet 的 Excel。"""
+    gantt = payload.get("gantt") or []
+    metrics = payload.get("metrics") or {}
+    rule = payload.get("rule") or "-"
+    diagnosis = payload.get("diagnosis")
+    diagnosis_detail = payload.get("diagnosis_detail")
+    scheduled_op_ids = {str(e.get("op_id")) for e in gantt}
+
+    wb = openpyxl.Workbook()
+
+    # Sheet 1: 排程结果（甘特明细）
+    ws = wb.active
+    ws.title = "排程结果"
+    headers = [
+        "工序ID", "任务ID", "订单ID", "订单名称", "机器ID", "工序类型",
+        "开始(小时)", "开始时间", "结束(小时)", "结束时间", "时长(小时)",
+        "状态", "优先级", "交期", "是否延误", "是否主订单",
+    ]
+    ws.append(headers)
+    for e in sorted(gantt, key=lambda x: (x.get("start") or 0)):
+        ws.append([
+            e.get("op_id", ""),
+            e.get("task_id", ""),
+            e.get("order_id", ""),
+            e.get("order_name", ""),
+            e.get("machine_id", ""),
+            e.get("process_type", ""),
+            e.get("start"),
+            e.get("start_at"),
+            e.get("end"),
+            e.get("end_at"),
+            e.get("duration"),
+            e.get("status") or "completed",
+            e.get("priority", ""),
+            e.get("due_at"),
+            "是" if e.get("is_tardy") else "否",
+            "是" if e.get("is_main") else "否",
+        ])
+
+    # Sheet 2: 关键指标
+    ws_metrics = wb.create_sheet("关键指标")
+    ws_metrics.append(["指标", "数值"])
+    metric_order = [
+        ("规则", rule),
+        ("可行性 feasible", metrics.get("feasible")),
+        ("完成工序 / 总工序", f'{metrics.get("completed_operations")} / {metrics.get("total_operations")}'),
+        ("总周期 makespan(小时)", metrics.get("makespan")),
+        ("总延误 total_tardiness(小时)", metrics.get("total_tardiness")),
+        ("平均延误 avg_tardiness(小时)", metrics.get("avg_tardiness")),
+        ("最大延误 max_tardiness(小时)", metrics.get("max_tardiness")),
+        ("延误订单数", metrics.get("tardy_job_count")),
+        ("平均流程时间 avg_flowtime(小时)", metrics.get("avg_flowtime")),
+        ("总等待时间 total_wait_time(小时)", metrics.get("total_wait_time")),
+        ("平均等待时间 avg_wait_time(小时)", metrics.get("avg_wait_time")),
+        ("净可用利用率 avg_net_available_utilization", metrics.get("avg_net_available_utilization")),
+        ("关键资源净可用利用率 critical_net_available_utilization", metrics.get("critical_net_available_utilization")),
+        ("平均利用率 avg_utilization", metrics.get("avg_utilization")),
+        ("关键资源利用率 critical_utilization", metrics.get("critical_utilization")),
+        ("主订单延误数 main_order_tardy_count", metrics.get("main_order_tardy_count")),
+        ("主订单延误总时长 main_order_tardy_total_time(小时)", metrics.get("main_order_tardy_total_time")),
+        ("主订单延误比例 main_order_tardy_ratio", metrics.get("main_order_tardy_ratio")),
+        ("总主订单数 total_main_orders", metrics.get("total_main_orders")),
+    ]
+    for key, value in metric_order:
+        ws_metrics.append([key, value])
+    known = {k for k, _ in metric_order}
+    for key, value in metrics.items():
+        if key not in known and not isinstance(value, (dict, list)):
+            ws_metrics.append([key, value])
+
+    # Sheet 3: 延误明细
+    ws_tardy = wb.create_sheet("延误明细")
+    ws_tardy.append(["订单ID", "订单名称", "工序ID", "机器ID", "结束时间", "交期", "超出(小时)"])
+    for e in sorted(gantt, key=lambda x: (x.get("end") or 0), reverse=True):
+        if e.get("is_tardy"):
+            due = e.get("due_date")
+            end = e.get("end")
+            over = round(end - due, 3) if isinstance(end, (int, float)) and isinstance(due, (int, float)) else ""
+            ws_tardy.append([
+                e.get("order_id", ""), e.get("order_name", ""), e.get("op_id", ""),
+                e.get("machine_id", ""), e.get("end_at"), e.get("due_at"), over,
+            ])
+
+    # Sheet 4: 诊断与未完成工序
+    ws_diag = wb.create_sheet("诊断")
+    if diagnosis:
+        ws_diag.append(["仿真诊断", diagnosis])
+        ws_diag.append([])
+    if diagnosis_detail:
+        if isinstance(diagnosis_detail, dict):
+            for k, v in diagnosis_detail.items():
+                ws_diag.append([str(k), str(v)])
+        else:
+            ws_diag.append([str(diagnosis_detail)])
+    if shop is not None:
+        unscheduled = [op for op in shop.operations.values() if str(op.id) not in scheduled_op_ids]
+        if unscheduled:
+            ws_diag.append([])
+            ws_diag.append(["未完成工序数", len(unscheduled)])
+            ws_diag.append(["工序ID", "任务ID", "工序类型", "状态"])
+            for op in unscheduled:
+                ws_diag.append([op.id, op.task_id, op.process_type, getattr(op, "status", "")])
+    if ws_diag.max_row == 1 and ws_diag.cell(1, 1).value is None:
+        ws_diag.append(["无", "本次仿真结果完整，无诊断信息"])
+
+    for sheet in wb.worksheets:
+        for column_cells in sheet.columns:
+            length = max((len(str(cell.value)) for cell in column_cells if cell.value is not None), default=0)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(length + 2, 12), 80)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+@app.post("/api/simulate/export-excel")
+async def export_sim_excel():
+    """导出最近一次仿真结果为 Excel（供用户下载）。"""
+    current_shop = _active_shop()
+    if last_sim_payload is None:
+        raise HTTPException(400, "尚未运行仿真，无法导出。请先在仿真与洞察中运行一次规则仿真。")
+    try:
+        data = _build_sim_export_excel(last_sim_payload, current_shop)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("sim export excel failed")
+        raise HTTPException(500, f"导出 Excel 失败：{exc}")
+    rule = last_sim_payload.get("rule") or "sim"
+    filename = f"sim_result_{rule}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
@@ -1913,33 +2104,385 @@ async def node_neighbors(node_id: str):
     return graph_store.get_node_neighbors(node_id)
 
 # === Simulate ===
-def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics) -> Optional[str]:
-    """当仿真结果异常（空排程 / 未覆盖全部工序）时，给出可读的原因诊断。"""
-    if analytics.feasible:
+# 未排程工序的根因分类：category -> (可读标签, 是否为可直接排查的根因)
+_INFEASIBLE_REASON_LABELS: dict[str, tuple[str, bool]] = {
+    "dangling": ("前驱工序/任务引用不存在（数据断链），永远无法就绪", True),
+    "no_machine": ("没有匹配的机器类型，无法分配设备", True),
+    "no_tooling": ("所需工装类型没有任何实例", True),
+    "no_personnel": ("所需人员技能没有任何实例", True),
+    "machine_no_calendar": ("所有匹配机器都没有可用排班日历（工作日历为空）", True),
+    "tooling_no_calendar": ("所需工装全部没有可用排班日历", True),
+    "personnel_no_calendar": ("所需人员全部没有可用排班日历", True),
+    "release_inf": ("工序投放时间为无穷大（订单/任务 release_time 异常）", True),
+    "starved": ("前驱已完成但始终抢不到资源（资源竞争 / 日历产能不足）", True),
+    "calendar_exhausted": ("已就绪但资源日历覆盖不到工序所需工时（机器/工装/人员某类日历太短），被仿真器挂起", True),
+    "dependency_cycle": ("依赖环：工序/任务前驱互相矛盾，环内工序永远无法就绪（需打断环）", True),
+    "blocked_by_predecessor": ("被上游未完成工序阻塞（级联受阻，非根因）", False),
+}
+
+
+def _resource_has_calendar(resource) -> bool:
+    """资源在计划起点之后是否存在任何可用工作窗口。"""
+    try:
+        return resource.next_available_time(0.0) != float("inf")
+    except Exception:
+        return True
+
+
+# 足够大的上界，用于求某资源在计划期内的总可用工时
+_CAL_HORIZON = 1e7
+
+
+def _resource_available_hours(resource) -> Optional[float]:
+    """某资源(机器/工装/人员)在 [0, _CAL_HORIZON] 内的总可用工时。
+
+    单个资源对象没有 calendar_days 属性(那是 ShopFloor 级别方法)，
+    用 CalendarResourceMixin.available_time_between 求和可用窗口。
+    """
+    try:
+        return resource.available_time_between(0.0, _CAL_HORIZON)
+    except Exception:
         return None
-    scheduled = len(result.schedule or [])
+
+
+def _calendar_bottleneck_hint(current_shop: ShopFloor, op: Operation) -> list[str]:
+    """对"已就绪但排不下(资源日历耗尽)"的工序，定位可用工时 < 所需工时的资源类型。
+
+    返回形如 ['工装:tool_turning(单件可用 656h)', '人员:skill_turning(单人可用 656h)']
+    的描述，便于在前端/日志直接看到应核查哪类资源的日历。比较口径: 取该类型中
+    "单台/单件/单人最长可用工时"与工序所需工时(取 work_remaining 或 processing_time)。
+    """
+    try:
+        need = float(op.work_remaining if op.work_remaining is not None else (op.processing_time or 0.0))
+    except Exception:
+        need = 0.0
+    if need <= 0:
+        return []
     hints: list[str] = []
-    if scheduled == 0:
+    machines = current_shop.get_eligible_machines(op)
+    if machines:
+        avail = max((_resource_available_hours(m) or 0.0) for m in machines)
+        if need > avail:
+            hints.append(f"机器(单台可用{avail:.0f}h<{need:.0f}h)")
+    for t in op.required_tooling_types or []:
+        tools = current_shop.get_toolings_for_type(t)
+        if tools:
+            avail = max((_resource_available_hours(x) or 0.0) for x in tools)
+            if need > avail:
+                hints.append(f"工装:{t}(单件可用{avail:.0f}h<{need:.0f}h)")
+    for s in op.required_personnel_skills or []:
+        people = current_shop.get_personnel_for_skill(s)
+        if people:
+            avail = max((_resource_available_hours(x) or 0.0) for x in people)
+            if need > avail:
+                hints.append(f"人员:{s}(单人可用{avail:.0f}h<{need:.0f}h)")
+    return hints
+
+
+def _diagnose_infeasible(current_shop: ShopFloor, result: SimResult, analytics,
+                         unschedulable_ops: Optional[set] = None) -> dict:
+    """对不可行 / 部分排程的仿真结果逐工序做根因分析。
+
+    返回结构化诊断：
+    {
+      "total": 总工序数, "scheduled": 已完成工序数, "unscheduled": 未完成工序数,
+      "reasons": [{"category", "label", "is_root", "count", "examples":[...], "hint_ids":[...]}...]
+    }
+    每道未完成工序按优先级归入唯一一个根因分类，便于定位真正需要调整的数据。
+    """
+    schedule = result.schedule or []
+    total_ops = len(current_shop.operations)
+
+    completed_op_ids: set[str] = {e.get("op_id") for e in schedule if e.get("op_id")}
+    completed_op_ids.update(op.id for op in current_shop.operations.values() if op.status == OpStatus.COMPLETED)
+
+    task_op_ids: dict[str, list[str]] = {}
+    for op in current_shop.operations.values():
+        task_op_ids.setdefault(op.task_id, []).append(op.id)
+    completed_task_ids = {
+        task_id for task_id, op_ids in task_op_ids.items()
+        if op_ids and all(op_id in completed_op_ids for op_id in op_ids)
+    }
+
+    buckets: dict[str, list[str]] = {}
+    hint_ids: dict[str, set[str]] = {}
+    category_by_op: dict[str, str] = {}
+
+    def _add(category: str, op: Operation, missing: Optional[list[str]] = None) -> None:
+        label = op.name or op.id
+        buckets.setdefault(category, []).append(f"{label}({op.id})")
+        category_by_op[op.id] = category
+        for token in missing or []:
+            hint_ids.setdefault(category, set()).add(str(token))
+
+    # 0. 依赖环(仿真前 SCC 检测，来自 SimResult.dependency_cycles) —— 环内工序互相
+    #    阻塞、永远无法就绪。必须在所有其他根因之前判定：否则环内工序的前驱"都未
+    #    完成"，会被误归为"级联受阻"，掩盖真因(互相矛盾的前驱关系)。任务级环与工序
+    #    级环修复方向不同(改任务令前驱 / 改 predecessor_ops)，需区分上报。
+    cycle_by_op: dict[str, dict] = {}
+    for _cyc in getattr(result, "dependency_cycles", []) or []:
+        for _oid in _cyc.get("ops", []):
+            cycle_by_op[_oid] = _cyc
+    _CYCLE_KIND_LABEL = {
+        "task": "任务级前驱互锁(改任务令 predecessor_tasks)",
+        "op": "工序级前驱环(改 predecessor_ops)",
+        "mixed": "混合前驱环(任务+工序前驱)",
+    }
+
+    for op in current_shop.operations.values():
+        if op.id in completed_op_ids:
+            continue
+
+        # 0. 依赖环内工序 —— 最优先根因，永远无法就绪
+        _cyc = cycle_by_op.get(op.id)
+        if _cyc is not None:
+            _kind = _cyc.get("kind", "op")
+            _hints = [_CYCLE_KIND_LABEL.get(_kind, _kind)]
+            if _kind in ("task", "mixed"):
+                _hints.append("涉事任务:" + ";".join(_cyc.get("tasks", [])[:6]))
+            if _kind in ("op", "mixed"):
+                _hints.append("涉事工序:" + ";".join(_cyc.get("ops", [])[:6]))
+            _add("dependency_cycle", op, _hints)
+            continue
+
+        # 1. 前驱引用断链：引用了不存在的工序 / 任务
+        dangling = [p for p in op.predecessor_ops if p not in current_shop.operations]
+        dangling += [p for p in op.predecessor_tasks if p not in current_shop.tasks]
+        if dangling:
+            _add("dangling", op, dangling)
+            continue
+
+        # 2. 没有任何匹配机器（工序类型 / 指定机器都不存在）
+        machines = current_shop.get_eligible_machines(op)
+        if not machines:
+            _add("no_machine", op, [op.process_type])
+            continue
+
+        # 3. 所需工装类型没有任何实例
+        missing_tool = [t for t in op.required_tooling_types if not current_shop.get_toolings_for_type(t)]
+        if missing_tool:
+            _add("no_tooling", op, missing_tool)
+            continue
+
+        # 4. 所需人员技能没有任何实例
+        missing_skill = [s for s in op.required_personnel_skills if not current_shop.get_personnel_for_skill(s)]
+        if missing_skill:
+            _add("no_personnel", op, missing_skill)
+            continue
+
+        # 5. 所有匹配机器都没有可用排班日历
+        if all(not _resource_has_calendar(m) for m in machines):
+            _add("machine_no_calendar", op, [op.process_type])
+            continue
+
+        # 6. 某个所需工装类型的全部实例都没有可用排班日历
+        tool_no_cal = [
+            t for t in op.required_tooling_types
+            if all(not _resource_has_calendar(x) for x in current_shop.get_toolings_for_type(t))
+        ]
+        if tool_no_cal:
+            _add("tooling_no_calendar", op, tool_no_cal)
+            continue
+
+        # 7. 某个所需技能的全部人员都没有可用排班日历
+        person_no_cal = [
+            s for s in op.required_personnel_skills
+            if all(not _resource_has_calendar(x) for x in current_shop.get_personnel_for_skill(s))
+        ]
+        if person_no_cal:
+            _add("personnel_no_calendar", op, person_no_cal)
+            continue
+
+        # 8. 投放时间无穷大
+        if current_shop.get_operation_release_time(op) == float("inf"):
+            _add("release_inf", op)
+            continue
+
+        # 9a. 已就绪但资源日历覆盖不到所需工时 —— 仿真器将其挂起(_unschedulable_ops)。
+        #     这类工序前驱都已完成，若不单列会被误归为"级联受阻/抢不到资源"，
+        #     且无法指向真正该改的日历。这里明确标为根因并附带最短资源类型提示。
+        if unschedulable_ops and op.id in unschedulable_ops:
+            _add("calendar_exhausted", op, _calendar_bottleneck_hint(current_shop, op))
+            continue
+
+        # 9. 前驱未完成 —— 级联受阻（受害者，真正根因在上游）
+        blocked_pre = [p for p in op.predecessor_ops if p not in completed_op_ids]
+        blocked_pre += [p for p in op.predecessor_tasks if p not in completed_task_ids]
+        if blocked_pre:
+            _add("blocked_by_predecessor", op, blocked_pre)
+            continue
+
+        # 10. 前驱都完成、资源类型也齐全，但始终没排上 —— 资源竞争 / 日历产能不足
+        _add("starved", op)
+
+    reasons: list[dict] = []
+    for category, examples in buckets.items():
+        label, is_root = _INFEASIBLE_REASON_LABELS.get(category, (category, True))
+        reasons.append({
+            "category": category,
+            "label": label,
+            "is_root": is_root,
+            "count": len(examples),
+            "examples": examples[:8],
+            "hint_ids": sorted(hint_ids.get(category, set()))[:12],
+        })
+    # 根因优先、数量多的排前面
+    reasons.sort(key=lambda r: (not r["is_root"], -r["count"]))
+
+    return {
+        "total": total_ops,
+        "scheduled": analytics.completed_operations,
+        "unscheduled": total_ops - analytics.completed_operations,
+        "reasons": reasons,
+        "bottlenecks": _bottleneck_root_ops(current_shop, completed_op_ids, category_by_op),
+    }
+
+
+def _bottleneck_root_ops(
+    current_shop: ShopFloor,
+    completed_op_ids: set[str],
+    category_by_op: dict[str, str],
+    top_n: int = 5,
+) -> list[dict]:
+    """找出"卡住最多下游"的根因工序。
+
+    在未完成工序的依赖子图上做拓扑传播：每道被阻塞工序继承其未完成前驱的
+    根因标签（集合上限 6 个防爆炸），最终统计每个根因工序传递性阻塞的下游
+    工序数。机器少、占用久、又卡在链条上游的工序会自然排到最前——这类工序
+    是真正的排产瓶颈，应优先增加可用机台/班次或拆分工时。
+    """
+    unscheduled_ids = {
+        op_id for op_id in current_shop.operations
+        if op_id not in completed_op_ids
+    }
+    if not unscheduled_ids:
+        return []
+    root_ids = {op_id for op_id, cat in category_by_op.items()
+                if cat not in ("blocked_by_predecessor", "dependency_cycle")}
+    if not root_ids:
+        return []
+
+    # 未完成工序按任务分组（任务级前驱：前驱任务的每道未完成工序都会卡住后继）
+    task_unscheduled: dict[str, list[str]] = {}
+    for op_id in unscheduled_ids:
+        op = current_shop.operations[op_id]
+        task_unscheduled.setdefault(op.task_id, []).append(op_id)
+
+    dependents: dict[str, list[str]] = {}
+    indegree: dict[str, int] = {op_id: 0 for op_id in unscheduled_ids}
+    for op_id in unscheduled_ids:
+        op = current_shop.operations[op_id]
+        blocking_preds: set[str] = {
+            pred for pred in op.predecessor_ops if pred in unscheduled_ids
+        }
+        for task_id in op.predecessor_tasks:
+            blocking_preds.update(task_unscheduled.get(task_id, []))
+        blocking_preds.discard(op_id)
+        for pred in blocking_preds:
+            dependents.setdefault(pred, []).append(op_id)
+            indegree[op_id] += 1
+
+    # Kahn 拓扑传播根因标签（有环的残留节点直接跳过，环本身属于数据校验问题）
+    MAX_LABELS = 6
+    labels: dict[str, set[str]] = {op_id: ({op_id} if op_id in root_ids else set()) for op_id in unscheduled_ids}
+    impact: dict[str, int] = {root: 0 for root in root_ids}
+    queue = [op_id for op_id, degree in indegree.items() if degree == 0]
+    while queue:
+        current = queue.pop()
+        current_labels = labels[current]
+        for dependent in dependents.get(current, []):
+            dep_labels = labels[dependent]
+            if len(dep_labels) < MAX_LABELS:
+                dep_labels.update(list(current_labels)[: MAX_LABELS - len(dep_labels)])
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                queue.append(dependent)
+    for op_id in unscheduled_ids:
+        if op_id in root_ids:
+            continue
+        for root in labels[op_id]:
+            if root in impact:
+                impact[root] += 1
+
+    ranked = sorted(root_ids, key=lambda op_id: impact.get(op_id, 0), reverse=True)[:top_n]
+    payload: list[dict] = []
+    for op_id in ranked:
+        op = current_shop.operations[op_id]
+        machines = current_shop.get_eligible_machines(op)
+        payload.append({
+            "op_id": op_id,
+            "op_name": op.name or op_id,
+            "process_type": op.process_type,
+            "category": category_by_op.get(op_id, ""),
+            "eligible_machine_count": len(machines),
+            "eligible_machine_ids": [machine.id for machine in machines][:6],
+            "processing_time": round(float(op.processing_time or 0.0), 2),
+            "blocked_downstream": impact.get(op_id, 0),
+        })
+    payload = [item for item in payload if item["blocked_downstream"] > 0] or payload[:1]
+    return payload
+
+
+def _format_infeasible_detail(diag: dict, rule_name: str) -> str:
+    """把结构化诊断渲染成多行文本，供后台日志打印，方便逐条排查。"""
+    lines: list[str] = []
+    lines.append(
+        f"仿真[{rule_name}] 不可行：仅完成 {diag['scheduled']}/{diag['total']} 道工序，"
+        f"未排 {diag['unscheduled']} 道。逐工序根因分类如下（★=可直接排查的根因）："
+    )
+    for idx, reason in enumerate(diag["reasons"], 1):
+        marker = "★" if reason["is_root"] else "·"
+        line = f"  {marker} [{idx}] {reason['label']}：{reason['count']} 道工序"
+        if reason["hint_ids"]:
+            line += f"；涉及: {', '.join(reason['hint_ids'])}"
+        if reason["examples"]:
+            line += f"；示例工序: {', '.join(reason['examples'])}"
+        lines.append(line)
+    if not diag["reasons"]:
+        lines.append("  （未识别到明确的结构性根因，请到“实例与约束”页运行数据校验查看完整错误明细）")
+    else:
+        lines.append("  提示：先处理带 ★ 的根因；“级联受阻”类工序会在上游根因修复后自动恢复。")
+    bottlenecks = diag.get("bottlenecks") or []
+    if bottlenecks:
+        lines.append("  瓶颈工序 TOP（其未排导致最多下游工序受阻，优先增加机台/班次或核查约束）：")
+        for rank, item in enumerate(bottlenecks, 1):
+            label, _ = _INFEASIBLE_REASON_LABELS.get(item.get("category", ""), (item.get("category", ""), True))
+            lines.append(
+                f"    {rank}. {item['op_name']}({item['op_id']})：工艺 {item['process_type']}，"
+                f"可用机器 {item['eligible_machine_count']} 台，加工 {item['processing_time']}h，"
+                f"阻塞下游 {item['blocked_downstream']} 道工序；根因：{label}"
+            )
+    return "\n".join(lines)
+
+
+def _diagnosis_oneline(diag: dict, scheduled_entries: int) -> str:
+    """从结构化诊断生成一行摘要（供前端 banner / toast 展示）。"""
+    hints: list[str] = []
+    if scheduled_entries == 0:
         hints.append("仿真没有排出任何工序，所有指标会显示为 0")
     else:
-        hints.append(f"仅排出 {analytics.completed_operations}/{len(current_shop.operations)} 道工序，指标只反映部分排程")
-    dangling_ops = sum(
-        1 for op in current_shop.operations.values()
-        if any(p not in current_shop.operations for p in op.predecessor_ops)
-        or any(p not in current_shop.tasks for p in op.predecessor_tasks)
-    )
-    if dangling_ops:
-        hints.append(f"{dangling_ops} 道工序的前驱引用不存在，永远无法就绪")
-    no_machine_ops = sum(1 for op in current_shop.operations.values() if not current_shop.get_eligible_machines(op))
-    if no_machine_ops:
-        hints.append(f"{no_machine_ops} 道工序没有任何可用机器")
-    hints.append("请到“实例与约束”页运行数据校验查看完整错误明细")
+        hints.append(f"仅排出 {diag['scheduled']}/{diag['total']} 道工序，指标只反映部分排程")
+    # 优先展示排名靠前的 2 个根因，附数量
+    for reason in [r for r in diag["reasons"] if r["is_root"]][:2]:
+        detail = reason["label"]
+        if reason["hint_ids"]:
+            detail += f"（{', '.join(reason['hint_ids'][:5])}）"
+        hints.append(f"{reason['count']} 道工序：{detail}")
+    hints.append("完整根因分类见后台日志；或到“实例与约束”页运行数据校验查看明细")
     return "；".join(hints)
+
+
+def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics) -> Optional[str]:
+    """当仿真结果异常（空排程 / 未覆盖全部工序）时，给出可读的一行原因诊断（供前端展示）。"""
+    if analytics.feasible:
+        return None
+    diag = _diagnose_infeasible(current_shop, result, analytics)
+    return _diagnosis_oneline(diag, len(result.schedule or []))
 
 
 @app.post("/api/simulate")
 async def simulate(req: SimReq):
-    global last_result, shop
+    global last_result, last_sim_payload, shop
     current_shop = _active_shop()
     if current_shop is None:
         raise HTTPException(400, "请先生成实例")
@@ -1958,9 +2501,19 @@ async def simulate(req: SimReq):
         analytics.objective_values.get("avg_net_available_utilization", 0.0),
         analytics.feasible, r.event_count, r.wall_time_ms,
     )
-    diagnosis = _simulation_diagnosis(current_shop, r, analytics)
-    if diagnosis:
-        logging.warning("simulate[%s] infeasible: %s", req.rule_name, diagnosis)
+    diagnosis = None
+    diagnosis_detail = None
+    if not analytics.feasible:
+        diagnosis_detail = _diagnose_infeasible(
+            current_shop, r, analytics,
+            unschedulable_ops=getattr(sim, "_unschedulable_ops", None),
+        )
+        diagnosis = _diagnosis_oneline(diagnosis_detail, len(r.schedule or []))
+        # 后台打印逐工序根因分类，方便定位具体的不可行原因
+        logging.warning(
+            "simulate[%s] infeasible:\n%s",
+            req.rule_name, _format_infeasible_detail(diagnosis_detail, req.rule_name),
+        )
     r._rule_name = req.rule_name
     last_result = r
     # Enrich gantt with order info
@@ -1988,7 +2541,15 @@ async def simulate(req: SimReq):
     metrics["completed_operations"] = analytics.completed_operations
     metrics["total_operations"] = len(current_shop.operations)
     metrics["feasible"] = analytics.feasible
-    return {"metrics": metrics, "gantt": gantt, "rule": req.rule_name, "diagnosis": diagnosis}
+    payload = _json_safe({
+        "metrics": metrics,
+        "gantt": gantt,
+        "rule": req.rule_name,
+        "diagnosis": diagnosis,
+        "diagnosis_detail": diagnosis_detail,
+    })
+    last_sim_payload = payload
+    return payload
 
 @app.post("/api/simulate/compare")
 async def compare(rule_names: list[str] = None):
@@ -2004,7 +2565,7 @@ async def compare(rule_names: list[str] = None):
         metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
         results.append({"rule": n, "metrics": metrics})
     results.sort(key=lambda x: x["metrics"]["total_tardiness"])
-    return {"comparison": results}
+    return _json_safe({"comparison": results})
 
 
 @app.post("/api/simulate/reference-solutions")

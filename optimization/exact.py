@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -129,7 +130,12 @@ class ExactSolver:
         self.shop.build_indexes()
         completed_ops, fixed_processing_ops, decision_ops = self._classify_operations(operations)
 
-        latest_due = max((task.due_date for task in self.shop.tasks.values()), default=0.0)
+        # 任务缺省交期为 inf（数据未填交期），参与 horizon / 整数换算前必须剔除，
+        # 否则 int(round(inf * scale)) 会直接 OverflowError
+        latest_due = max(
+            (task.due_date for task in self.shop.tasks.values() if math.isfinite(task.due_date)),
+            default=0.0,
+        )
         total_decision_work = sum(op.work_remaining for op in decision_ops)
         max_fixed_end = max(
             (self._fixed_end_hours(op, clamp_nonnegative=True) for op in [*completed_ops, *fixed_processing_ops]),
@@ -308,7 +314,8 @@ class ExactSolver:
             model.AddMaxEquality(latest_end, relevant_end_exprs)
             completion_terms.append(latest_end)
 
-            due = int(round(task.due_date * scale))
+            # 无交期（inf）按 horizon 处理：latest_end 恒 <= horizon，延误为 0，语义一致
+            due = int(round(task.due_date * scale)) if math.isfinite(task.due_date) else horizon
             tardiness_raw = model.NewIntVar(-horizon, horizon, f"task_td_raw_{task.id}")
             tardiness = model.NewIntVar(0, horizon, f"task_td_{task.id}")
             model.Add(tardiness_raw == latest_end - due)
@@ -497,13 +504,15 @@ class ExactSolver:
         return completed_ops, fixed_processing_ops, decision_ops
 
     def _fixed_end_hours(self, op, clamp_nonnegative: bool = False) -> float:
-        if op.end_time is not None:
+        if op.end_time is not None and math.isfinite(float(op.end_time)):
             end_time = float(op.end_time)
         elif op.status == OpStatus.COMPLETED:
             end_time = 0.0
         else:
             productive = max(0.001, float(op.work_remaining))
             start_time = float(op.start_time or 0.0)
+            if not math.isfinite(start_time):
+                start_time = 0.0
             end_time = start_time + productive
         return max(0.0, end_time) if clamp_nonnegative else end_time
 

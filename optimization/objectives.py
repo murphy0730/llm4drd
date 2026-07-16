@@ -228,9 +228,25 @@ def objective_summary_payload() -> list[dict]:
     ]
 
 
+def _finite_entry_value(entry: dict, key: str, default: float = 0.0) -> float:
+    """从排程条目安全取有限浮点值。
+
+    条目可能来自仿真原始输出、序列化回流（inf 已被置为 None）或外部导入，
+    None / inf / 非数值都按 default 处理，避免 float(None) 崩溃或 inf 污染指标。
+    """
+    value = entry.get(key)
+    if value is None:
+        return default
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
 def build_schedule_analytics(shop: ShopFloor, result: SimResult) -> ScheduleAnalytics:
     schedule = list(result.schedule or [])
-    makespan = max((entry.get("end", 0.0) for entry in schedule), default=0.0)
+    makespan = max((_finite_entry_value(entry, "end") for entry in schedule), default=0.0)
     completed_op_ids = {entry.get("op_id") for entry in schedule if entry.get("op_id")}
     completed_op_ids.update(op.id for op in shop.operations.values() if op.status == OpStatus.COMPLETED)
     completed_operations = len(completed_op_ids)
@@ -247,21 +263,21 @@ def build_schedule_analytics(shop: ShopFloor, result: SimResult) -> ScheduleAnal
     for task_id, task in shop.tasks.items():
         order_task_map.setdefault(task.order_id, []).append(task_id)
         for op in task.operations:
-            if op.status == OpStatus.COMPLETED and op.end_time is not None:
+            if op.status == OpStatus.COMPLETED and op.end_time is not None and math.isfinite(float(op.end_time)):
                 task_completion[task_id] = max(task_completion.get(task_id, 0.0), float(op.end_time))
 
     for entry in schedule:
+        start = _finite_entry_value(entry, "start")
+        end = _finite_entry_value(entry, "end")
         task_id = entry.get("task_id")
         if task_id:
-            task_completion[task_id] = max(task_completion.get(task_id, 0.0), float(entry.get("end", 0.0)))
+            task_completion[task_id] = max(task_completion.get(task_id, 0.0), end)
 
-        duration = float(entry.get("duration", entry.get("end", 0.0) - entry.get("start", 0.0)))
-        occupied = float(entry.get("elapsed_duration", entry.get("end", 0.0) - entry.get("start", 0.0)))
+        duration = _finite_entry_value(entry, "duration", max(0.0, end - start))
+        occupied = _finite_entry_value(entry, "elapsed_duration", max(0.0, end - start))
         machine_id = entry.get("machine_id")
         if machine_id:
             machine_busy[machine_id] = machine_busy.get(machine_id, 0.0) + duration
-            start = float(entry.get("start", 0.0))
-            end = float(entry.get("end", 0.0))
             machine_first_start[machine_id] = min(machine_first_start.get(machine_id, start), start)
             machine_last_end[machine_id] = max(machine_last_end.get(machine_id, end), end)
         for tooling_id in entry.get("tooling_ids", []) or []:

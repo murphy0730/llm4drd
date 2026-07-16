@@ -625,8 +625,12 @@ class ShopFloor:
             critical_path = 0.0
             for op_id in topo:
                 op = self.operations[op_id]
+                # 环内工序(工序级前驱互锁)的前驱可能尚未计算(拓扑序对环不完整)，
+                # 跳过避免 KeyError；环内工序的 earliest_offset 无实际意义，
+                # 仿真器会单独做 SCC 环检测并标记 feasible=False。
                 offset = max(
-                    (earliest_offsets[predecessor_id] + self.operations[predecessor_id].processing_time for predecessor_id in predecessors[op_id]),
+                    (earliest_offsets[predecessor_id] + self.operations[predecessor_id].processing_time
+                     for predecessor_id in predecessors[op_id] if predecessor_id in earliest_offsets),
                     default=0.0,
                 )
                 earliest_offsets[op_id] = offset

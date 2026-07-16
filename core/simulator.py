@@ -2,13 +2,71 @@ from __future__ import annotations
 
 import copy
 import heapq
+import logging
+import math
 import time as wall_time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable
 
 from .models import OpStatus, Operation, ResourceState, ShopFloor
 
 PDRFunc = Callable
+
+
+def _iterative_tarjan_scc(nodes, adj):
+    """迭代式 Tarjan 强连通分量，避免大实例递归爆栈。
+
+    adj: dict[node -> 可迭代的前驱节点]。返回 list[list[node]]，其中长度>1
+    或含自环的单节点分量即为依赖环。
+    """
+    index_counter = [0]
+    index: dict = {}
+    lowlink: dict = {}
+    on_stack: dict = {}
+    stack: list = []
+    result: list = []
+    for start in nodes:
+        if start in index:
+            continue
+        work = [(start, 0)]
+        while work:
+            v, pi = work[-1]
+            if pi == 0:
+                index[v] = index_counter[0]
+                lowlink[v] = index_counter[0]
+                index_counter[0] += 1
+                stack.append(v)
+                on_stack[v] = True
+            recurse = False
+            neighbors = list(adj[v])
+            i = pi
+            while i < len(neighbors):
+                w = neighbors[i]
+                if w not in index:
+                    work[-1] = (v, i + 1)
+                    work.append((w, 0))
+                    recurse = True
+                    break
+                elif on_stack.get(w):
+                    lowlink[v] = min(lowlink[v], index[w])
+                i += 1
+            if recurse:
+                continue
+            if lowlink[v] == index[v]:
+                comp = []
+                while True:
+                    w = stack.pop()
+                    on_stack[w] = False
+                    comp.append(w)
+                    if w == v:
+                        break
+                result.append(comp)
+            work.pop()
+            if work:
+                u = work[-1][0]
+                lowlink[u] = min(lowlink[u], lowlink[v])
+    return result
 
 
 @dataclass
@@ -28,9 +86,15 @@ class SimResult:
     critical_utilization: float = 0.0
     total_wait_time: float = 0.0
     avg_wait_time: float = 0.0
+    scheduled_operations: int = 0
+    total_operations: int = 0
+    feasible: bool = True
     schedule: list = field(default_factory=list)
     wall_time_ms: float = 0.0
     event_count: int = 0
+    # 依赖环明细(仿真前 SCC 检测): [{"kind":"task"/"op"/"mixed","size":N,"ops":[...],"tasks":[...]}]
+    # 有环时 feasible=False——环内工序互相阻塞、永远无法就绪，与"资源日历排不下"是两类不同问题。
+    dependency_cycles: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +130,13 @@ class Simulator:
         self._completed_ops: set[str] = set()
         self._completed_tasks: set[str] = set()
         self._task_remaining_ops: dict[str, int] = {}
+        # 因资源日历耗尽等原因永远排不出的工序（保持 READY 状态但不再参与派工，
+        # 避免被反复评估或把资源锁死在无穷远）
+        self._unschedulable_ops: set[str] = set()
+        self._pdr_error_logged = False
+        self._op_dispatch_type_ids: dict[str, set[str]] = {}
+        # 仿真前检测出的依赖环(任务级前驱互锁/工序级前驱环/混合)，由 _compute_kpi 写入 SimResult
+        self._dependency_cycles: list = []
 
     def _init_runtime_caches(self, shop: ShopFloor) -> None:
         self._eligible_machine_ids = {}
@@ -80,9 +151,20 @@ class Simulator:
         self._completed_ops = set()
         self._completed_tasks = set()
         self._task_remaining_ops = {task_id: len(task.operations) for task_id, task in shop.tasks.items()}
+        self._unschedulable_ops = set()
+        self._pdr_error_logged = False
+        self._dependency_cycles = []
 
+        self._op_dispatch_type_ids = {}
         for op_id, op in shop.operations.items():
-            self._eligible_machine_ids[op_id] = {machine.id for machine in shop.get_eligible_machines(op)}
+            eligible_machines = shop.get_eligible_machines(op)
+            self._eligible_machine_ids[op_id] = {machine.id for machine in eligible_machines}
+            # 派工桶必须按"可用机台的实际类型"建立：工序显式指定 eligible_machine_ids 时，
+            # 机台类型可能不等于工序的 process_type——若仍按 process_type 建桶，
+            # 指定机台所在类型的机器永远扫描不到该工序，导致其被永久饿死
+            # （表现为"前驱已完成但抢不到资源"，且与派工规则无关）。
+            dispatch_types = {machine.type_id for machine in eligible_machines}
+            self._op_dispatch_type_ids[op_id] = dispatch_types or {op.process_type}
             self._tooling_candidates[op_id] = {
                 tooling_type: list(shop.get_toolings_for_type(tooling_type))
                 for tooling_type in op.required_tooling_types
@@ -97,11 +179,69 @@ class Simulator:
             for predecessor_task_id in op.predecessor_tasks:
                 self._dependent_ops_by_task.setdefault(predecessor_task_id, []).append(op_id)
 
+    def _detect_dependency_cycles(self, shop: ShopFloor) -> list[dict]:
+        """仿真前用 Tarjan SCC 检测依赖环，并区分环类型。
+
+        工序就绪需 predecessor_ops 全完成 + predecessor_tasks 全完成(任务完成=
+        该任务所有工序完成)。故依赖图边 = 工序前驱 + 任务前驱展开为该任务全部工序。
+        SCC(长度>1 或自环) 即依赖环。按环内边来源区分:
+          - op   : 仅工序级前驱(predecessor_ops)闭合——改 predecessor_ops 打断
+          - task : 仅任务前驱(predecessor_tasks)展开闭合——改任务令前驱打断
+          - mixed: 两者都有
+        返回 [{"kind","size","ops","tasks"}, ...]，按 size 降序。
+        """
+        task_op_ids: dict[str, list[str]] = defaultdict(list)
+        for op in shop.operations.values():
+            task_op_ids[op.task_id].append(op.id)
+
+        adj: dict[str, set[str]] = {op.id: set() for op in shop.operations.values()}
+        for op in shop.operations.values():
+            for p in op.predecessor_ops:
+                if p in adj and p != op.id:
+                    adj[op.id].add(p)
+            for t in op.predecessor_tasks:
+                for po in task_op_ids.get(t, []):
+                    if po in adj and po != op.id:
+                        adj[op.id].add(po)
+
+        sccs = _iterative_tarjan_scc(list(adj.keys()), adj)
+        cycles: list[dict] = []
+        for comp in sccs:
+            if len(comp) <= 1:
+                nid = comp[0] if comp else None
+                if nid and nid in adj.get(nid, set()):
+                    comp = [nid]
+                else:
+                    continue
+            comp_set = set(comp)
+            op_edges = 0
+            task_edges = 0
+            for oid in comp:
+                op_obj = shop.operations[oid]
+                op_edges += sum(1 for p in op_obj.predecessor_ops if p in comp_set and p != oid)
+                for t in op_obj.predecessor_tasks:
+                    task_edges += sum(1 for po in task_op_ids.get(t, []) if po in comp_set and po != oid)
+            if op_edges and task_edges:
+                kind = "mixed"
+            elif task_edges:
+                kind = "task"
+            else:
+                kind = "op"
+            cycles.append({
+                "kind": kind,
+                "size": len(comp),
+                "ops": sorted(comp),
+                "tasks": sorted({shop.operations[oid].task_id for oid in comp}),
+            })
+        cycles.sort(key=lambda c: c["size"], reverse=True)
+        return cycles
+
     def run(self, max_time: float = 999999) -> SimResult:
         started_at = wall_time.time()
         shop = copy.deepcopy(self.orig_shop)
         shop.build_indexes()
         self._init_runtime_caches(shop)
+        self._dependency_cycles = self._detect_dependency_cycles(shop)
 
         event_queue: list[Event] = []
         ready_ops: set[str] = set()
@@ -134,7 +274,10 @@ class Simulator:
                 if op and op.status == OpStatus.PENDING and self._is_op_ready(op):
                     if self._release_time_cache.get(op.id, shop.get_operation_release_time(op)) <= now:
                         self._mark_ready(op, ready_ops)
-                        self._trigger_idle_dispatches(shop, event_queue, now, process_type=op.process_type)
+                        self._trigger_idle_dispatches(
+                            shop, event_queue, now,
+                            process_types=self._op_dispatch_type_ids.get(op.id, {op.process_type}),
+                        )
 
             elif event.event_type == "dispatch":
                 machine = shop.machines.get(event.data["machine_id"])
@@ -178,7 +321,12 @@ class Simulator:
                     features = self._features(op, task, order, machine, shop, now)
                     try:
                         score = self.pdr(op, machine, features, shop)
-                    except Exception:
+                        if not isinstance(score, (int, float)) or not math.isfinite(score):
+                            score = 0.0
+                    except Exception as exc:
+                        if not self._pdr_error_logged:
+                            self._pdr_error_logged = True
+                            logging.warning("simulator: dispatch rule raised %s: %s (falling back to score=0)", type(exc).__name__, exc)
                         score = 0.0
                     tie_break = op.work_remaining
                     candidate = (score, -tie_break, op.id, op, toolings, people)
@@ -195,6 +343,22 @@ class Simulator:
                 start_time = _joint_next_available_time(resources, now)
                 productive_duration = op.work_remaining
                 end_time = _joint_compute_effective_end(resources, start_time, productive_duration)
+
+                if not (math.isfinite(start_time) and math.isfinite(end_time)):
+                    # 资源日历在工序完成前耗尽（班次覆盖不到 / 停机吃满），该工序无法排出。
+                    # 绝不能带着 inf 去占用资源——那会把机器/工装/人员永久锁死、并让
+                    # makespan 等指标变成 inf。这里将其挂起（保持 READY 但退出派工池），
+                    # 并立刻重新触发派工评估剩余候选工序。
+                    self._discard_ready(op.id, op.process_type, ready_ops)
+                    if op.id not in self._unschedulable_ops:
+                        self._unschedulable_ops.add(op.id)
+                        logging.warning(
+                            "simulator: op %s cannot finish within resource calendars "
+                            "(start=%s, end=%s), parked as unschedulable",
+                            op.id, start_time, end_time,
+                        )
+                    self._schedule_dispatch(event_queue, machine.id, now)
+                    continue
 
                 op.status = OpStatus.PROCESSING
                 op.remaining_processing_time = productive_duration
@@ -264,7 +428,9 @@ class Simulator:
                         if next_op and next_op.status == OpStatus.PENDING and self._is_op_ready(next_op):
                             self._queue_release_or_ready(shop, next_op, ready_ops, event_queue)
                             if next_op.status == OpStatus.READY:
-                                newly_ready_types.add(next_op.process_type)
+                                newly_ready_types.update(
+                                    self._op_dispatch_type_ids.get(next_op.id, {next_op.process_type})
+                                )
 
                 productive_duration = event.data.get("productive_duration", 0.0)
                 per_resource_work = productive_duration
@@ -276,8 +442,8 @@ class Simulator:
 
                 if machine:
                     self._schedule_dispatch(event_queue, machine.id, now)
-                    for process_type in newly_ready_types:
-                        self._trigger_idle_dispatches(shop, event_queue, now, process_type=process_type)
+                    if newly_ready_types:
+                        self._trigger_idle_dispatches(shop, event_queue, now, process_types=newly_ready_types)
 
             if completed_ops >= len(shop.operations):
                 break
@@ -337,7 +503,19 @@ class Simulator:
             productive_duration = op.remaining_processing_time if op.remaining_processing_time is not None else op.processing_time
             productive_duration = max(0.001, productive_duration)
             start_time = op.start_time if op.start_time is not None else 0.0
+            if not math.isfinite(start_time):
+                start_time = 0.0
             end_time = op.end_time if op.end_time is not None else _joint_compute_effective_end(resources, 0.0, productive_duration)
+            if not math.isfinite(end_time):
+                # 在制工序的资源日历排不下剩余工时（或导入数据异常）——退化为
+                # “从起点连续加工”估算完工时间，避免 op_done 事件排在无穷远、
+                # 把资源永久锁死。
+                end_time = start_time + productive_duration
+                logging.warning(
+                    "simulator: in-progress op %s has non-finite end within resource calendars, "
+                    "falling back to start+duration (%.3f)",
+                    op.id, end_time,
+                )
             op.remaining_processing_time = productive_duration
             op.start_time = start_time
             op.end_time = end_time
@@ -391,13 +569,15 @@ class Simulator:
     def _mark_ready(self, op: Operation, ready_ops: set[str]) -> None:
         op.status = OpStatus.READY
         ready_ops.add(op.id)
-        self._ready_by_type.setdefault(op.process_type, set()).add(op.id)
+        for type_id in self._op_dispatch_type_ids.get(op.id, {op.process_type}):
+            self._ready_by_type.setdefault(type_id, set()).add(op.id)
 
     def _discard_ready(self, op_id: str, process_type: str, ready_ops: set[str]) -> None:
         ready_ops.discard(op_id)
-        bucket = self._ready_by_type.get(process_type)
-        if bucket is not None:
-            bucket.discard(op_id)
+        for type_id in self._op_dispatch_type_ids.get(op_id, {process_type}):
+            bucket = self._ready_by_type.get(type_id)
+            if bucket is not None:
+                bucket.discard(op_id)
 
     def _is_op_ready(self, op: Operation) -> bool:
         for predecessor_id in op.predecessor_ops:
@@ -429,12 +609,12 @@ class Simulator:
         shop: ShopFloor,
         event_queue: list[Event],
         now: float,
-        process_type: str | None = None,
+        process_types: set[str] | None = None,
     ) -> None:
         for machine in shop.machines.values():
             if machine.state != ResourceState.IDLE:
                 continue
-            if process_type and machine.type_id != process_type:
+            if process_types and machine.type_id not in process_types:
                 continue
             self._schedule_dispatch(event_queue, machine.id, now)
 
@@ -603,24 +783,57 @@ class Simulator:
         result.wall_time_ms = round(elapsed_seconds * 1000, 1)
         result.event_count = event_count
         result.total_jobs = len(shop.operations)
+        result.total_operations = len(shop.operations)
+        result.scheduled_operations = len(self._completed_ops)
+        result.feasible = len(self._completed_ops) >= len(shop.operations)
+        result.dependency_cycles = self._dependency_cycles
+        if self._dependency_cycles:
+            # 有依赖环(任务级前驱互锁/工序级前驱环)时，环内工序永远无法就绪；
+            # 即便环外工序全排完，整体仍不可行——显式置 False 以区分于"资源日历排不下"。
+            result.feasible = False
+
+        # 先取已排出部分的实际最大完工时间，作为未完成任务的惩罚基准。
+        # 注意必须看排程条目而非任务完成时间——部分排程下可能没有任何任务
+        # 完整完成，但工序已经占到了某个时刻。
+        partial_max_end = 0.0
+        for entry in schedule:
+            entry_end = entry.get("end")
+            if isinstance(entry_end, (int, float)) and math.isfinite(entry_end):
+                partial_max_end = max(partial_max_end, float(entry_end))
+        for task in shop.tasks.values():
+            if task.completion_time is not None and math.isfinite(task.completion_time):
+                partial_max_end = max(partial_max_end, task.completion_time)
+
+        # 未完成任务不能直接跳过：那会让"排得越少指标越好"，误导 Pareto/NSGA2/规则进化
+        # 的支配比较。与 objectives.build_schedule_analytics 同口径：把未完成任务的
+        # 完工时间按 partial_max_end + 剩余工时 估算（悲观惩罚），保证部分排程永远
+        # 不会优于同等条件下的完整排程。
+        task_completion: dict[str, float] = {}
+        for task_id, task in shop.tasks.items():
+            completion = task.completion_time
+            if completion is None or not math.isfinite(completion):
+                if partial_max_end <= 0:
+                    completion = task.due_date if math.isfinite(task.due_date) else 0.0
+                else:
+                    completion = partial_max_end + max(task.remaining_time, 0.0)
+            task_completion[task_id] = completion
 
         tardiness_list: list[float] = []
         flowtime_list: list[float] = []
         wait_list: list[float] = []
         max_end = 0.0
 
-        for task in shop.tasks.values():
-            if task.completion_time is None:
-                continue
-            tardiness = max(0.0, task.completion_time - task.due_date)
+        for task_id, task in shop.tasks.items():
+            completion = task_completion[task_id]
+            tardiness = max(0.0, completion - task.due_date)
             tardiness_list.append(tardiness)
             if tardiness > 0:
                 result.tardy_job_count += 1
-            flowtime = task.completion_time - task.release_time
+            flowtime = completion - task.release_time
             flowtime_list.append(flowtime)
             productive = sum(op.processing_time for op in task.operations)
             wait_list.append(max(0.0, flowtime - productive))
-            max_end = max(max_end, task.completion_time)
+            max_end = max(max_end, completion)
 
         result.makespan = max_end
         result.total_tardiness = sum(tardiness_list)
@@ -634,10 +847,10 @@ class Simulator:
             if not order.main_task_id or order.main_task_id not in shop.tasks:
                 continue
             result.total_main_orders += 1
-            main_task = shop.tasks[order.main_task_id]
-            if main_task.completion_time is not None and main_task.completion_time > order.due_date:
+            main_completion = task_completion.get(order.main_task_id)
+            if main_completion is not None and main_completion > order.due_date:
                 result.main_order_tardy_count += 1
-                result.main_order_tardy_total_time += main_task.completion_time - order.due_date
+                result.main_order_tardy_total_time += main_completion - order.due_date
         result.main_order_tardy_ratio = (
             result.main_order_tardy_count / result.total_main_orders
             if result.total_main_orders

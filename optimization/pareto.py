@@ -278,13 +278,14 @@ class NSGA2Optimizer:
                 callback(done_evals, total_evals, gen)
 
             # Tournament selection + crossover + mutation -> offspring
+            # rank 在一代内不变，提到循环外只算一次（原先每个子代都重排一遍全种群，O(pop³)）
+            rank, _ = self._fast_nondominated_sort(pop_objs)
             offspring_weights = []
             while len(offspring_weights) < self.pop_size:
                 # Binary tournament
                 i1, i2 = rng.sample(range(len(pop_weights)), 2)
                 j1, j2 = rng.sample(range(len(pop_weights)), 2)
 
-                rank, _ = self._fast_nondominated_sort(pop_objs)
                 p1 = pop_weights[i1 if rank[i1] <= rank[i2] else i2]
                 p2 = pop_weights[j1 if rank[j1] <= rank[j2] else j2]
 
