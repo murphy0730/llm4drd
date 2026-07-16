@@ -1,0 +1,192 @@
+{
+  "environment": {
+    "commit_hash": "57e57e6227622245acae78e249c1f64167799000",
+    "cpu_count": 10,
+    "platform": "macOS-26.3-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python_version": "3.14.3"
+  },
+  "generated_at": "2026-07-16T10:38:49.915265+00:00",
+  "mode": "baseline",
+  "parameters": {
+    "runs": 7,
+    "seed": 42,
+    "sizes": [
+      80,
+      500,
+      2500
+    ],
+    "warmup": 2
+  },
+  "results": {
+    "2500": {
+      "legacy_end_to_end": {
+        "elapsed_seconds_samples": [
+          4.026939667,
+          3.99798275,
+          4.045698666,
+          4.016708083,
+          4.099829417,
+          4.094045875,
+          4.117135833
+        ],
+        "median_elapsed_seconds": 4.045698666,
+        "median_peak_memory_bytes": 54274032,
+        "peak_memory_bytes_samples": [
+          54274032,
+          54274032,
+          54274032,
+          54274032,
+          54274032,
+          54274032,
+          54274032
+        ],
+        "signature_samples": [
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550"
+        ]
+      },
+      "legacy_initialization": {
+        "elapsed_seconds_samples": [
+          0.091394708,
+          0.093496625,
+          0.093621334,
+          0.092673334,
+          0.092583917,
+          0.091236666,
+          0.093256917
+        ],
+        "median_elapsed_seconds": 0.092673334,
+        "median_peak_memory_bytes": 19342656,
+        "peak_memory_bytes_samples": [
+          19342656,
+          19342656,
+          19342656,
+          19342656,
+          19342656,
+          19342656,
+          19342656
+        ]
+      },
+      "operation_count": 2500
+    },
+    "500": {
+      "legacy_end_to_end": {
+        "elapsed_seconds_samples": [
+          0.463909084,
+          0.461657084,
+          0.463748792,
+          0.467463916,
+          0.51278725,
+          0.47731725,
+          0.476499375
+        ],
+        "median_elapsed_seconds": 0.467463916,
+        "median_peak_memory_bytes": 11386088,
+        "peak_memory_bytes_samples": [
+          11385988,
+          11386088,
+          11385988,
+          11386138,
+          11385638,
+          11386088,
+          11386138
+        ],
+        "signature_samples": [
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3"
+        ]
+      },
+      "legacy_initialization": {
+        "elapsed_seconds_samples": [
+          0.018332291,
+          0.018608083,
+          0.017724458,
+          0.0183515,
+          0.018173,
+          0.018915084,
+          0.018601042
+        ],
+        "median_elapsed_seconds": 0.0183515,
+        "median_peak_memory_bytes": 4211286,
+        "peak_memory_bytes_samples": [
+          4211286,
+          4211386,
+          4211186,
+          4210536,
+          4211336,
+          4211786,
+          4211136
+        ]
+      },
+      "operation_count": 500
+    },
+    "80": {
+      "legacy_end_to_end": {
+        "elapsed_seconds_samples": [
+          0.074937333,
+          0.0751615,
+          0.075747334,
+          0.075673459,
+          0.075363,
+          0.0755825,
+          0.076816333
+        ],
+        "median_elapsed_seconds": 0.0755825,
+        "median_peak_memory_bytes": 2208746,
+        "peak_memory_bytes_samples": [
+          2207950,
+          2209412,
+          2208558,
+          2208752,
+          2208904,
+          2208096,
+          2208746
+        ],
+        "signature_samples": [
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
+          "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d"
+        ]
+      },
+      "legacy_initialization": {
+        "elapsed_seconds_samples": [
+          0.004640208,
+          0.004765125,
+          0.004669084,
+          0.004644916,
+          0.004644334,
+          0.004662166,
+          0.00480825
+        ],
+        "median_elapsed_seconds": 0.004662166,
+        "median_peak_memory_bytes": 1004094,
+        "peak_memory_bytes_samples": [
+          1003754,
+          1004216,
+          1004504,
+          1004124,
+          1004094,
+          1003806,
+          1003644
+        ]
+      },
+      "operation_count": 80
+    }
+  },
+  "schema_version": 1
+}

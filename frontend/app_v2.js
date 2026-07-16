@@ -4741,6 +4741,16 @@ async function initializeGraphOrderView(meta, preferredOrderId = null) {
 async function loadExistingGraph() {
   try {
     const meta = await api.getGraphMeta();
+    if (meta?.cache_ready === false) {
+      const reason = meta.invalid_reason || "实例或图上下文已变化";
+      app.graphBuildStatus = {
+        status: "error",
+        stage: "invalid",
+        message: "当前图谱已失效，请重新构建",
+        error: reason,
+      };
+      throw new Error(`当前图谱已失效：${reason}`);
+    }
     app.graphMeta = {
       ...meta,
       created_at: tryParseDate(meta?.created_at) ? meta.created_at : new Date().toISOString(),
@@ -4780,6 +4790,9 @@ async function finishGraphBuild(status) {
   };
   await refreshGraphBuildFeedback();
   const meta = await api.getGraphMeta();
+  if (meta?.cache_ready === false) {
+    throw new Error(meta.invalid_reason || "图谱缓存未就绪");
+  }
   app.graphMeta = {
     ...meta,
     created_at: tryParseDate(meta?.created_at) ? meta.created_at : new Date().toISOString(),

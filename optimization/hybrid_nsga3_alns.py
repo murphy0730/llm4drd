@@ -10,6 +10,7 @@ from threading import Lock
 
 from ..core.rules import BUILTIN_RULES
 from ..core.simulator import Simulator
+from ..knowledge.context import GraphContext, compare_legacy_context
 from ..knowledge.graph import HeterogeneousGraph
 from .alns_core import ALNSCore
 from .approx_eval import ApproximateScheduleEvaluator
@@ -124,17 +125,150 @@ class HybridResult:
         }
 
 
+def build_legacy_graph_features(shop, graph) -> dict[str, dict[str, float]]:
+    task_predecessors: dict[str, list[str]] = {
+        task_id: list(task.predecessor_task_ids) for task_id, task in shop.tasks.items()
+    }
+    main_ancestors: set[str] = set()
+    for order in shop.orders.values():
+        if not order.main_task_id:
+            continue
+        stack = [order.main_task_id]
+        while stack:
+            current = stack.pop()
+            if current in main_ancestors:
+                continue
+            main_ancestors.add(current)
+            stack.extend(task_predecessors.get(current, []))
+
+    op_predecessors: dict[str, set[str]] = {
+        op_id: set(op.predecessor_ops) for op_id, op in shop.operations.items()
+    }
+    for op_id, op in shop.operations.items():
+        for predecessor_task_id in op.predecessor_tasks:
+            predecessor_task = shop.tasks.get(predecessor_task_id)
+            if predecessor_task:
+                for predecessor_op in predecessor_task.operations:
+                    op_predecessors[op_id].add(predecessor_op.id)
+
+    depth_cache: dict[str, float] = {}
+
+    def predecessor_depth(op_id: str, trail: set[str] | None = None) -> float:
+        if op_id in depth_cache:
+            return depth_cache[op_id]
+        trail = trail or set()
+        if op_id in trail:
+            return 0.0
+        predecessors = [
+            pid for pid in op_predecessors.get(op_id, set()) if pid in shop.operations
+        ]
+        if not predecessors:
+            depth_cache[op_id] = 0.0
+            return 0.0
+        trail = set(trail)
+        trail.add(op_id)
+        depth_cache[op_id] = 1.0 + max(
+            predecessor_depth(pid, trail) for pid in predecessors
+        )
+        return depth_cache[op_id]
+
+    features: dict[str, dict[str, float]] = {}
+    for op_id, op in shop.operations.items():
+        task = shop.tasks[op.task_id]
+        order = shop.orders[task.order_id]
+        eligible_count = max(1, len(shop.get_eligible_machines(op)))
+        tooling_scarcity = sum(
+            1.0 / max(1, len(shop.get_toolings_for_type(tooling_type)))
+            for tooling_type in op.required_tooling_types
+        )
+        personnel_scarcity = sum(
+            1.0 / max(1, len(shop.get_personnel_for_skill(skill_id)))
+            for skill_id in op.required_personnel_skills
+        )
+        shared_degree = (
+            1.0 / eligible_count
+            + tooling_scarcity
+            + personnel_scarcity
+            + 0.25 * len(op.required_tooling_types)
+            + 0.25 * len(op.required_personnel_skills)
+        )
+        critical_hits = sum(
+            1
+            for machine in shop.get_eligible_machines(op)
+            if shop.machine_types.get(machine.type_id)
+            and shop.machine_types[machine.type_id].is_critical
+        )
+        machine_critical_ratio = critical_hits / eligible_count
+        graph_node = f"OP:{op_id}"
+        out_degree = graph.out_degree(graph_node) if graph.has_node(graph_node) else 0
+
+        if task.is_main:
+            assembly_criticality = 1.0
+        elif task.id in main_ancestors:
+            assembly_criticality = 0.78
+        elif order.main_task_id:
+            assembly_criticality = 0.32
+        else:
+            assembly_criticality = 0.18
+
+        features[op_id] = {
+            "predecessor_depth": predecessor_depth(op_id)
+            / max(1.0, len(shop.operations)),
+            "assembly_criticality": assembly_criticality,
+            "shared_resource_degree": min(3.0, shared_degree),
+            "bottleneck_adjacency": min(
+                1.0,
+                0.55 * machine_critical_ratio + 0.45 * (1.0 / eligible_count),
+            ),
+            "graph_out_degree": min(
+                1.0, out_degree / max(1, graph.number_of_nodes())
+            ),
+        }
+    return features
+
+
 class HybridNSGA3ALNSOptimizer:
-    def __init__(self, shop, config: HybridConfig):
+    def __init__(
+        self,
+        shop,
+        config: HybridConfig,
+        graph_context: GraphContext | None = None,
+        graph_context_mode="legacy",
+    ):
         self.shop = shop
-        self.shop.build_indexes()
         self.config = config
+        self.graph_context_mode = getattr(
+            graph_context_mode, "value", graph_context_mode
+        )
+        if self.graph_context_mode not in {"legacy", "shadow", "active"}:
+            raise ValueError(f"invalid graph context mode: {self.graph_context_mode}")
+        if self.graph_context_mode in {"shadow", "active"} and graph_context is None:
+            raise ValueError(
+                f"GraphContext is required for {self.graph_context_mode} mode"
+            )
+        self.shop.build_indexes()
+        self.graph_context = graph_context
+        self.graph_context_diff = None
+        self.operation_order_rank = {
+            op_id: rank for rank, op_id in enumerate(self.shop.operations)
+        }
+        self._direct_successors: dict[str, list[str]] = {
+            op_id: [] for op_id in self.shop.operations
+        }
+        for successor_id, operation in self.shop.operations.items():
+            for predecessor_id in dict.fromkeys(operation.predecessor_ops):
+                if predecessor_id in self._direct_successors:
+                    self._direct_successors[predecessor_id].append(successor_id)
         self.specs = validate_objective_selection(config.objective_keys)
         self.rng = random.Random(config.seed)
         self.archive = ParetoArchive(self.specs)
-        self.graph_model = HeterogeneousGraph()
-        self.graph_model.build_from_shopfloor(self.shop)
-        self.graph = self.graph_model.graph
+        if self.graph_context_mode == "active":
+            self.graph_model = None
+            self.graph = None
+        else:
+            self.graph_model = HeterogeneousGraph()
+            self.graph_model.build_from_shopfloor(self.shop)
+            self.graph = self.graph_model.graph
         self.exact_cache: dict[str, OptimizationSolution] = {}
         self.approx_cache: dict[str, OptimizationSolution] = {}
         self.solution_pool: dict[str, OptimizationSolution] = {}
@@ -161,8 +295,22 @@ class HybridNSGA3ALNSOptimizer:
         self.due_scale = max(due_dates, default=self.time_scale)
         self.priority_scale = max(priorities, default=1)
         self.busy_scale = max(self.time_scale * max(1, len(self.shop.machines)), 1.0)
-        self.graph_features = self._build_graph_features()
-        self.graph_guides = self._build_graph_guides()
+        if self.graph_context_mode == "active":
+            context_features = graph_context.feature_view_by_operation_id()
+            self.graph_features = {
+                op_id: context_features[op_id] for op_id in self.shop.operations
+            }
+        else:
+            self.graph_features = self._build_graph_features()
+        if self.graph_context_mode == "shadow":
+            self.graph_context_diff = compare_legacy_context(
+                self.shop, graph_context
+            )
+        self._graph_guides = (
+            None
+            if self.graph_context_mode == "active"
+            else self._build_graph_guides()
+        )
         self.approx_evaluator = ApproximateScheduleEvaluator(
             self.shop,
             self.graph_features,
@@ -171,6 +319,12 @@ class HybridNSGA3ALNSOptimizer:
             self.priority_scale,
             keep_schedule_limit=0,
         )
+
+    @property
+    def graph_guides(self) -> dict[str, dict]:
+        if self._graph_guides is None:
+            self._graph_guides = self._build_graph_guides()
+        return self._graph_guides
 
     def _resolve_parallel_workers(self) -> int:
         if self.config.parallel_workers and self.config.parallel_workers > 0:
@@ -228,92 +382,73 @@ class HybridNSGA3ALNSOptimizer:
         return min(batch_size, self.exact_parallel_workers)
 
     def _build_graph_features(self) -> dict[str, dict[str, float]]:
-        task_predecessors: dict[str, list[str]] = {
-            task_id: list(task.predecessor_task_ids) for task_id, task in self.shop.tasks.items()
-        }
-        main_ancestors: set[str] = set()
-        for order in self.shop.orders.values():
-            if not order.main_task_id:
+        return build_legacy_graph_features(self.shop, self.graph)
+
+    def _legacy_related_operations(self, current_id: str) -> list[str]:
+        op = self.shop.operations[current_id]
+        task = self.shop.tasks[op.task_id]
+        related = list(op.predecessor_ops)
+        related.extend(
+            other.id for other in task.operations if other.id != current_id
+        )
+        for other_id, other in self.shop.operations.items():
+            if other_id == current_id:
                 continue
-            stack = [order.main_task_id]
-            while stack:
-                current = stack.pop()
-                if current in main_ancestors:
-                    continue
-                main_ancestors.add(current)
-                stack.extend(task_predecessors.get(current, []))
+            if other.process_type == op.process_type:
+                related.append(other_id)
+            if set(other.required_tooling_types) & set(op.required_tooling_types):
+                related.append(other_id)
+            if set(other.required_personnel_skills) & set(
+                op.required_personnel_skills
+            ):
+                related.append(other_id)
+        node_id = f"OP:{current_id}"
+        if self.graph.has_node(node_id):
+            for predecessor in self.graph.predecessors(node_id):
+                if predecessor.startswith("OP:"):
+                    related.append(predecessor[3:])
+            for successor in self.graph.successors(node_id):
+                if successor.startswith("OP:"):
+                    related.append(successor[3:])
+        return related
 
-        op_predecessors: dict[str, set[str]] = {op_id: set(op.predecessor_ops) for op_id, op in self.shop.operations.items()}
-        for op_id, op in self.shop.operations.items():
-            for predecessor_task_id in op.predecessor_tasks:
-                predecessor_task = self.shop.tasks.get(predecessor_task_id)
-                if predecessor_task:
-                    for predecessor_op in predecessor_task.operations:
-                        op_predecessors[op_id].add(predecessor_op.id)
+    def _active_related_operations(self, current_id: str) -> list[str]:
+        op = self.shop.operations[current_id]
+        task = self.shop.tasks[op.task_id]
+        related = list(op.predecessor_ops)
+        related.extend(
+            other.id for other in task.operations if other.id != current_id
+        )
 
-        depth_cache: dict[str, float] = {}
-
-        def predecessor_depth(op_id: str, trail: set[str] | None = None) -> float:
-            if op_id in depth_cache:
-                return depth_cache[op_id]
-            trail = trail or set()
-            if op_id in trail:
-                return 0.0
-            predecessors = [pid for pid in op_predecessors.get(op_id, set()) if pid in self.shop.operations]
-            if not predecessors:
-                depth_cache[op_id] = 0.0
-                return 0.0
-            trail = set(trail)
-            trail.add(op_id)
-            depth_cache[op_id] = 1.0 + max(predecessor_depth(pid, trail) for pid in predecessors)
-            return depth_cache[op_id]
-
-        features: dict[str, dict[str, float]] = {}
-        for op_id, op in self.shop.operations.items():
-            task = self.shop.tasks[op.task_id]
-            order = self.shop.orders[task.order_id]
-            eligible_count = max(1, len(self.shop.get_eligible_machines(op)))
-            tooling_scarcity = sum(
-                1.0 / max(1, len(self.shop.get_toolings_for_type(tooling_type)))
-                for tooling_type in op.required_tooling_types
+        group_members = set(
+            self.graph_context.operations_in_group("process_type", op.process_type)
+        )
+        for tooling_type in op.required_tooling_types:
+            group_members.update(
+                self.graph_context.operations_in_group("tooling_type", tooling_type)
             )
-            personnel_scarcity = sum(
-                1.0 / max(1, len(self.shop.get_personnel_for_skill(skill_id)))
-                for skill_id in op.required_personnel_skills
+        for skill_id in op.required_personnel_skills:
+            group_members.update(
+                self.graph_context.operations_in_group("personnel_skill", skill_id)
             )
-            shared_degree = (
-                1.0 / eligible_count
-                + tooling_scarcity
-                + personnel_scarcity
-                + 0.25 * len(op.required_tooling_types)
-                + 0.25 * len(op.required_personnel_skills)
-            )
-            critical_hits = sum(
-                1
-                for machine in self.shop.get_eligible_machines(op)
-                if self.shop.machine_types.get(machine.type_id) and self.shop.machine_types[machine.type_id].is_critical
-            )
-            machine_critical_ratio = critical_hits / eligible_count
-            graph_node = f"OP:{op_id}"
-            out_degree = self.graph.out_degree(graph_node) if self.graph.has_node(graph_node) else 0
+        tooling_types = set(op.required_tooling_types)
+        personnel_skills = set(op.required_personnel_skills)
+        for other_id in sorted(
+            group_members, key=self.operation_order_rank.__getitem__
+        ):
+            if other_id == current_id:
+                continue
+            other = self.shop.operations[other_id]
+            if other.process_type == op.process_type:
+                related.append(other_id)
+            if set(other.required_tooling_types) & tooling_types:
+                related.append(other_id)
+            if set(other.required_personnel_skills) & personnel_skills:
+                related.append(other_id)
 
-            if task.is_main:
-                assembly_criticality = 1.0
-            elif task.id in main_ancestors:
-                assembly_criticality = 0.78
-            elif order.main_task_id:
-                assembly_criticality = 0.32
-            else:
-                assembly_criticality = 0.18
-
-            features[op_id] = {
-                "predecessor_depth": predecessor_depth(op_id) / max(1.0, len(self.shop.operations)),
-                "assembly_criticality": assembly_criticality,
-                "shared_resource_degree": min(3.0, shared_degree),
-                "bottleneck_adjacency": min(1.0, 0.55 * machine_critical_ratio + 0.45 * (1.0 / eligible_count)),
-                "graph_out_degree": min(1.0, out_degree / max(1, self.graph.number_of_nodes())),
-            }
-        return features
+        related.extend(op.predecessor_ops)
+        related.extend(self._direct_successors[current_id])
+        return related
 
     def _expand_operation_cluster(self, seed_ops: list[str], max_size: int) -> list[str]:
         cluster: list[str] = []
@@ -326,32 +461,10 @@ class HybridNSGA3ALNSOptimizer:
                 continue
             seen.add(current_id)
             cluster.append(current_id)
-            op = self.shop.operations[current_id]
-            task = self.shop.tasks[op.task_id]
-
-            related = list(op.predecessor_ops)
-            related.extend(
-                other.id
-                for other in task.operations
-                if other.id != current_id
-            )
-            for other_id, other in self.shop.operations.items():
-                if other_id == current_id:
-                    continue
-                if other.process_type == op.process_type:
-                    related.append(other_id)
-                if set(other.required_tooling_types) & set(op.required_tooling_types):
-                    related.append(other_id)
-                if set(other.required_personnel_skills) & set(op.required_personnel_skills):
-                    related.append(other_id)
-            node_id = f"OP:{current_id}"
-            if self.graph.has_node(node_id):
-                for predecessor in self.graph.predecessors(node_id):
-                    if predecessor.startswith("OP:"):
-                        related.append(predecessor[3:])
-                for successor in self.graph.successors(node_id):
-                    if successor.startswith("OP:"):
-                        related.append(successor[3:])
+            if self.graph_context_mode == "active":
+                related = self._active_related_operations(current_id)
+            else:
+                related = self._legacy_related_operations(current_id)
             for op_id in related:
                 if len(cluster) >= max_size:
                     break
