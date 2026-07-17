@@ -55,6 +55,25 @@ def get_db(db_path: str = DB_PATH):
         conn.close()
 
 
+def _bump_instance_version(conn) -> None:
+    """实例数据变更计数器。
+
+    _active_shop() 按此版本号缓存整个 ShopFloor（大实例重建一次约 2s），
+    所以每个写入 inst_* / planning_context / machine_downtime 的方法都必须调用它，
+    否则接口会静默返回过期实例。参与 build_shopfloor() 的写入点都算。
+    """
+    conn.execute(
+        "INSERT INTO inst_version (id, version) VALUES (1, 1) "
+        "ON CONFLICT(id) DO UPDATE SET version = version + 1"
+    )
+
+
+def get_instance_version(db_path: str = DB_PATH) -> int:
+    with get_db(db_path) as conn:
+        row = conn.execute("SELECT version FROM inst_version WHERE id=1").fetchone()
+        return int(row["version"]) if row else 0
+
+
 def _safe_add_column(conn, table_name: str, column_name: str, ddl: str) -> None:
     try:
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}")
@@ -124,6 +143,10 @@ def init_db(db_path: str = DB_PATH):
             CREATE TABLE IF NOT EXISTS planning_context (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 plan_start_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS inst_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS inst_orders (
                 order_id TEXT PRIMARY KEY,
@@ -312,6 +335,7 @@ class DowntimeStore:
     def clear_all(self):
         with get_db(self.db_path) as conn:
             conn.execute("DELETE FROM machine_downtime")
+            _bump_instance_version(conn)
 
     def save(self, machine_id: str, downtime_type: str, start_time: float, end_time: float) -> int:
         with get_db(self.db_path) as conn:
@@ -319,6 +343,7 @@ class DowntimeStore:
                 "INSERT INTO machine_downtime (machine_id, downtime_type, start_time, end_time) VALUES (?,?,?,?)",
                 (machine_id, downtime_type, float(start_time), float(end_time)),
             )
+            _bump_instance_version(conn)
             return cur.lastrowid
 
     def replace_all(self, rows: list[dict]):
@@ -338,6 +363,7 @@ class DowntimeStore:
     def delete(self, downtime_id: int):
         with get_db(self.db_path) as conn:
             conn.execute("DELETE FROM machine_downtime WHERE id=?", (downtime_id,))
+            _bump_instance_version(conn)
 
     def update(self, downtime_id: int, data: dict):
         with get_db(self.db_path) as conn:
@@ -345,6 +371,7 @@ class DowntimeStore:
                 "UPDATE machine_downtime SET machine_id=?, downtime_type=?, start_time=?, end_time=? WHERE id=?",
                 (data["machine_id"], data["downtime_type"], float(data["start_time"]), float(data["end_time"]), downtime_id),
             )
+            _bump_instance_version(conn)
 
     def load_all_as_downtimes(self) -> dict:
         from ..core.models import Downtime
@@ -441,10 +468,12 @@ class InstanceStore:
                 "inst_personnel",
             ]:
                 conn.execute(f"DELETE FROM {table_name}")
+            _bump_instance_version(conn)
 
     def save_from_shopfloor(self, shop):
         self.clear_all()
         with get_db(self.db_path) as conn:
+            _bump_instance_version(conn)
             conn.execute("INSERT INTO planning_context (id, plan_start_at) VALUES (1, ?)", (isoformat_or_none(ensure_aware(shop.plan_start_at)),))
             for order_id, order in shop.orders.items():
                 conn.execute("INSERT INTO inst_orders (order_id, order_name, release_time, due_date, priority) VALUES (?,?,?,?,?)", (order_id, order.name, order.release_time, order.due_date, order.priority))
@@ -500,6 +529,7 @@ class InstanceStore:
     def save_from_csv(self, orders_rows, tasks_rows, ops_rows, machine_type_rows, machine_rows, tooling_type_rows=None, tooling_rows=None, personnel_rows=None, initial_state_rows=None, plan_start_at=None):
         self.clear_all()
         with get_db(self.db_path) as conn:
+            _bump_instance_version(conn)
             conn.execute("INSERT INTO planning_context (id, plan_start_at) VALUES (1, ?)", (isoformat_or_none(ensure_aware(plan_start_at or default_plan_start())),))
             order_due_map: dict[str, float] = {}
             order_release_map: dict[str, float] = {}
@@ -617,6 +647,7 @@ class InstanceStore:
                 "UPDATE inst_orders SET order_name=?, release_time=?, due_date=?, priority=? WHERE order_id=?",
                 (data["order_name"], float(release_time), float(due_date), int(data["priority"]), order_id),
             )
+            _bump_instance_version(conn)
 
     def update_task(self, task_id: str, data: dict):
         plan_start_at = self.get_plan_start_at()
@@ -627,6 +658,7 @@ class InstanceStore:
                 "UPDATE inst_tasks SET order_id=?, task_name=?, is_main=?, predecessor_task_ids=?, release_time=?, due_date=? WHERE task_id=?",
                 (data["order_id"], data["task_name"], 1 if data.get("is_main") else 0, data.get("predecessor_task_ids", ""), float(release_time), float(due_date), task_id),
             )
+            _bump_instance_version(conn)
 
     def update_operation(self, op_id: str, data: dict):
         with get_db(self.db_path) as conn:
@@ -657,10 +689,12 @@ class InstanceStore:
                     op_id,
                 ),
             )
+            _bump_instance_version(conn)
 
     def update_machine(self, machine_id: str, data: dict):
         with get_db(self.db_path) as conn:
             conn.execute("UPDATE inst_machines SET machine_name=?, type_id=?, shifts=? WHERE machine_id=?", (data["machine_name"], data["type_id"], normalize_shifts_field(data.get("shifts", "")), machine_id))
+            _bump_instance_version(conn)
 
     def build_shopfloor(self):
         from ..core.models import Machine, MachineType, Operation, Order, Personnel, ShopFloor, Task, Tooling, ToolingType

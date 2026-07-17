@@ -5611,6 +5611,9 @@ async function init() {
   const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
   await navigate(navKey, false);
   if (!app.currentScene || app.importBusy) return;
+  // 刷新页面或任务流中途失败后，校验结果和图谱都从后端已有数据恢复：
+  // 库里已有实例就不该为了拿回校验结论而重新导入一遍 Excel。
+  await handleRunValidation(true);
   if (await loadExistingGraph() && !app.importBusy) await renderCurrentPage();
 }
 

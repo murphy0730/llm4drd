@@ -19,7 +19,7 @@ from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
-from ..data.db import init_db, InstanceStore, GraphStore, DowntimeStore, shifts_to_payload
+from ..data.db import init_db, get_instance_version, InstanceStore, GraphStore, DowntimeStore, shifts_to_payload
 from ..data.graph_artifact_store import GraphArtifactStore
 from ..data.template_builder import build_instance_template_bytes
 from ..knowledge.canonical import compute_graph_fingerprint
@@ -61,6 +61,8 @@ online_scheduler_v3: Optional[OnlineSchedulerV3] = None
 # 见 knowledge.canonical）+ 指纹未覆盖的工序在制字段哈希。
 _sim_lock = threading.Lock()
 _sim_runtime_cache: Optional[tuple[str, SimulationRuntime]] = None
+# (实例版本号, ShopFloor)，见 _active_shop()。
+_active_shop_cache: Optional[tuple[int, ShopFloor]] = None
 
 
 def _sim_runtime_cache_key(current_shop: ShopFloor) -> str:
@@ -817,8 +819,25 @@ def _json_safe(value: Any) -> Any:
 
 
 def _active_shop() -> Optional[ShopFloor]:
+    """返回当前实例；库内容未变时复用上次构建的对象。
+
+    build_shopfloor() 要把整库行数据重建成对象图（生产规模实例约 2s，其中 SQL 读取
+    只占 70ms，其余是对象构造和 build_indexes），而此前每个接口每次调用都重建一遍。
+    改为按 inst_version 版本号缓存：读版本号约 0.9ms，任何写库操作都会让它递增
+    （见 data.db._bump_instance_version）。
+
+    共享同一个 ShopFloor 是安全的，因为 Simulator 只读传入的实例、排程写在
+    SimulationRuntime 的深拷贝上（见 core.sim_runtime）；ensure_calendar_capacity
+    也是幂等的“不足才补”。
+    """
+    global _active_shop_cache
     if inst_store.has_data():
+        version = get_instance_version(inst_store.db_path)
+        cached = _active_shop_cache
+        if cached is not None and cached[0] == version:
+            return cached[1]
         current_shop = inst_store.build_shopfloor()
+        _active_shop_cache = (version, current_shop)
     else:
         current_shop = shop
     if current_shop is not None:
@@ -2078,8 +2097,12 @@ def _estimate_graph_size(current_shop: ShopFloor) -> dict:
 
 
 @app.post("/api/graph/build")
-async def build_graph(bg: BackgroundTasks):
-    """在后台构建异构图，并通过状态接口报告规模、阶段、进度与错误。"""
+async def build_graph(bg: BackgroundTasks, force: bool = False):
+    """在后台构建异构图，并通过状态接口报告规模、阶段、进度与错误。
+
+    指纹未变时默认复用已持久化的图谱产物（秒回），这样任务流中途失败重试不必重建；
+    force=True 用于用户明确要求重建。
+    """
     global shop, _graph_tasks
     if not shop and not inst_store.has_data():
         raise HTTPException(400, "请先生成实例")
@@ -2151,10 +2174,14 @@ async def build_graph(bg: BackgroundTasks):
                     message=f"正在构建内存图：已处理 {processed:,}/{total:,} 个业务实体，当前 {nodes:,} 个节点、{edges:,} 条边",
                 )
 
-            update(stage="building", progress=10, message="正在构建订单、任务、工序和资源关系")
+            update(
+                stage="building",
+                progress=10,
+                message="正在复用已构建的图谱" if not force else "正在构建订单、任务、工序和资源关系",
+            )
             _, diagnostics = graph_context_service.get_or_build(
                 build_shop,
-                force_rebuild=True,
+                force_rebuild=force,
                 progress_callback=build_progress,
                 deadline=deadline,
                 current_fingerprint_provider=lambda: compute_graph_fingerprint(
@@ -2168,7 +2195,7 @@ async def build_graph(bg: BackgroundTasks):
                 status="done",
                 stage="done",
                 progress=100,
-                message="图谱构建并保存成功",
+                message="图谱已存在，直接复用" if diagnostics.cache_hit else "图谱构建并保存成功",
                 stats=stats,
                 graph_context=_graph_context_diagnostics_payload(diagnostics),
             )
