@@ -256,7 +256,9 @@ const api = {
       xhr.send(formData);
     });
   },
-  validateInstance() { return this.json("/instance/validate"); },
+  validateInstance(force = false) { return this.json(`/instance/validate${force ? "?force=true" : ""}`); },
+  getWorkflowProgress() { return this.json("/workflow/progress"); },
+  saveReviewProgress(payload) { return this.json("/workflow/review", "PUT", payload); },
   exportValidation() { return this.request("/instance/validate/export"); },
   downloadTemplate() { return this.request("/instance/template"); },
   exportCsv() { return this.request("/instance/csv"); },
@@ -4664,6 +4666,7 @@ async function pollOptimizeStatus() {
       app.optimizeResult = await api.getOptimizeResult(app.optimizeTaskId);
       app.referenceSolutions = asArray(app.optimizeResult.reference_solutions);
       ensureReviewSelection();
+      persistReviewProgress();
       updateShell();
       await renderCurrentPage();
       toast("混合优化已完成。", "success");
@@ -4741,7 +4744,8 @@ async function handleRunValidation(silent = false) {
   if (app.validationBusy) return;
   app.validationBusy = true;
   try {
-    app.validation = await api.validateInstance();
+    // 用户点“运行/重新校验”才重算并覆盖；启动时的静默调用直接取库里已有的结论。
+    app.validation = await api.validateInstance(!silent);
     if (!silent) {
       const failed = app.validation.status === "failed";
       toast(
@@ -4870,6 +4874,73 @@ async function loadExistingGraph() {
     app.selectedGraphNodeId = null;
     return false;
   }
+}
+
+// 启动时把已完成步骤的结果从后端读回来，让刷新或重启后停在原来的进度上，
+// 而不是把导入→仿真→优化→评审整条流程重跑一遍。后端只返回与当前库内实例
+// 匹配的快照：实例改过的话这里拿到的就是 null，对应步骤自然退回“待开始”。
+async function restoreWorkflowProgress() {
+  let progress;
+  try {
+    progress = await api.getWorkflowProgress();
+  } catch (error) {
+    console.warn("恢复流程进度失败，按未开始处理", error);
+    return;
+  }
+
+  if (progress.validation) {
+    app.validation = progress.validation;
+    app.validationCollapsed = progress.validation.status !== "failed";
+  }
+
+  if (progress.simulation) {
+    app.simResult = progress.simulation;
+    app.simRule = progress.simulation.rule || app.simRule;
+    app.simStatus = {
+      phase: progress.simulation.diagnosis ? "done-warn" : "done",
+      message: progress.simulation.diagnosis
+        ? `已恢复上次仿真结果（${app.simRule}），但结果不完整：${progress.simulation.diagnosis}`
+        : `已恢复上次仿真结果（${app.simRule}）。`,
+      elapsedMs: 0,
+    };
+  }
+
+  if (progress.optimization) {
+    app.optimizeResult = progress.optimization;
+    app.optimizeTaskId = progress.optimization.task_id || null;
+    app.referenceSolutions = asArray(progress.optimization.reference_solutions);
+    app.optimizeStatus = {
+      status: "done",
+      phase: "done",
+      message: "已恢复上次优化结果，可直接进入方案评审。",
+      archive_size: progress.optimization.archive_size || 0,
+      current_generation: progress.optimization.generations_completed || 0,
+      elapsed_s: progress.optimization.elapsed_s || 0,
+      total_evaluations: progress.optimization.total_evaluations || 0,
+      received_at: Date.now() / 1000,
+    };
+    if (Array.isArray(progress.optimization.objective_keys) && progress.optimization.objective_keys.length) {
+      app.optimizeForm.objectiveKeys = progress.optimization.objective_keys;
+    }
+  }
+
+  if (progress.review) {
+    app.reviewSelection = asArray(progress.review.selection);
+    app.reviewDetailId = progress.review.detail_id || null;
+    app.aiLastRecommendedId = progress.review.ai_recommended_id || null;
+  }
+  // 恢复的选择可能指向已不存在的方案（比如只恢复了评审、优化结果已失效），
+  // ensureReviewSelection 会剔除这些 id 并补上默认选择。
+  ensureReviewSelection();
+}
+
+// 评审页的选择本身就是一步进度，改动即存，重启后回到同样的视图。
+function persistReviewProgress() {
+  api.saveReviewProgress({
+    selection: app.reviewSelection,
+    detail_id: app.reviewDetailId,
+    ai_recommended_id: app.aiLastRecommendedId,
+  }).catch((error) => console.warn("保存评审选择失败", error));
 }
 
 function stopGraphBuildPolling() {
@@ -5230,6 +5301,7 @@ async function handleAiAction(mode) {
       });
       app.aiLastRecommendedId = result.analysis?.recommended_solution_id || app.aiLastRecommendedId;
       if (app.aiLastRecommendedId) app.reviewDetailId = app.aiLastRecommendedId;
+      persistReviewProgress();
     } else {
       result = await api.aiAsk({
         task_id: app.optimizeTaskId,
@@ -5388,6 +5460,7 @@ async function handleAction(action, target) {
   if (action === "export-selected-solution") return handleExportSolution(target?.dataset.id || getSelectedReviewCandidate()?.id);
   if (action === "focus-candidate") {
     app.reviewDetailId = target.dataset.id;
+    persistReviewProgress();
     updateShell();
     return renderCurrentPage();
   }
@@ -5399,6 +5472,7 @@ async function handleAction(action, target) {
     }
     app.reviewDetailId = id;
     app.reviewTab = "ai";
+    persistReviewProgress();
     updateShell();
     return navigate("ai-review");
   }
@@ -5548,12 +5622,14 @@ function bindGlobalEvents() {
         app.reviewSelection = app.reviewSelection.filter((item) => item !== id);
         if (app.reviewDetailId === id) app.reviewDetailId = app.reviewSelection[0] || null;
       }
+      persistReviewProgress();
       updateShell();
       return renderCurrentPage();
     }
     if (target.matches("#workflow-sim-rule")) app.simRule = target.value;
     if (target.matches("#ai-solution-select")) {
       app.reviewDetailId = target.value;
+      persistReviewProgress();
       updateShell();
     }
     if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression, #opt-baseline-rule")) {
@@ -5613,13 +5689,14 @@ async function init() {
   // 用户可能在初始化尚未完成时就开始导入 Excel：此时不再抢占页面，
   // 导入流程会自行渲染“数据导入”页，避免导入途中被切到“工作概览”。
   if (app.importBusy) return;
+  // 先恢复进度再导航：仿真/优化结果决定了首屏该停在流程的哪一步。
+  if (app.currentScene) await restoreWorkflowProgress();
   // 先落到目标页面再加载图谱：图谱加载较慢，放在导航之前会推迟首屏。
   const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
   await navigate(navKey, false);
   if (!app.currentScene || app.importBusy) return;
-  // 刷新页面或任务流中途失败后，校验结果和图谱都从后端已有数据恢复：
-  // 库里已有实例就不该为了拿回校验结论而重新导入一遍 Excel。
-  await handleRunValidation(true);
+  // 库里没有可用的校验结论（如实例刚被改过）时才补算一次。
+  if (!app.validation) await handleRunValidation(true);
   if (await loadExistingGraph() && !app.importBusy) await renderCurrentPage();
 }
 

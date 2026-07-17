@@ -288,6 +288,12 @@ def init_db(db_path: str = DB_PATH):
                 start_time REAL NOT NULL,
                 end_time REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS workflow_progress (
+                step TEXT PRIMARY KEY,
+                instance_version INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at REAL DEFAULT (strftime('%s','now'))
+            );
             CREATE INDEX IF NOT EXISTS idx_rules_type ON rules(problem_type, objective);
             CREATE INDEX IF NOT EXISTS idx_rules_active ON rules(is_active);
             CREATE INDEX IF NOT EXISTS idx_results_rule ON schedule_results(rule_id);
@@ -326,6 +332,71 @@ def init_db(db_path: str = DB_PATH):
             (isoformat_or_none(default_plan_start()),),
         )
     logger.info("Database initialized: %s", db_path)
+
+
+WORKFLOW_STEPS = ("validation", "simulation", "optimization", "review")
+
+
+class WorkflowProgressStore:
+    """各流程步骤（校验/仿真/优化/评审）的结果快照，供进程重启后恢复。
+
+    每条快照记录写入时的 inst_version。读取时版本对不上就当作不存在：实例一旦被
+    改动（导入、编辑、改停机/班次），旧的校验结论和排程结果都不再成立，必须重算。
+    与 graph_meta 的失效判定同源，只是这里用版本号而非指纹——指纹要重建整个
+    ShopFloor 才能算，而这些步骤本来就只在实例未变时才可复用。
+
+    写入方法不调用 _bump_instance_version()：这张表不是实例数据，递增版本号会把
+    刚存进去的快照连同 _active_shop() 缓存一起作废。
+    """
+
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+
+    def save(self, step: str, payload: dict):
+        if step not in WORKFLOW_STEPS:
+            raise ValueError(f"未知的流程步骤: {step}")
+        with get_db(self.db_path) as conn:
+            row = conn.execute("SELECT version FROM inst_version WHERE id=1").fetchone()
+            conn.execute(
+                "INSERT INTO workflow_progress (step, instance_version, payload, updated_at) "
+                "VALUES (?, ?, ?, strftime('%s','now')) "
+                "ON CONFLICT(step) DO UPDATE SET "
+                "instance_version=excluded.instance_version, payload=excluded.payload, "
+                "updated_at=excluded.updated_at",
+                (step, int(row["version"]) if row else 0, json.dumps(payload, ensure_ascii=False)),
+            )
+
+    def load(self, step: str) -> Optional[dict]:
+        with get_db(self.db_path) as conn:
+            return self._load_valid(conn, step)
+
+    def load_all(self) -> dict:
+        with get_db(self.db_path) as conn:
+            loaded = {step: self._load_valid(conn, step) for step in WORKFLOW_STEPS}
+        return {step: payload for step, payload in loaded.items() if payload is not None}
+
+    def clear(self, step: str):
+        with get_db(self.db_path) as conn:
+            conn.execute("DELETE FROM workflow_progress WHERE step=?", (step,))
+
+    def clear_all(self):
+        with get_db(self.db_path) as conn:
+            conn.execute("DELETE FROM workflow_progress")
+
+    def _load_valid(self, conn, step: str) -> Optional[dict]:
+        row = conn.execute(
+            "SELECT wp.payload FROM workflow_progress wp "
+            "JOIN inst_version iv ON iv.id=1 AND iv.version=wp.instance_version "
+            "WHERE wp.step=?",
+            (step,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload"])
+        except (TypeError, ValueError):
+            logger.warning("workflow_progress[%s] 内容损坏，已忽略", step)
+            return None
 
 
 class DowntimeStore:

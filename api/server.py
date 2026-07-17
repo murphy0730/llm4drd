@@ -19,7 +19,15 @@ from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
-from ..data.db import init_db, get_instance_version, InstanceStore, GraphStore, DowntimeStore, shifts_to_payload
+from ..data.db import (
+    init_db,
+    get_instance_version,
+    InstanceStore,
+    GraphStore,
+    DowntimeStore,
+    WorkflowProgressStore,
+    shifts_to_payload,
+)
 from ..data.graph_artifact_store import GraphArtifactStore
 from ..data.template_builder import build_instance_template_bytes
 from ..knowledge.canonical import compute_graph_fingerprint
@@ -49,6 +57,7 @@ graph_store = GraphStore()
 graph_artifact_store = GraphArtifactStore()
 graph_context_service = GraphContextService(graph_artifact_store)
 downtime_store = DowntimeStore()
+workflow_store = WorkflowProgressStore()
 _nsga2_tasks: dict = {}
 _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
@@ -138,9 +147,52 @@ def _graph_context_diagnostics_payload(diagnostics) -> dict:
         "invalid_reason": diagnostics.invalid_reason,
     }
 
+
+def _save_workflow_progress(step: str, payload: dict) -> None:
+    """存流程进度快照；失败只记日志。
+
+    进度持久化是为了重启后能恢复，不是计算结果的一部分：写库出问题（磁盘满、
+    payload 含无法序列化的值）不该把一次刚跑完的仿真或优化判成失败。
+    """
+    try:
+        workflow_store.save(step, payload)
+    except Exception:  # noqa: BLE001
+        logging.exception("保存流程进度失败: step=%s", step)
+
+
+def _restore_workflow_progress() -> None:
+    """把上次进程存下的仿真/优化结果读回内存，让重启后的导出、评审接口继续可用。
+
+    实例版本对不上的快照会被 WorkflowProgressStore 直接过滤掉，这里拿到的一定
+    是与当前库内实例匹配的结果。校验和评审快照没有内存态，由前端直接取。
+    """
+    global last_sim_payload, _latest_hybrid_task_id
+    try:
+        snapshot = workflow_store.load_all()
+    except Exception:  # noqa: BLE001
+        logging.exception("读取流程进度失败，按无进度启动")
+        return
+
+    simulation = snapshot.get("simulation")
+    if simulation:
+        last_sim_payload = simulation
+
+    optimization = snapshot.get("optimization") or {}
+    task_id = optimization.get("task_id")
+    task = optimization.get("task")
+    if task_id and task:
+        _hybrid_tasks[task_id] = task
+        _latest_hybrid_task_id = task_id
+
+    logging.info(
+        "workflow progress restored: steps=%s", sorted(snapshot.keys()) or "none",
+    )
+
+
 @app.on_event("startup")
 async def startup():
     init_db()
+    _restore_workflow_progress()
 
 @app.get("/")
 async def index():
@@ -287,6 +339,12 @@ class ExactReferenceReq(BaseModel):
 class ExportSolutionReq(BaseModel):
     task_id: Optional[str] = None
     solution_id: str
+
+
+class ReviewProgressReq(BaseModel):
+    selection: list[str] = Field(default_factory=list)
+    detail_id: Optional[str] = None
+    ai_recommended_id: Optional[str] = None
 
 
 def _plan_start_ref():
@@ -1858,12 +1916,14 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
     }
 
 
-@app.get("/api/instance/validate")
-async def validate_instance():
-    current_shop = _active_shop()
-    if current_shop is None:
-        raise HTTPException(400, "当前没有可用实例，请先生成或导入")
+def _validation_payload(current_shop, force: bool = False) -> dict:
+    """当前实例的校验结论；库里有匹配当前实例的结论就直接取，不重算。"""
+    if not force:
+        cached = workflow_store.load("validation")
+        if cached:
+            return cached
     validation = _validate_instance(current_shop)
+    _save_workflow_progress("validation", validation)
     logging.info(
         "instance validation: status=%s errors=%d warnings=%d ops=%d",
         validation["status"], validation["error_count"], validation["warning_count"],
@@ -1872,13 +1932,21 @@ async def validate_instance():
     return validation
 
 
+@app.get("/api/instance/validate")
+async def validate_instance(force: bool = False):
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例，请先生成或导入")
+    return _validation_payload(current_shop, force=force)
+
+
 @app.get("/api/instance/validate/export")
 async def export_validation_excel():
     """导出数据强校验的完整结果为 Excel（不受前端仅展示前 50 条的限制）。"""
     current_shop = _active_shop()
     if current_shop is None:
         raise HTTPException(400, "当前没有可用实例，请先生成或导入")
-    validation = _validate_instance(current_shop)
+    validation = _validation_payload(current_shop)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -2749,6 +2817,7 @@ def _simulate_locked(req: SimReq):
         "diagnosis_detail": diagnosis_detail,
     })
     last_sim_payload = payload
+    _save_workflow_progress("simulation", payload)
     return payload
 
 @app.post("/api/simulate/compare")
@@ -2804,6 +2873,7 @@ async def optimize_exact_reference(req: ExactReferenceReq):
         full_solution = _build_exact_reference_solution(current_shop, task, objective_keys, req, schedule_limit=None)
         export_refs[full_solution["solution_id"]] = full_solution
         export_result["reference_solutions"] = list(export_refs.values())
+    _save_workflow_progress("optimization", {"task_id": task_id, "task": task})
     return {"task_id": task_id, "solution": solution, "reference_solution_count": len(task.get("reference_solutions", []))}
 
 # === Hybrid Optimization ===
@@ -2984,6 +3054,9 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             _hybrid_tasks[task_id]["total_evaluations"] = payload["total_evaluations"]
             _hybrid_tasks[task_id]["preview"] = payload["solutions"][:3]
             _latest_hybrid_task_id = task_id
+            _save_workflow_progress(
+                "optimization", {"task_id": task_id, "task": _hybrid_tasks[task_id]},
+            )
         except Exception as exc:
             error_message = str(exc).strip() or "优化器抛出了未提供说明的异常"
             error_trace = traceback.format_exc()
@@ -3040,6 +3113,15 @@ async def optimize_hybrid_status(task_id: str):
         "graph_context_diff": task.get("graph_context_diff"),
     }
 
+def _hybrid_result_payload(task_id: str, task: dict) -> dict:
+    return {
+        "task_id": task_id,
+        "status": "done",
+        **task["result"],
+        "reference_solutions": task.get("reference_solutions", []),
+    }
+
+
 @app.get("/api/optimize/hybrid/result/{task_id}")
 async def optimize_hybrid_result(task_id: str):
     task = _hybrid_tasks.get(task_id)
@@ -3061,12 +3143,35 @@ async def optimize_hybrid_result(task_id: str):
                 "graph_context": task.get("graph_context"),
             },
         }
+    return _hybrid_result_payload(task_id, task)
+
+
+@app.get("/api/workflow/progress")
+async def workflow_progress():
+    """已完成步骤的结果快照，供前端启动时恢复，而不必重跑整条流程。
+
+    只返回与当前库内实例匹配的快照：实例一改，旧的校验和排程结论自动消失，
+    前端据此把对应步骤退回“待开始”。
+    """
+    snapshot = workflow_store.load_all()
+    optimization = snapshot.get("optimization") or {}
+    task_id, task = optimization.get("task_id"), optimization.get("task") or {}
     return {
-        "task_id": task_id,
-        "status": "done",
-        **task["result"],
-        "reference_solutions": task.get("reference_solutions", []),
+        "validation": snapshot.get("validation"),
+        "simulation": snapshot.get("simulation"),
+        "optimization": (
+            _hybrid_result_payload(task_id, task)
+            if task_id and task.get("result") else None
+        ),
+        "review": snapshot.get("review"),
     }
+
+
+@app.put("/api/workflow/review")
+async def save_review_progress(req: ReviewProgressReq):
+    """记住评审页选中/对比的方案，重启后回到同样的视图。"""
+    workflow_store.save("review", req.model_dump())
+    return {"status": "saved"}
 
 
 @app.post("/api/optimize/hybrid/export-solution")
