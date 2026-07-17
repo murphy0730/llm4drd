@@ -2289,6 +2289,24 @@ a {
   color: var(--text);
 }
 
+/* -- 甘特资源筛选 / 二级筛选 / 分页 -- */
+.gantt-filter-bar { flex-wrap: wrap; row-gap: 6px; margin: 6px 0; }
+.gantt-filter-bar > select { flex: 0 1 auto; min-width: 140px; padding: 6px 10px; }
+.gantt-filter-query, .gantt-filter-num {
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  border-radius: 12px;
+  padding: 6px 10px;
+  color: var(--text);
+  font-size: 13px;
+}
+.gantt-filter-query { min-width: 160px; flex: 0 1 auto; }
+.gantt-filter-num { width: 76px; }
+.gantt-filter-check { display: inline-flex; align-items: center; gap: 4px; color: var(--text-soft); font-size: 13px; white-space: nowrap; }
+.gantt-pager { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; color: var(--text-soft); font-size: 12px; }
+.gantt-pager .btn-ghost { padding: 4px 12px; border-radius: 999px; }
+.gantt-group-downtime { color: var(--danger); font-weight: 700; }
+
 /* 构建图谱按钮与上方内容留间隔 */
 .form-actions--gap {
   margin-top: 16px;

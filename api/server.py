@@ -269,6 +269,8 @@ class HybridOptimizeReq(BaseModel):
     parallel_workers: int = 0
     seed: int = 42
     baseline_rule_name: str = "ATC"
+    # "process": 进程池绕开 GIL（默认）；"thread": 线程池（排查进程池故障时用）。
+    parallel_backend: str = "process"
 
 class OnlineStartReq(BaseModel):
     rule_name: str = "ATC"
@@ -1456,13 +1458,13 @@ async def gen_instance(req: GenReq):
     return {"status": "ok", "summary": shop.summary(), "calendar": calendar_info, "details": _instance_details(shop), "validation": _validate_instance(shop)}
 
 @app.get("/api/instance/details")
-async def inst_details():
+async def inst_details(lite: bool = False):
     global shop
     if not shop and inst_store.has_data():
         shop = inst_store.build_shopfloor()
     if not shop:
         raise HTTPException(400, "请先生成实例或导入CSV")
-    return _instance_details(shop)
+    return _instance_details(shop, lite=lite)
 
 @app.get("/api/instance/csv")
 async def export_csv():
@@ -1486,7 +1488,8 @@ async def get_instance_from_db():
     if not shop:
         shop = inst_store.build_shopfloor()
     data["summary"] = shop.summary()
-    data["details"] = _instance_details(shop)
+    # 前端已无 instanceDb.details 消费方；保留字段但只给 lite，避免内嵌数百 MB。
+    data["details"] = _instance_details(shop, lite=True)
     return data
 
 @app.put("/api/instance/order/{order_id}")
@@ -1634,7 +1637,10 @@ async def import_excel(file: UploadFile = File(...)):
             len(shop.orders), len(shop.tasks), len(shop.operations),
             validation["status"], validation["error_count"],
         )
-        return {"status": "ok", "summary": shop.summary(), "details": _instance_details(shop), "validation": validation}
+        # 大实例 details 可达数百 MB：前端导入流程只读 validation/summary，
+        # 实例详情由前端随后走 GET /api/instance/details 按需拉取（见 app_v2.js loadInstanceBundle）。
+        # 此处不回传 details，避免浏览器下载/解析巨量 JSON 冻结主线程。
+        return {"status": "ok", "summary": shop.summary(), "validation": validation}
     except HTTPException:
         raise
     except Exception as e:
@@ -1656,9 +1662,11 @@ async def download_template():
         },
     )
 
-def _instance_details(s: ShopFloor):
+def _instance_details(s: ShopFloor, lite: bool = False):
+    # lite=True 跳过 orders 明细构造：大实例下该部分可达数百 MB（16,536 工序 × 23 字段），
+    # 而摘要/甘特/机器筛选等调用方只需要 machines + summary + plan_start_at。
     orders = []
-    for order_id, order in s.orders.items():
+    for order_id, order in (s.orders.items() if not lite else ()):
         tasks_info = []
         for task_id in order.task_ids:
             task = s.tasks.get(task_id)
@@ -1723,10 +1731,24 @@ def _instance_details(s: ShopFloor):
                 "tasks": tasks_info,
             }
         )
+    # 班次日历按内容去重后单独放在 shift_calendars 里，机器只带一个 id 引用。
+    # 日历会被 ensure_calendar_capacity 铺到几百天（每台上千个班次），而全厂机器
+    # 的日历通常完全相同：逐台内联会让本接口在生产实例上返回 470MB+ JSON、耗时
+    # 40s，浏览器直接吞不下（前端因此以为"没有实例"而退回导入页）。
+    # 停机是每台机器各自的数据，不参与共享。
+    shift_calendar_ids: dict = {}
+    shift_calendars: dict[str, list] = {}
     machines = []
     for machine_id, machine in s.machines.items():
         machine_type = s.machine_types.get(machine.type_id)
         calendar = _resource_calendar_payload(s, machine)
+        # Shift 是不可变值对象，可直接做键；anchor 会影响换算出的 start/end。
+        calendar_key = (tuple(machine.shifts), getattr(machine, "calendar_anchor_hour", 0.0))
+        calendar_id = shift_calendar_ids.get(calendar_key)
+        if calendar_id is None:
+            calendar_id = f"cal{len(shift_calendar_ids)}"
+            shift_calendar_ids[calendar_key] = calendar_id
+            shift_calendars[calendar_id] = calendar["shifts"]
         machines.append(
             {
                 "id": machine_id,
@@ -1734,8 +1756,7 @@ def _instance_details(s: ShopFloor):
                 "type": machine.type_id,
                 "type_name": machine_type.name if machine_type else "",
                 "is_critical": machine_type.is_critical if machine_type else False,
-                "shifts": calendar["shifts"],
-                "shift_windows": calendar["shifts"],
+                "shift_calendar_id": calendar_id,
                 "downtimes": calendar["downtimes"],
             }
         )
@@ -1764,6 +1785,7 @@ def _instance_details(s: ShopFloor):
         "plan_start_at": s.time_label(0.0),
         "orders": orders,
         "machines": machines,
+        "shift_calendars": shift_calendars,
         "machine_types": machine_types,
         "tooling_types": tooling_types,
         "toolings": toolings,
@@ -2860,12 +2882,23 @@ async def exact_objectives():
     return {"objectives": exact_objective_catalog_payload()}
 
 
+# 大实例保护：CP-SAT 建模随 工序数×候选机台 超线性增长，建模阶段不受 time_limit_s 约束
+# （exact.py:497-503），超过阈值直接拒绝，避免同步端点卡死整个事件循环。
+EXACT_REFERENCE_MAX_OPERATIONS = 2000
+
+
 @app.post("/api/optimize/exact-reference")
-async def optimize_exact_reference(req: ExactReferenceReq):
+def optimize_exact_reference(req: ExactReferenceReq):
     task_id, task = _resolve_hybrid_task(req.task_id)
     current_shop = _active_shop()
     if current_shop is None:
         raise HTTPException(400, "当前没有可用实例")
+    if len(current_shop.operations) > EXACT_REFERENCE_MAX_OPERATIONS:
+        raise HTTPException(
+            413,
+            f"精确冠军参考仅支持不超过 {EXACT_REFERENCE_MAX_OPERATIONS} 道工序的实例"
+            f"（当前 {len(current_shop.operations)} 道）。大实例请直接使用混合优化产出的帕累托方案。",
+        )
     objective_keys = _requested_exact_objective_keys((task.get("result") or {}).get("objective_keys", []), req)
     solution = _build_exact_reference_solution(current_shop, task, objective_keys, req, schedule_limit=120)
     existing = _task_reference_solution_index(task)
@@ -3022,6 +3055,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                     parallel_workers=req.parallel_workers,
                     seed=req.seed,
                     baseline_rule_name=req.baseline_rule_name,
+                    parallel_backend=req.parallel_backend,
                 ),
                 graph_context,
                 graph_context_mode,
@@ -3260,7 +3294,7 @@ async def save_review_progress(req: ReviewProgressReq):
 
 
 @app.post("/api/optimize/hybrid/export-solution")
-async def optimize_hybrid_export_solution(req: ExportSolutionReq):
+def optimize_hybrid_export_solution(req: ExportSolutionReq):
     task_id, task = _resolve_hybrid_task(req.task_id)
     current_shop = _active_shop()
     if current_shop is None:

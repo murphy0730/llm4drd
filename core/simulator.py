@@ -70,8 +70,11 @@ class Simulator:
         self._release_time_cache: dict[str, float] = {}
         self._dependent_ops_by_op: dict[str, list[str]] = {}
         self._dependent_ops_by_task: dict[str, list[str]] = {}
-        self._ready_by_type: dict[str, set[str]] = {}
+        # 机器→就绪工序反向桶：派工只扫"本机可加工且当前就绪"的工序，
+        # 不再按工艺类型整桶扫描后逐候选过滤 eligible（大实例主热点）。
+        self._ready_by_machine: dict[str, set[str]] = {}
         self._dispatch_scheduled_at: dict[str, float | None] = {}
+        self._machine_order: dict[str, int] = {}
         self._release_checks_scheduled: set[str] = set()
         self._completed_ops: set[str] = set()
         self._completed_tasks: set[str] = set()
@@ -87,6 +90,9 @@ class Simulator:
         self._pdr_error_logged = False
         self._op_dispatch_type_ids: dict[str, set[str]] = {}
         self._flow_gate_cache: dict[str, float] = {}
+        # 每工序静态特征缓存（due/priority/工时等不随仿真时刻变化的 10 个键）；
+        # 动态键（slack/urgency/wait_time/remaining/progress/machine_busy_time）仍每次现算。
+        self._static_features: dict[str, dict] = {}
         # 仿真前检测出的依赖环(任务级前驱互锁/工序级前驱环/混合)，由 _compute_kpi 写入 SimResult
         self._dependency_cycles: list = []
 
@@ -100,8 +106,9 @@ class Simulator:
         self._release_time_cache = runtime.release_time_cache
         self._dependent_ops_by_op = runtime.dependent_ops_by_op
         self._dependent_ops_by_task = runtime.dependent_ops_by_task
-        self._ready_by_type = {}
+        self._ready_by_machine = {}
         self._dispatch_scheduled_at = dict.fromkeys(shop.machines, None)
+        self._machine_order = {machine_id: index for index, machine_id in enumerate(shop.machines)}
         self._release_checks_scheduled = set()
         self._completed_ops = set()
         self._completed_tasks = set()
@@ -110,6 +117,7 @@ class Simulator:
         self._task_total_ops = runtime.task_op_counts
         self._unschedulable_ops = set()
         self._flow_gate_cache = {}
+        self._static_features = {}
         self._pdr_error_logged = False
         self._dependency_cycles = []
 
@@ -190,13 +198,14 @@ class Simulator:
 
                 best: tuple[float, float, str, Operation, list, list] | None = None
                 next_dispatch_time = float("inf")
-                candidate_ids = list(self._ready_by_type.get(machine.type_id, set()))
+                # 反向索引：候选 = 本机私有就绪桶（桶内工序必然本机可加工，
+                # 原 eligible 成员判断随之删除）；list() 复制保留，
+                # 因为循环体内仍会 _discard_ready 清理失效条目。
+                candidate_ids = list(self._ready_by_machine.get(machine.id, ()))
                 for op_id in candidate_ids:
                     op = shop.operations.get(op_id)
                     if not op or op.status != OpStatus.READY:
                         self._discard_ready(op_id, machine.type_id, ready_ops)
-                        continue
-                    if machine.id not in self._eligible_machine_ids.get(op.id, set()):
                         continue
 
                     start_time, toolings, people = self._earliest_feasible_start(shop, machine, op, now)
@@ -463,13 +472,16 @@ class Simulator:
     def _mark_ready(self, op: Operation, ready_ops: set[str]) -> None:
         op.status = OpStatus.READY
         ready_ops.add(op.id)
-        for type_id in self._op_dispatch_type_ids.get(op.id, {op.process_type}):
-            self._ready_by_type.setdefault(type_id, set()).add(op.id)
+        # 按"可用机台"入桶：显式指定 eligible_machine_ids 的工序会进入多台机器、
+        # 甚至多个类型的桶（sim_runtime.py:166-169 的跨类型语义原样保留）。
+        for machine_id in self._eligible_machine_ids.get(op.id, ()):
+            self._ready_by_machine.setdefault(machine_id, set()).add(op.id)
 
     def _discard_ready(self, op_id: str, process_type: str, ready_ops: set[str]) -> None:
+        # process_type 形参保留（调用点签名不变），桶维护改走 eligible 机器集合。
         ready_ops.discard(op_id)
-        for type_id in self._op_dispatch_type_ids.get(op_id, {process_type}):
-            bucket = self._ready_by_type.get(type_id)
+        for machine_id in self._eligible_machine_ids.get(op_id, ()):
+            bucket = self._ready_by_machine.get(machine_id)
             if bucket is not None:
                 bucket.discard(op_id)
 
@@ -519,12 +531,25 @@ class Simulator:
         now: float,
         process_types: set[str] | None = None,
     ) -> None:
-        for machine in shop.machines.values():
+        if process_types:
+            # 按类型索引直查相关机器，不再全量扫描 shop.machines（1,149 台 × 每 op_done）。
+            machines = [
+                machine
+                for type_id in process_types
+                for machine in shop.get_machines_for_type(type_id)
+            ]
+            # 按全局机器序重排：保证同刻 dispatch 事件入堆顺序与旧的全表扫描一致，
+            # 排产结果不因索引化而改变。
+            machines.sort(key=self._machine_sort_key)
+        else:
+            machines = shop.machines.values()
+        for machine in machines:
             if machine.state != ResourceState.IDLE:
                 continue
-            if process_types and machine.type_id not in process_types:
-                continue
             self._schedule_dispatch(event_queue, machine.id, now)
+
+    def _machine_sort_key(self, machine) -> int:
+        return self._machine_order.get(machine.id, 1 << 30)
 
     def _next_resource_ready_time(self, resource, now: float) -> float:
         base = max(now, getattr(resource, "current_finish_time", 0.0))
@@ -650,8 +675,24 @@ class Simulator:
         return float("inf"), [], []
 
     def _features(self, op, task, order, machine, shop, now: float) -> dict:
-        external_due = task.due_date if task else (order.due_date if order else 9999.0)
-        due = op.derived_due_date if op and op.derived_due_date < float("inf") else external_due
+        static = self._static_features.get(op.id)
+        if static is None:
+            external_due = task.due_date if task else (order.due_date if order else 9999.0)
+            due = op.derived_due_date if op and op.derived_due_date < float("inf") else external_due
+            static = {
+                # READY 态下 work_remaining 不变；派工后工序离开就绪桶，不会再被评估
+                "processing_time": op.work_remaining,
+                "due_date": due,
+                "external_due_date": external_due,
+                "task_due_date": task.due_date if task else external_due,
+                "op_due_date": due,
+                "priority": order.priority if order else 1,
+                "is_main": 1.0 if (task and task.is_main) else 0.0,
+                "tooling_demand": float(len(op.required_tooling_types)),
+                "personnel_demand": float(len(op.required_personnel_skills)),
+                "critical_slack": op.critical_slack if op else float("inf"),
+            }
+            self._static_features[op.id] = static
         if task:
             remaining = self._task_remaining_work.get(task.id)
             if remaining is None:
@@ -665,39 +706,20 @@ class Simulator:
         else:
             remaining = op.work_remaining
             progress = 0.0
-        slack = due - now - remaining
-        priority = order.priority if order else 1
+        slack = static["due_date"] - now - remaining
         release_time = self._flow_ready_time(shop, op)
-
-        prereq_done = 0
-        prereq_total = len(op.predecessor_tasks) + len(op.predecessor_ops)
-        if prereq_total > 0:
-            for predecessor_task_id in op.predecessor_tasks:
-                if predecessor_task_id in self._completed_tasks:
-                    prereq_done += 1
-            for predecessor_op_id in op.predecessor_ops:
-                if predecessor_op_id in self._completed_ops:
-                    prereq_done += 1
-
-        return {
+        features = dict(static)
+        features.update({
             "slack": slack,
             "remaining": remaining,
-            "processing_time": op.work_remaining,
-            "due_date": due,
-            "external_due_date": external_due,
-            "task_due_date": task.due_date if task else external_due,
-            "op_due_date": due,
             "urgency": max(0.0, -slack),
             "progress": progress,
-            "priority": priority,
-            "is_main": 1.0 if (task and task.is_main) else 0.0,
             "wait_time": max(0.0, now - release_time),
-            "prereq_ratio": prereq_done / prereq_total if prereq_total > 0 else 1.0,
+            # 能进入就绪桶的工序前驱必已全部完成，原统计循环恒为 1.0，直接短路
+            "prereq_ratio": 1.0,
             "machine_busy_time": machine.total_busy_time,
-            "tooling_demand": float(len(op.required_tooling_types)),
-            "personnel_demand": float(len(op.required_personnel_skills)),
-            "critical_slack": op.critical_slack if op else float("inf"),
-        }
+        })
+        return features
 
     def _compute_kpi(self, shop: ShopFloor, schedule: list, elapsed_seconds: float, event_count: int) -> SimResult:
         result = SimResult()

@@ -9,6 +9,8 @@ const CONFIG = {
   GRAPH_ALL_EDGE_LIMIT: 320,
   // vis-timeline 在数千分组/数万条目时会锁死主线程直至页面崩溃，超限时只画最忙的前 N 台机器
   GANTT_MAX_GROUPS: 40,
+  // 甘特每页机器行数（筛选/分页后单页渲染上限，沿用原 40 台的 vis 安全值）
+  GANTT_PAGE_SIZE: 40,
   // 甘特图"全部订单"选项仅在条目数不超过该值时提供，大实例强制按订单聚焦
   GANTT_ALL_ORDERS_MAX_OPS: 2000,
 };
@@ -167,6 +169,10 @@ const app = {
   ganttInstances: [],
   // 甘特图订单筛选：canvasId -> 选中的订单 id（"__all__" 表示全部，仅小实例提供）
   ganttOrderFilter: {},
+  // 甘特图机器筛选与分页：canvasId -> { type, downtimeOnly, query, page }
+  ganttMachineFilter: {},
+  // 甘特图订单内二级筛选：canvasId -> { status, query, from, to }
+  ganttEntryFilter: {},
 };
 
 function defaultGraphView() {
@@ -202,7 +208,10 @@ const api = {
       } catch (_) {
         // Keep the original response text when the server did not return JSON.
       }
-      throw new Error(message || `请求失败（HTTP ${response.status}）`);
+      // 带上状态码：调用方要能区分"后端说没有"(4xx)和"根本没拿到"(5xx/超时)。
+      const error = new Error(message || `请求失败（HTTP ${response.status}）`);
+      error.status = response.status;
+      throw error;
     }
     const contentType = response.headers.get("content-type") || "";
     if (
@@ -225,7 +234,7 @@ const api = {
   },
 
   health() { return this.json("/health"); },
-  getInstanceDetails() { return this.json("/instance/details"); },
+  getInstanceDetails(lite = false) { return this.json(`/instance/details${lite ? "?lite=1" : ""}`); },
   getInstanceDb() { return this.json("/instance/db"); },
   importExcel(file, onProgress) {
     // 用 XHR 而非 fetch，才能拿到上传进度用于进度条展示。
@@ -966,9 +975,22 @@ function overlapSpan(startA, endA, startB, endB) {
   return Math.max(0, end - start);
 }
 
+// 机器的班次日历按内容去重后共享（详见 server._instance_details）：机器上只有
+// 一个 shift_calendar_id，真正的班次在 details.shift_calendars 里。
+function machineShifts(machine) {
+  const calendarId = machine?.shift_calendar_id;
+  if (calendarId) {
+    const shared = app.instanceDetails?.shift_calendars?.[calendarId];
+    if (shared) return asArray(shared);
+  }
+  // 兼容仍内联 shifts/shift_windows 的旧响应
+  return asArray(machine?.shift_windows).length ? asArray(machine.shift_windows) : asArray(machine?.shifts);
+}
+
 function machineShiftWindows(machine) {
-  if (asArray(machine?.shift_windows).length) {
-    return asArray(machine.shift_windows)
+  const entries = machineShifts(machine);
+  if (entries.length && entries[0]?.start !== undefined) {
+    return entries
       .map((item) => ({
         start: Number(item.start),
         end: Number(item.end),
@@ -976,7 +998,7 @@ function machineShiftWindows(machine) {
       .filter((item) => !Number.isNaN(item.start) && !Number.isNaN(item.end) && item.end > item.start)
       .sort((a, b) => a.start - b.start);
   }
-  return asArray(machine?.shifts)
+  return entries
     .map((item) => {
       const start = Number(item.day || 0) * 24 + Number(item.start_hour ?? item.start ?? 0);
       const end = Number(item.day || 0) * 24 + Number(item.end_hour ?? item.end ?? (Number(item.start_hour ?? item.start ?? 0) + Number(item.hours ?? 0)));
@@ -1069,17 +1091,27 @@ async function refreshHealth(silent = false) {
 }
 
 async function loadInstanceBundle() {
-  const [details, db, downtimes] = await Promise.all([
-    api.getInstanceDetails(),
-    api.getInstanceDb(),
+  // details 走 lite（跳过 orders 明细，大实例 394MB → MB 级）；
+  // instanceDb 在全仓库无消费方（死状态），不再每次导入后全量下载原始表。
+  const [details, downtimes] = await Promise.all([
+    api.getInstanceDetails(true),
     api.getDowntimes().catch(() => []),
   ]);
   app.instanceDetails = details;
-  app.instanceDb = db;
+  app.instanceDb = null;
   app.downtimes = Array.isArray(downtimes?.downtimes)
     ? downtimes.downtimes
     : (Array.isArray(downtimes) ? downtimes : []);
   refreshOptimizeBudgetRecommendation({ preserveManual: true });
+}
+
+// noInstance = 后端明确说"库里没有实例"(4xx)；其余异常(超时/5xx/网络)属于
+// "拿不到"，不是"没有"。两者混为一谈时，一次失败的请求会伪装成未导入数据，
+// 把用户退回导入页并跳过流程进度恢复——这正是大实例下 details 返回 470MB
+// 超时后的表现。
+function isNoInstanceError(error) {
+  const status = error?.status ?? error?.response?.status;
+  return status === 400 || status === 404;
 }
 
 async function syncCurrentScene(silent = false) {
@@ -1102,7 +1134,14 @@ async function syncCurrentScene(silent = false) {
     app.currentSceneId = null;
     app.downtimes = [];
     updateShell();
-    if (!silent) toast("当前没有可用实例，请先生成或导入。", "warning");
+    if (isNoInstanceError(error)) {
+      if (!silent) toast("当前没有可用实例，请先生成或导入。", "warning");
+    } else {
+      // 加载失败 ≠ 没有数据：必须说清楚，否则用户只会看到"请导入数据"，
+      // 以为之前导入的实例和跑完的流程都丢了。
+      console.error("加载当前实例失败", error);
+      toast(`加载当前实例失败：${error.message}。数据仍在库中，请重试或查看后端日志。`, "warning");
+    }
     return false;
   }
 }
@@ -1336,15 +1375,7 @@ function buildMachineOverlays(machine, horizonStart, horizonEnd) {
     });
   });
 
-  const shifts = asArray(machine?.shift_windows).length
-    ? asArray(machine.shift_windows).map((item) => ({
-        start: Number(item.start),
-        end: Number(item.end),
-      }))
-    : asArray(machine?.shifts).map((item) => ({
-        start: Number(item.day || 0) * 24 + Number(item.start_hour ?? item.start ?? 0),
-        end: Number(item.day || 0) * 24 + Number(item.end_hour ?? item.end ?? 0),
-      })).filter((item) => !Number.isNaN(item.start) && !Number.isNaN(item.end) && item.end > item.start);
+  const shifts = machineShiftWindows(machine);
 
   if (shifts.length) {
     const filtered = shifts
@@ -1384,6 +1415,63 @@ function ganttOffsetToISO(offset, base) {
   return new Date(new Date(base).getTime() + Number(offset) * 3600 * 1000).toISOString();
 }
 
+const GANTT_MACHINE_FILTER_DEFAULT = Object.freeze({ type: "__all__", downtimeOnly: false, query: "", page: 1 });
+const GANTT_ENTRY_FILTER_DEFAULT = Object.freeze({ status: "__all__", query: "", from: "", to: "" });
+
+function getGanttMachineFilter(canvasId) {
+  return { ...GANTT_MACHINE_FILTER_DEFAULT, ...(app.ganttMachineFilter[canvasId] || {}) };
+}
+
+function getGanttEntryFilter(canvasId) {
+  return { ...GANTT_ENTRY_FILTER_DEFAULT, ...(app.ganttEntryFilter[canvasId] || {}) };
+}
+
+// 机器维度信息：类型名 / 是否含停机 / 工序数，供筛选、排序与分页使用
+function describeGanttMachine(machineId, machineName, machineMap, opCount) {
+  const machine = machineMap.get(machineId);
+  const typeName = machine?.type_name || machine?.type || machine?.machine_type || "未分组";
+  // machineDowntimeRows 双数据源（machine.downtimes 优先，回退 /api/downtime 的 app.downtimes）
+  const hasDowntime = machineDowntimeRows(machine || { machine_id: machineId }).length > 0;
+  return { id: machineId, name: machineName, typeName, hasDowntime, opCount };
+}
+
+function filterGanttMachineRows(rows, filter) {
+  const query = String(filter.query || "").trim().toLowerCase();
+  return rows.filter((row) => {
+    if (filter.type !== "__all__" && row.typeName !== filter.type) return false;
+    if (filter.downtimeOnly && !row.hasDowntime) return false;
+    if (query && !`${row.id} ${row.name}`.toLowerCase().includes(query)) return false;
+    return true;
+  });
+}
+
+// 含停机的机器优先，其次工序数降序——资源异常先被看到，而不是“最忙的前 N 台”
+function sortGanttMachineRows(rows) {
+  return rows.slice().sort((a, b) =>
+    (Number(b.hasDowntime) - Number(a.hasDowntime))
+    || (b.opCount - a.opCount)
+    || String(a.id).localeCompare(String(b.id), "zh-CN", { numeric: true }));
+}
+
+// 订单内二级筛选：状态 / 关键字（工序号·任务·机器） / 时间窗（偏移小时）
+function filterGanttEntries(entries, filter) {
+  const query = String(filter.query || "").trim().toLowerCase();
+  const from = filter.from === "" || filter.from === null || filter.from === undefined ? null : Number(filter.from);
+  const to = filter.to === "" || filter.to === null || filter.to === undefined ? null : Number(filter.to);
+  return entries.filter((item) => {
+    if (filter.status !== "__all__" && normalizeScheduleStatus(item.status) !== filter.status) return false;
+    if (query) {
+      const haystack = `${item.op_id || item.operation_id || item.id || ""} ${item.task_id || ""} ${item.machine_id || ""} ${item.machine_name || ""}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    const start = Number(item.start ?? item.start_time ?? 0);
+    const end = Number(item.end ?? item.end_time ?? 0);
+    if (from !== null && !Number.isNaN(from) && end < from) return false;
+    if (to !== null && !Number.isNaN(to) && start > to) return false;
+    return true;
+  });
+}
+
 function buildGanttData(entries, options = {}) {
   const planStartAt = tryParseDate(app.instanceDetails?.plan_start_at);
   const hasRealBase = Boolean(planStartAt);
@@ -1405,27 +1493,47 @@ function buildGanttData(entries, options = {}) {
 
   if (!normalized.length) return null;
 
-  const groupsMap = new Map();
-  normalized.forEach((item) => { if (!groupsMap.has(item.machineId)) groupsMap.set(item.machineId, item.machineName); });
-  let groups = Array.from(groupsMap, ([id, content]) => ({ id, content: escapeHtml(content) }));
+  const machineMap = getMachineMap();
+  const countByMachine = new Map();
+  const nameByMachine = new Map();
+  normalized.forEach((item) => {
+    countByMachine.set(item.machineId, (countByMachine.get(item.machineId) || 0) + 1);
+    if (!nameByMachine.has(item.machineId)) nameByMachine.set(item.machineId, item.machineName);
+  });
 
-  // 大实例保护：分组超限时只保留工序条目最多的前 N 台机器，避免 vis-timeline 锁死主线程
-  const totalGroups = groups.length;
-  const totalOps = normalized.length;
-  let visible = normalized;
-  if (groups.length > CONFIG.GANTT_MAX_GROUPS) {
-    const countByMachine = new Map();
-    normalized.forEach((item) => countByMachine.set(item.machineId, (countByMachine.get(item.machineId) || 0) + 1));
-    const keep = new Set(
-      Array.from(countByMachine.keys())
-        .sort((a, b) => countByMachine.get(b) - countByMachine.get(a))
-        .slice(0, CONFIG.GANTT_MAX_GROUPS)
-    );
-    visible = normalized.filter((item) => keep.has(item.machineId));
-    groups = groups.filter((g) => keep.has(g.id));
+  // 资源维度：类型 / 仅含停机 / 关键字 筛选 + 分页（替代旧的"只画最忙前 N 台"硬截断，
+  // 大实例下全部机器都能翻页看到；单页行数仍受 GANTT_PAGE_SIZE 限制，vis 不会锁死）
+  const machineFilter = getGanttMachineFilter(options.canvasId);
+  const allRows = sortGanttMachineRows(
+    Array.from(countByMachine.keys(), (machineId) =>
+      describeGanttMachine(machineId, nameByMachine.get(machineId), machineMap, countByMachine.get(machineId)))
+  );
+  const typeOptions = Array.from(new Set(allRows.map((row) => row.typeName)))
+    .sort((a, b) => String(a).localeCompare(String(b), "zh-CN", { numeric: true }));
+  const filteredRows = filterGanttMachineRows(allRows, machineFilter);
+  const pageSize = CONFIG.GANTT_PAGE_SIZE || CONFIG.GANTT_MAX_GROUPS;
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const page = Math.min(Math.max(1, Number(machineFilter.page) || 1), pageCount);
+  const pageRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
+  const keep = new Set(pageRows.map((row) => row.id));
+
+  const visible = normalized.filter((item) => keep.has(item.machineId));
+  const groups = pageRows.map((row) => ({
+    id: row.id,
+    content: `${escapeHtml(row.name)}${row.hasDowntime ? ' <span class="gantt-group-downtime" title="该机台含停机时段">⚠</span>' : ""}`,
+  }));
+  const machineFacet = {
+    totalGroups: allRows.length,
+    filteredGroups: filteredRows.length,
+    downtimeGroups: allRows.filter((row) => row.hasDowntime).length,
+    page, pageCount, pageSize, typeOptions, filter: machineFilter,
+  };
+
+  if (!visible.length) {
+    // 筛选/翻页后本页无条目（如关键字无命中）：保留 facet 供工具条渲染
+    return { groups, items: [], hasRealBase, machineFacet, window: null };
   }
 
-  const machineMap = getMachineMap();
   const horizonStart = Math.min(...visible.map((i) => i.start));
   const horizonEnd = Math.max(...visible.map((i) => i.end));
 
@@ -1442,7 +1550,7 @@ function buildGanttData(entries, options = {}) {
     });
   });
 
-  // 遮罩：班次外 / 停机 -> background 项
+  // 遮罩：班次外 / 停机 -> background 项；title 供悬停显示起止时刻与类型（vis 对 background 项同样出 tooltip）
   groups.forEach((g) => {
     const overlays = buildMachineOverlays(machineMap.get(g.id), horizonStart, horizonEnd);
     overlays.forEach((ov, i) => {
@@ -1454,6 +1562,7 @@ function buildGanttData(entries, options = {}) {
         end: ganttOffsetToISO(ov.endOffset, base),
         type: "background",
         className: cls,
+        title: ov.title,
       });
     });
   });
@@ -1463,9 +1572,7 @@ function buildGanttData(entries, options = {}) {
     groups,
     items,
     hasRealBase,
-    truncation: totalGroups > groups.length
-      ? { totalGroups, shownGroups: groups.length, totalOps, shownOps: visible.length }
-      : null,
+    machineFacet,
     window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
   };
 }
@@ -1488,15 +1595,20 @@ function renderTimeline(entries, options = {}) {
   if (selectedOrder === "__all__" && !allowAll) selectedOrder = null;
   if (selectedOrder !== "__all__" && !orderOptions.includes(selectedOrder)) selectedOrder = null;
   if (!selectedOrder) selectedOrder = allowAll ? "__all__" : orderOptions[0];
-  const visibleEntries = selectedOrder === "__all__"
+  const orderEntries = selectedOrder === "__all__"
     ? allEntries
     : allEntries.filter((item) => (item.order_id || "-") === selectedOrder);
 
-  const data = buildGanttData(visibleEntries, options);
+  // 订单内二级筛选：状态 / 关键字 / 时间窗（选中订单后仍可继续过滤，见问题 B）
+  const entryFilter = getGanttEntryFilter(id);
+  const visibleEntries = filterGanttEntries(orderEntries, entryFilter);
+
+  const data = buildGanttData(visibleEntries, { ...options, canvasId: id });
   if (!data) {
     return renderEmptyState("暂无甘特数据", "当前方案还没有可显示的资源排程。");
   }
-  app.pendingGantts.set(id, { entries: visibleEntries, options });
+  // 连同已计算的 data 一起暂存：mountGantts 直接复用，避免大实例下重复构建（A3）
+  app.pendingGantts.set(id, { entries: visibleEntries, options: { ...options, canvasId: id }, data });
 
   const orderSelector = orderOptions.length > 1 || !allowAll ? `
     <div class="field-inline">
@@ -1511,6 +1623,42 @@ function renderTimeline(entries, options = {}) {
     </div>
   ` : "";
 
+  const facet = data.machineFacet;
+  const machineFilterBar = facet ? `
+    <div class="field-inline gantt-filter-bar">
+      <span>机器类型</span>
+      <select data-gantt-machine-type data-canvas="${escapeHtml(id)}">
+        <option value="__all__" ${facet.filter.type === "__all__" ? "selected" : ""}>全部类型（${formatInt(facet.totalGroups)} 台）</option>
+        ${facet.typeOptions.map((t) => `<option value="${escapeHtml(t)}" ${t === facet.filter.type ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
+      </select>
+      <label class="gantt-filter-check"><input type="checkbox" data-gantt-downtime-only data-canvas="${escapeHtml(id)}" ${facet.filter.downtimeOnly ? "checked" : ""}> 仅含停机（${formatInt(facet.downtimeGroups)} 台）</label>
+      <input type="search" class="gantt-filter-query" placeholder="搜索机器号…" value="${escapeHtml(facet.filter.query)}" data-gantt-machine-query data-canvas="${escapeHtml(id)}">
+    </div>
+  ` : "";
+  const entryFilterBar = `
+    <div class="field-inline gantt-filter-bar">
+      <span>工序状态</span>
+      <select data-gantt-status-filter data-canvas="${escapeHtml(id)}">
+        <option value="__all__" ${entryFilter.status === "__all__" ? "selected" : ""}>全部状态</option>
+        <option value="completed" ${entryFilter.status === "completed" ? "selected" : ""}>已完成</option>
+        <option value="processing" ${entryFilter.status === "processing" ? "selected" : ""}>进行中</option>
+        <option value="future" ${entryFilter.status === "future" ? "selected" : ""}>未来排产</option>
+      </select>
+      <input type="search" class="gantt-filter-query" placeholder="搜索工序/任务/机器…" value="${escapeHtml(entryFilter.query)}" data-gantt-entry-query data-canvas="${escapeHtml(id)}">
+      <span>时间窗(h)</span>
+      <input type="number" class="gantt-filter-num" placeholder="起" value="${escapeHtml(String(entryFilter.from))}" data-gantt-time-from data-canvas="${escapeHtml(id)}">
+      <span>~</span>
+      <input type="number" class="gantt-filter-num" placeholder="止" value="${escapeHtml(String(entryFilter.to))}" data-gantt-time-to data-canvas="${escapeHtml(id)}">
+    </div>
+  `;
+  const pager = facet && facet.pageCount > 1 ? `
+    <div class="gantt-pager">
+      <button class="btn-ghost" data-gantt-page="${facet.page - 1}" data-canvas="${escapeHtml(id)}" ${facet.page <= 1 ? "disabled" : ""}>上一页</button>
+      <span>第 ${formatInt(facet.page)} / ${formatInt(facet.pageCount)} 页 · 命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} 台机器</span>
+      <button class="btn-ghost" data-gantt-page="${facet.page + 1}" data-canvas="${escapeHtml(id)}" ${facet.page >= facet.pageCount ? "disabled" : ""}>下一页</button>
+    </div>
+  ` : "";
+
   const statusCounts = data.items.reduce((acc, it) => {
     if (it.type === "background") return acc;
     const key = (it.className || "").replace("status-", "");
@@ -1522,16 +1670,18 @@ function renderTimeline(entries, options = {}) {
     <div class="surface-card">
       <div class="card-head">
         <h3>${escapeHtml(options.title || "资源甘特图")}</h3>
-        <p>可滚轮缩放、左右拖拽平移查看全程；条块颜色区分已完成 / 进行中 / 未来排产，斜纹遮罩显示班次外与停机占用。</p>
+        <p>可滚轮缩放、左右拖拽平移查看全程；条块颜色区分已完成 / 进行中 / 未来排产，斜纹遮罩显示班次外与停机占用（悬停可见起止与类型）。</p>
       </div>
       ${orderSelector}
+      ${machineFilterBar}
+      ${entryFilterBar}
       <div class="timeline-summary-strip">
         <div class="timeline-summary-card"><span>当前展示</span><strong>${selectedOrder === "__all__" ? "全部订单" : escapeHtml(selectedOrder)}（共 ${formatInt(orderOptions.length)} 个订单）</strong></div>
-        <div class="timeline-summary-card"><span>工序 / 资源行数</span><strong>${formatInt(visibleEntries.length)} / ${formatInt(data.groups.length)}</strong></div>
+        <div class="timeline-summary-card"><span>工序 / 资源行数</span><strong>${formatInt(visibleEntries.length)} / ${formatInt(data.groups.length)}${facet ? `（共 ${formatInt(facet.totalGroups)} 台）` : ""}</strong></div>
         <div class="timeline-summary-card"><span>已完成 / 进行中 / 未来</span><strong>${formatInt(statusCounts.completed)} / ${formatInt(statusCounts.processing)} / ${formatInt(statusCounts.future)}</strong></div>
         <div class="timeline-summary-card"><span>时间基准</span><strong>${data.hasRealBase ? "计划起始时间" : "相对小时（无 plan_start_at）"}</strong></div>
       </div>
-      ${data.truncation ? `<p class="subtle-note">当前视图仍超出渲染上限：仅展示排程最多的前 ${formatInt(data.truncation.shownGroups)} / ${formatInt(data.truncation.totalGroups)} 台机器（${formatInt(data.truncation.shownOps)} / ${formatInt(data.truncation.totalOps)} 道工序），完整结果请使用导出 Excel。</p>` : ""}
+      ${pager}
       <div class="legend">
         <span class="legend-item"><span class="legend-swatch status-completed"></span>已完成</span>
         <span class="legend-item"><span class="legend-swatch status-processing"></span>进行中</span>
@@ -4372,7 +4522,8 @@ function mountGantts() {
   document.querySelectorAll(".page.active .gantt-canvas:not([data-bound='1'])").forEach((el) => {
     const payload = app.pendingGantts.get(el.id);
     if (!payload) return;
-    const data = buildGanttData(payload.entries, payload.options);
+    // renderTimeline 已构建过 data（暂存在 payload），大实例下避免重复归一化/遮罩计算
+    const data = payload.data || buildGanttData(payload.entries, payload.options);
     if (!data) return;
     el.dataset.bound = "1";
     const timeline = new vis.Timeline(
@@ -4390,8 +4541,9 @@ function mountGantts() {
         orientation: { axis: "top" },
         zoomMin: 1000 * 60 * 30,
         zoomMax: 1000 * 60 * 60 * 24 * 90,
-        start: data.window.start,
-        end: data.window.end,
+        // 筛选无命中时 window 为 null，交给 vis 自适应空视图
+        start: data.window ? data.window.start : undefined,
+        end: data.window ? data.window.end : undefined,
         showTooltips: true,
         // 内置 moment 只打包了 de/en/ja/ru/uk 语料且全局 locale 被 uk 覆盖，
         // 因此各刻度一律用与语言无关的数字格式，不能依赖 ddd / MMMM。
@@ -5520,6 +5672,16 @@ function bindGlobalEvents() {
   });
 
   document.addEventListener("click", async (event) => {
+    const ganttPageTarget = event.target.closest("[data-gantt-page]");
+    if (ganttPageTarget && !ganttPageTarget.disabled) {
+      event.preventDefault();
+      const canvasId = ganttPageTarget.dataset.canvas;
+      const filter = getGanttMachineFilter(canvasId);
+      filter.page = Number(ganttPageTarget.dataset.ganttPage) || 1;
+      app.ganttMachineFilter[canvasId] = filter;
+      renderCurrentPage();
+      return;
+    }
     const reviewTabTarget = event.target.closest("[data-review-tab]");
     if (reviewTabTarget) {
       event.preventDefault();
@@ -5590,6 +5752,52 @@ function bindGlobalEvents() {
     }
     if (target.matches("[data-gantt-order-select]")) {
       app.ganttOrderFilter[target.dataset.canvas] = target.value;
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-gantt-machine-type]")) {
+      const canvasId = target.dataset.canvas;
+      const filter = getGanttMachineFilter(canvasId);
+      filter.type = target.value;
+      filter.page = 1;
+      app.ganttMachineFilter[canvasId] = filter;
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-gantt-downtime-only]")) {
+      const canvasId = target.dataset.canvas;
+      const filter = getGanttMachineFilter(canvasId);
+      filter.downtimeOnly = target.checked;
+      filter.page = 1;
+      app.ganttMachineFilter[canvasId] = filter;
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-gantt-machine-query]")) {
+      const canvasId = target.dataset.canvas;
+      const filter = getGanttMachineFilter(canvasId);
+      filter.query = target.value;
+      filter.page = 1;
+      app.ganttMachineFilter[canvasId] = filter;
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-gantt-status-filter]")) {
+      const canvasId = target.dataset.canvas;
+      const filter = getGanttEntryFilter(canvasId);
+      filter.status = target.value;
+      app.ganttEntryFilter[canvasId] = filter;
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-gantt-entry-query]")) {
+      const canvasId = target.dataset.canvas;
+      const filter = getGanttEntryFilter(canvasId);
+      filter.query = target.value;
+      app.ganttEntryFilter[canvasId] = filter;
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-gantt-time-from], [data-gantt-time-to]")) {
+      const canvasId = target.dataset.canvas;
+      const filter = getGanttEntryFilter(canvasId);
+      if (target.hasAttribute("data-gantt-time-from")) filter.from = target.value;
+      else filter.to = target.value;
+      app.ganttEntryFilter[canvasId] = filter;
       return renderCurrentPage();
     }
     if (target.matches("[data-heuristic-rule]")) {
