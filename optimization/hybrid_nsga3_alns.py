@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from threading import Lock
+from typing import Callable
 
 from ..core.rules import BUILTIN_RULES
 from ..core.sim_runtime import SimulationRuntimePool
@@ -976,6 +977,7 @@ class HybridNSGA3ALNSOptimizer:
         candidates: list[CandidateParameters],
         source: str,
         generation: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[OptimizationSolution]:
         if not candidates:
             return []
@@ -997,6 +999,17 @@ class HybridNSGA3ALNSOptimizer:
                 unique_candidates[signature] = candidate.clone()
 
         pending = list(unique_candidates.items())
+        completed_count = len(results_by_signature)
+        total_count = completed_count + len(pending)
+        if completed_count and progress_callback is not None:
+            progress_callback(completed_count, total_count)
+
+        def notify_completed() -> None:
+            nonlocal completed_count
+            completed_count += 1
+            if progress_callback is not None:
+                progress_callback(completed_count, total_count)
+
         if pending:
             worker_count = self._worker_count_for_batch("exact", len(pending))
             executor = self._ensure_process_pool(worker_count) if worker_count > 1 else None
@@ -1028,6 +1041,7 @@ class HybridNSGA3ALNSOptimizer:
                                 results_by_signature[signature] = solution
                             else:
                                 results_by_signature[signature] = self._clone_solution(existing, source, generation)
+                        notify_completed()
                 except _ProcessBackendUnavailable as exc:
                     self._abandon_process_backend(exc.cause)
                 if new_exact > 0:
@@ -1036,6 +1050,7 @@ class HybridNSGA3ALNSOptimizer:
                 for signature, candidate in pending:
                     if signature not in results_by_signature:
                         results_by_signature[signature] = self._evaluate_candidate(candidate, source, generation)
+                        notify_completed()
             elif worker_count > 1:
                 batch_started = time.time()
                 new_exact = 0
@@ -1057,6 +1072,7 @@ class HybridNSGA3ALNSOptimizer:
                                 results_by_signature[signature] = solution
                             else:
                                 results_by_signature[signature] = self._clone_solution(existing, source, generation)
+                        notify_completed()
                 if new_exact > 0:
                     self.exact_eval_time_total += max(0.0, time.time() - batch_started)
             else:
@@ -1073,6 +1089,7 @@ class HybridNSGA3ALNSOptimizer:
                             results_by_signature[signature] = solution
                         else:
                             results_by_signature[signature] = self._clone_solution(existing, source, generation)
+                    notify_completed()
 
         return [self._clone_solution(results_by_signature[signature], source, generation) for signature in ordered_signatures]
 
@@ -1091,9 +1108,19 @@ class HybridNSGA3ALNSOptimizer:
         candidates: list[CandidateParameters],
         source: str,
         generation: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[OptimizationSolution]:
         if not candidates:
             return []
+        completed_count = 0
+        total_count = len(candidates)
+
+        def notify_completed() -> None:
+            nonlocal completed_count
+            completed_count += 1
+            if progress_callback is not None:
+                progress_callback(completed_count, total_count)
+
         worker_count = self._worker_count_for_batch("approx", len(candidates))
         executor = self._ensure_process_pool(worker_count) if worker_count > 1 else None
         if executor is not None:
@@ -1105,6 +1132,7 @@ class HybridNSGA3ALNSOptimizer:
                     cached = self.approx_cache.get(signature)
                 if cached is not None:
                     results.append(self._clone_solution(cached, source, generation))
+                    notify_completed()
                 else:
                     remaining.append(candidate)
             submitted = list(remaining)
@@ -1121,10 +1149,12 @@ class HybridNSGA3ALNSOptimizer:
                         raise _ProcessBackendUnavailable(exc) from exc
                     results.append(self._register_approx_solution(candidate.signature(), solution, source, generation))
                     submitted.remove(candidate)
+                    notify_completed()
             except _ProcessBackendUnavailable as exc:
                 self._abandon_process_backend(exc.cause)
                 for candidate in submitted:
                     results.append(self._evaluate_candidate_approx(candidate, source, generation))
+                    notify_completed()
         elif worker_count > 1:
             results = []
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -1134,8 +1164,14 @@ class HybridNSGA3ALNSOptimizer:
                 ]
                 for future in as_completed(futures):
                     results.append(future.result())
+                    notify_completed()
         else:
-            results = [self._evaluate_candidate_approx(candidate, source, generation) for candidate in candidates]
+            results = []
+            for candidate in candidates:
+                results.append(
+                    self._evaluate_candidate_approx(candidate, source, generation)
+                )
+                notify_completed()
         return [self._clone_solution(solution, source, generation) for solution in results]
 
     def _record_solution(self, solution: OptimizationSolution) -> None:
@@ -1492,7 +1528,14 @@ class HybridNSGA3ALNSOptimizer:
             promoted.append(remaining.pop())
         return promoted[:limit]
 
-    def _refine_solution(self, solution: OptimizationSolution, scale_map: dict[str, float], generation: int, seed_offset: int) -> OptimizationSolution:
+    def _refine_solution(
+        self,
+        solution: OptimizationSolution,
+        scale_map: dict[str, float],
+        generation: int,
+        seed_offset: int,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> OptimizationSolution:
         if self.config.alns_iterations_per_candidate <= 0:
             return solution
         incumbent = solution.clone()
@@ -1510,24 +1553,59 @@ class HybridNSGA3ALNSOptimizer:
             scale_map,
             self.config.alns_iterations_per_candidate,
             generation,
+            progress_callback=progress_callback,
         )
         return refined_solution if refined_solution.feasible else solution
 
-    def _parallel_refine_elites(self, elites: list[OptimizationSolution], scale_map: dict[str, float], generation: int) -> list[OptimizationSolution]:
+    def _parallel_refine_elites(
+        self,
+        elites: list[OptimizationSolution],
+        scale_map: dict[str, float],
+        generation: int,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[OptimizationSolution]:
         if not elites:
             return []
+        iteration_count = max(0, self.config.alns_iterations_per_candidate)
+        total_count = len(elites) * iteration_count
+        completed_count = 0
+        progress_lock = Lock()
+
+        def notify_iteration(_done: int, _total: int) -> None:
+            nonlocal completed_count
+            with progress_lock:
+                completed_count += 1
+                if progress_callback is not None:
+                    progress_callback(completed_count, total_count)
+
         worker_count = self._worker_count_for_batch("refine", len(elites))
         if worker_count > 1:
             refined: list[OptimizationSolution] = []
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = {
-                    executor.submit(self._refine_solution, solution, scale_map, generation, index * 53): solution.solution_id
+                    executor.submit(
+                        self._refine_solution,
+                        solution,
+                        scale_map,
+                        generation,
+                        index * 53,
+                        notify_iteration,
+                    ): solution.solution_id
                     for index, solution in enumerate(elites)
                 }
                 for future in as_completed(futures):
                     refined.append(future.result())
             return refined
-        return [self._refine_solution(solution, scale_map, generation, index * 53) for index, solution in enumerate(elites)]
+        return [
+            self._refine_solution(
+                solution,
+                scale_map,
+                generation,
+                index * 53,
+                notify_iteration,
+            )
+            for index, solution in enumerate(elites)
+        ]
 
     def _tournament_pick(self, population: list[OptimizationSolution], scales: dict[str, float]) -> OptimizationSolution:
         if len(population) == 1:
@@ -1547,11 +1625,43 @@ class HybridNSGA3ALNSOptimizer:
         )
         return left if left_score <= right_score else right
 
-    def _snapshot_status(self, generation: int, population: list[OptimizationSolution], elapsed: float, phase: str = "coarse") -> dict:
+    def _snapshot_status(
+        self,
+        generation: int,
+        population: list[OptimizationSolution],
+        elapsed: float,
+        phase: str = "coarse",
+        *,
+        phase_completed: int = 0,
+        phase_total: int = 1,
+        activity: str = "",
+        calculate_hypervolume: bool = False,
+    ) -> dict:
         feasible_ratio = sum(1 for solution in population if solution.feasible) / len(population) if population else 0.0
-        hypervolume = self.archive.approximate_hypervolume(seed=self.config.seed + generation)
+        if calculate_hypervolume or not self.hypervolume_history:
+            hypervolume = self.archive.approximate_hypervolume(
+                seed=self.config.seed + generation
+            )
+        else:
+            hypervolume = self.hypervolume_history[-1]["hypervolume"]
+        safe_total = max(1, int(phase_total))
+        safe_completed = min(safe_total, max(0, int(phase_completed)))
+        phase_progress = safe_completed / safe_total
+        phase_ranges = {
+            "coarse": (0.02, 0.62),
+            "exact_promotion": (0.62, 0.82),
+            "elite_refine": (0.82, 0.96),
+            "finalize": (0.96, 1.0),
+        }
+        phase_start, phase_end = phase_ranges.get(phase, (0.0, 0.02))
+        real_progress = phase_start + (phase_end - phase_start) * phase_progress
         snapshot = {
             "phase": phase,
+            "phase_completed": safe_completed,
+            "phase_total": safe_total,
+            "phase_progress": round(phase_progress, 6),
+            "real_progress": round(real_progress, 6),
+            "activity": activity,
             "generation": generation,
             "archive_size": len(self.archive),
             "population_size": len(population),
@@ -1571,7 +1681,13 @@ class HybridNSGA3ALNSOptimizer:
             },
             "bottleneck_machine_ids": population[0].analytics_summary.get("bottleneck_machine_ids", []) if population else [],
         }
-        self.hypervolume_history.append({"generation": generation, "hypervolume": snapshot["hypervolume"]})
+        if calculate_hypervolume or not self.hypervolume_history:
+            self.hypervolume_history.append(
+                {
+                    "generation": generation,
+                    "hypervolume": snapshot["hypervolume"],
+                }
+            )
         self.status_history.append(snapshot)
         return snapshot
 
@@ -1643,19 +1759,82 @@ class HybridNSGA3ALNSOptimizer:
     def run(self, progress_callback=None) -> HybridResult:
         try:
             self.time_started = time.time()
+
+            def emit(
+                phase: str,
+                generation: int,
+                population: list[OptimizationSolution],
+                completed: int,
+                total: int,
+                activity: str,
+                *,
+                calculate_hypervolume: bool = False,
+            ) -> None:
+                if progress_callback is None:
+                    return
+                progress_callback(
+                    self._snapshot_status(
+                        generation,
+                        population,
+                        time.time() - self.time_started,
+                        phase=phase,
+                        phase_completed=completed,
+                        phase_total=total,
+                        activity=activity,
+                        calculate_hypervolume=calculate_hypervolume,
+                    )
+                )
+
             baseline_name = self.config.baseline_rule_name if self.config.baseline_rule_name in BUILTIN_RULES else "ATC"
             baseline_candidate = self._project_candidate_to_graph_space(
                 self._default_candidate(baseline_name),
                 "balanced",
                 blend=0.18,
             )
-            self.coarse_baseline_solution = self._evaluate_candidate_approx(baseline_candidate, "baseline_approx", 0)
-            self._record_coarse_solution(self.coarse_baseline_solution)
-
             init_candidates = [baseline_candidate] + self._seed_population()
             init_limit = min(len(init_candidates), max(6, self.config.population_size))
-            init_candidates = self._filter_candidate_batch(init_candidates[: init_limit * 2], init_limit)
-            population = self._parallel_evaluate_candidates_approx(init_candidates, "init", 0)
+            init_candidates = self._filter_candidate_batch(
+                init_candidates[: init_limit * 2], init_limit
+            )
+            coarse_total = max(
+                1,
+                1 + len(init_candidates)
+                + self.config.generations * self.config.population_size,
+            )
+            emit(
+                "coarse",
+                0,
+                [],
+                0,
+                coarse_total,
+                "正在评估近似基线 0 / 1",
+            )
+            self.coarse_baseline_solution = self._evaluate_candidate_approx(baseline_candidate, "baseline_approx", 0)
+            self._record_coarse_solution(self.coarse_baseline_solution)
+            coarse_completed = 1
+            emit(
+                "coarse",
+                0,
+                [self.coarse_baseline_solution],
+                coarse_completed,
+                coarse_total,
+                "近似基线评估完成",
+            )
+
+            population = self._parallel_evaluate_candidates_approx(
+                init_candidates,
+                "init",
+                0,
+                progress_callback=lambda done, total: emit(
+                    "coarse",
+                    0,
+                    [],
+                    coarse_completed + done,
+                    coarse_total,
+                    f"正在初始化候选 {done} / {total}",
+                ),
+            )
+            coarse_completed += len(init_candidates)
             if not population:
                 population = [self.coarse_baseline_solution]
             for solution in population:
@@ -1667,8 +1846,15 @@ class HybridNSGA3ALNSOptimizer:
             coarse_deadline = self.time_started + self.config.time_limit_s * min(max(self.config.coarse_time_ratio, 0.45), 0.9)
             stagnation = 0
             previous_pool_size = len(self.coarse_solution_pool)
-            if progress_callback is not None:
-                progress_callback(self._snapshot_status(0, population, time.time() - self.time_started, phase="coarse"))
+            emit(
+                "coarse",
+                0,
+                population,
+                coarse_completed,
+                coarse_total,
+                "候选池初始化完成",
+                calculate_hypervolume=True,
+            )
 
             for generation in range(1, self.config.generations + 1):
                 if time.time() - self.time_started >= self.config.time_limit_s:
@@ -1679,16 +1865,36 @@ class HybridNSGA3ALNSOptimizer:
                 candidate_batch = self._build_offspring_batch(population, self.config.population_size)
                 if not candidate_batch:
                     break
-                offspring = self._parallel_evaluate_candidates_approx(candidate_batch, "coarse_offspring", generation)
+                generation_offset = coarse_completed
+                offspring = self._parallel_evaluate_candidates_approx(
+                    candidate_batch,
+                    "coarse_offspring",
+                    generation,
+                    progress_callback=lambda done, total, generation=generation, offset=generation_offset: emit(
+                        "coarse",
+                        generation,
+                        population,
+                        offset + done,
+                        coarse_total,
+                        f"第 {generation} 代近似评估 {done} / {total}",
+                    ),
+                )
+                coarse_completed += len(candidate_batch)
                 for solution in offspring:
                     self._record_coarse_solution(solution)
 
                 combined = population + offspring
                 population = select_survivors(combined, self.specs, self.config.population_size, self.config.seed + generation)
                 generations_completed = generation
-                snapshot = self._snapshot_status(generation, population, time.time() - self.time_started, phase="coarse")
-                if progress_callback is not None:
-                    progress_callback(snapshot)
+                emit(
+                    "coarse",
+                    generation,
+                    population,
+                    coarse_completed,
+                    coarse_total,
+                    f"第 {generation} 代筛选完成",
+                    calculate_hypervolume=True,
+                )
                 current_pool_size = len(self.coarse_solution_pool)
                 if current_pool_size <= previous_pool_size:
                     stagnation += 1
@@ -1704,19 +1910,28 @@ class HybridNSGA3ALNSOptimizer:
 
             coarse_pool = self._select_coarse_candidate_pool()
             promotions = self._select_promotions(coarse_pool)
+            emit(
+                "coarse",
+                generations_completed,
+                population,
+                coarse_total,
+                coarse_total,
+                "候选广搜阶段完成",
+                calculate_hypervolume=True,
+            )
+
+            desired_exact_total = 1 + len(promotions)
+            emit(
+                "exact_promotion",
+                generations_completed,
+                promotions or population,
+                0,
+                desired_exact_total,
+                "正在执行精确基线评估 0 / 1",
+            )
             self.baseline_solution = self._evaluate_builtin_rule(baseline_name, "baseline", 0)
             self._record_solution(self.baseline_solution)
             scale_map = self._objective_scale_map(self.baseline_solution)
-
-            if progress_callback is not None:
-                progress_callback(
-                    self._snapshot_status(
-                        generations_completed,
-                        promotions or population,
-                        time.time() - self.time_started,
-                        phase="exact_promotion",
-                    )
-                )
 
             promoted_candidates = [solution.candidate.clone() for solution in promotions]
             requested_promotions = self._budget_limited_exact_count(
@@ -1724,26 +1939,44 @@ class HybridNSGA3ALNSOptimizer:
                 minimum=min(2, len(promoted_candidates)),
             )
             promoted_candidates = promoted_candidates[:requested_promotions]
+            exact_total = 1 + len(promoted_candidates)
+            emit(
+                "exact_promotion",
+                generations_completed,
+                promotions or population,
+                1,
+                exact_total,
+                f"精确基线完成，候选评估 0 / {len(promoted_candidates)}",
+                calculate_hypervolume=True,
+            )
             promoted_exact = self._parallel_evaluate_candidates_exact(
                 promoted_candidates,
                 "promoted_exact",
                 generations_completed + 1,
+                progress_callback=lambda done, total: emit(
+                    "exact_promotion",
+                    generations_completed,
+                    promotions or population,
+                    1 + done,
+                    1 + total,
+                    f"正在精确评估候选 {done} / {total}",
+                ),
             )
             for solution in promoted_exact:
                 self._record_solution(solution)
+            emit(
+                "exact_promotion",
+                generations_completed,
+                promoted_exact or [self.baseline_solution],
+                exact_total,
+                exact_total,
+                "精确候选评估完成",
+                calculate_hypervolume=True,
+            )
 
             candidate_pool = self._select_candidate_pool()
             elites = self._select_elites(candidate_pool)
             refined_solutions: list[OptimizationSolution] = []
-            if progress_callback is not None:
-                progress_callback(
-                    self._snapshot_status(
-                        generations_completed,
-                        elites or population,
-                        time.time() - self.time_started,
-                        phase="elite_refine",
-                    )
-                )
             refine_budget = self._budget_limited_exact_count(
                 len(elites) * max(1, self.config.alns_iterations_per_candidate) * max(1, self.config.refine_rounds),
                 minimum=0,
@@ -1754,6 +1987,26 @@ class HybridNSGA3ALNSOptimizer:
                     refine_budget // max(1, self.config.alns_iterations_per_candidate * max(1, self.config.refine_rounds)),
                 )
                 elites = elites[:max_elites]
+            planned_refine_total = (
+                len(elites)
+                * max(1, self.config.alns_iterations_per_candidate)
+                * max(1, self.config.refine_rounds)
+                if elites and refine_budget > 0
+                else 0
+            )
+            emit(
+                "elite_refine",
+                generations_completed,
+                elites or promoted_exact or [self.baseline_solution],
+                0,
+                max(1, planned_refine_total),
+                (
+                    f"正在精修精英方案 0 / {planned_refine_total}"
+                    if planned_refine_total
+                    else "当前预算不足，跳过精英精修"
+                ),
+            )
+            refine_completed = 0
             if elites and refine_budget > 0 and time.time() - self.time_started < self.config.time_limit_s:
                 working = elites
                 for round_index in range(max(1, self.config.refine_rounds)):
@@ -1763,20 +2016,40 @@ class HybridNSGA3ALNSOptimizer:
                         working,
                         scale_map,
                         generations_completed + 1 + round_index,
+                        progress_callback=lambda done, total, offset=refine_completed: emit(
+                            "elite_refine",
+                            generations_completed,
+                            working,
+                            offset + done,
+                            planned_refine_total,
+                            f"正在执行 ALNS 精修 {offset + done} / {planned_refine_total}",
+                        ),
+                    )
+                    refine_completed += (
+                        len(working)
+                        * max(0, self.config.alns_iterations_per_candidate)
                     )
                     for solution in working:
                         self._record_solution(solution)
                     refined_solutions = working
-                if progress_callback is not None:
-                    progress_callback(
-                        self._snapshot_status(
-                            generations_completed,
-                            refined_solutions,
-                            time.time() - self.time_started,
-                            phase="finalize",
-                        )
-                    )
+            emit(
+                "elite_refine",
+                generations_completed,
+                refined_solutions or elites or [self.baseline_solution],
+                max(1, planned_refine_total),
+                max(1, planned_refine_total),
+                "精英精修阶段完成",
+                calculate_hypervolume=True,
+            )
 
+            emit(
+                "finalize",
+                generations_completed,
+                refined_solutions or promoted_exact or [self.baseline_solution],
+                0,
+                1,
+                "正在整理 Pareto 前沿",
+            )
             selected = self.archive.select_diverse(self.config.target_solution_count, self.config.seed + 701)
             if selected:
                 vectors = [
@@ -1793,10 +2066,68 @@ class HybridNSGA3ALNSOptimizer:
                 )
             )
 
+            finalize_total = max(1, 3 + len(selected) * 2)
+            finalize_completed = 1
+            emit(
+                "finalize",
+                generations_completed,
+                selected,
+                finalize_completed,
+                finalize_total,
+                "Pareto 排序完成，正在生成方案预览",
+            )
+            baseline_payload = self._format_baseline_payload(self.baseline_solution)
+            finalize_completed += 1
+            solution_payloads = []
+            for solution in selected:
+                solution_payloads.append(
+                    self._format_solution_payload(solution, self.baseline_solution)
+                )
+                finalize_completed += 1
+                emit(
+                    "finalize",
+                    generations_completed,
+                    selected,
+                    finalize_completed,
+                    finalize_total,
+                    f"正在生成方案预览 {len(solution_payloads)} / {len(selected)}",
+                )
+            baseline_export = self._format_baseline_payload(
+                self.baseline_solution, schedule_limit=None
+            )
+            finalize_completed += 1
+            solutions_export = []
+            for solution in selected:
+                solutions_export.append(
+                    self._format_solution_payload(
+                        solution,
+                        self.baseline_solution,
+                        schedule_limit=None,
+                    )
+                )
+                finalize_completed += 1
+                emit(
+                    "finalize",
+                    generations_completed,
+                    selected,
+                    finalize_completed,
+                    finalize_total,
+                    f"正在生成完整排程 {len(solutions_export)} / {len(selected)}",
+                )
+            emit(
+                "finalize",
+                generations_completed,
+                selected,
+                finalize_total,
+                finalize_total,
+                "Pareto 解与排程整理完成",
+                calculate_hypervolume=True,
+            )
+
             return HybridResult(
                 objective_keys=[spec.key for spec in self.specs],
-                baseline=self._format_baseline_payload(self.baseline_solution),
-                solutions=[self._format_solution_payload(solution, self.baseline_solution) for solution in selected],
+                baseline=baseline_payload,
+                solutions=solution_payloads,
                 archive_size=len(self.archive),
                 requested_solution_count=self.config.target_solution_count,
                 found_solution_count=len(selected),
@@ -1816,8 +2147,8 @@ class HybridNSGA3ALNSOptimizer:
                 },
                 hypervolume_history=self.hypervolume_history,
                 status_history=self.status_history,
-                baseline_export=self._format_baseline_payload(self.baseline_solution, schedule_limit=None),
-                solutions_export=[self._format_solution_payload(solution, self.baseline_solution, schedule_limit=None) for solution in selected],
+                baseline_export=baseline_export,
+                solutions_export=solutions_export,
             )
         finally:
             # 进程池的生命周期与一次 run() 对齐——避免 worker 泄漏到调用方。

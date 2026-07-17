@@ -81,6 +81,7 @@ class ALNSCore:
         scales: dict[str, float],
         iterations: int,
         generation: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[CandidateParameters, OptimizationSolution]:
         best_candidate = candidate.clone()
         best_solution = incumbent
@@ -88,7 +89,8 @@ class ALNSCore:
         current_solution = incumbent
         temperature = 1.0
 
-        for _ in range(max(0, iterations)):
+        total_iterations = max(0, iterations)
+        for iteration_index in range(total_iterations):
             destroy_name = self._choose_operator(self.destroy_state, current_candidate.destroy_weights)
             repair_name = self._choose_operator(self.repair_state, current_candidate.repair_weights)
 
@@ -99,6 +101,8 @@ class ALNSCore:
             working.prune_bias()
 
             candidate_solution = evaluate_fn(working, f"alns:{destroy_name}+{repair_name}", generation)
+            if progress_callback is not None:
+                progress_callback(iteration_index + 1, total_iterations)
             accepted = False
             improved = False
 

@@ -521,22 +521,7 @@ function optimizePhaseLabel(phase) {
 }
 
 function optimizeProgress(status) {
-  const state = String(status?.status || "").toLowerCase();
-  if (state === "done") return 100;
-  if (state === "error") return Math.min(99, Math.max(2, Number(status?.progress || 0)));
-  if (state === "submitting") return 2;
-  const phase = String(status?.phase || "initializing");
-  const generationRatio = Number(status?.current_generation || 0) / Math.max(1, Number(status?.config?.generations || app.optimizeForm.generations || 1));
-  const timeRatio = Number(status?.elapsed_s || 0) / Math.max(1, Number(status?.config?.time_limit_s || app.optimizeForm.timeLimitS || 1));
-  if (["initializing", "graph_context_loading", "graph_context_building"].includes(phase)) {
-    const initializationWindowS = Math.min(10, Math.max(3, Number(status?.config?.time_limit_s || app.optimizeForm.timeLimitS || 1) * 0.15));
-    return Math.round(5 + Math.min(1, Number(status?.elapsed_s || 0) / initializationWindowS) * 3);
-  }
-  if (phase === "coarse") return Math.round(8 + Math.min(1, Math.max(generationRatio, timeRatio)) * 57);
-  if (phase === "exact_promotion") return 72;
-  if (phase === "elite_refine") return 84;
-  if (phase === "finalize") return 94;
-  return 5;
+  return window.OptimizeProgress.optimizeProgress(status);
 }
 
 function renderOptimizeStatus() {
@@ -545,14 +530,20 @@ function renderOptimizeStatus() {
   const state = String(status.status || "running").toLowerCase();
   const failed = state === "error" || state === "failed";
   const done = state === "done" || state === "completed" || state === "success";
-  const tone = failed ? "danger" : done ? "success" : "info";
+  const activity = window.OptimizeProgress.optimizeActivity(status);
+  const tone = failed ? "danger" : done ? "success" : activity.stalled ? "warning" : "info";
   const label = failed ? "优化失败" : done ? "优化完成" : state === "submitting" ? "正在提交优化任务" : "优化正在运行";
   const progress = optimizeProgress(status);
   const message = failed
     ? (status.error || status.message || "未收到具体错误说明")
     : done
       ? (status.message || "优化完成，方案已可用于评审")
-      : (status.message || "任务已提交，正在等待优化器返回进度");
+      : (activity.message || status.message || "任务已提交，正在等待优化器返回进度");
+  const phaseCompleted = Number(status.phase_completed);
+  const phaseTotal = Number(status.phase_total);
+  const phaseWork = Number.isFinite(phaseCompleted) && Number.isFinite(phaseTotal) && phaseTotal > 0
+    ? `${formatInt(phaseCompleted)} / ${formatInt(phaseTotal)}`
+    : "等待工作量明细";
   return `
     <article class="optimize-run-status ${tone}" id="optimize-run-status" role="status" aria-live="polite">
       <div class="optimize-run-head">
@@ -569,8 +560,12 @@ function renderOptimizeStatus() {
         <span>任务 ID：${escapeHtml(app.optimizeTaskId || "待分配")}</span>
         <span>已耗时：${formatDurationSeconds(status.elapsed_s || 0)}</span>
         <span>当前代数：${formatInt(status.current_generation || 0)} / ${formatInt(status.config?.generations || app.optimizeForm.generations)}</span>
-        <span>最近更新：${status.updated_at || status.received_at ? escapeHtml(formatDateTime(status.updated_at || status.received_at)) : "等待首次进度"}</span>
+        <span>阶段工作量：${escapeHtml(phaseWork)}</span>
+        <span>最近真实进度：${activity.lastRealProgressAt ? escapeHtml(formatDateTime(activity.lastRealProgressAt)) : "等待首次真实进度"}</span>
+        <span>真实进度静止：${formatDurationSeconds(activity.secondsSinceRealProgress)}</span>
+        <span>连接心跳：${status.updated_at || status.received_at ? escapeHtml(formatDateTime(status.updated_at || status.received_at)) : "等待首次心跳"}</span>
       </div>
+      ${activity.stalled && !failed && !done ? `<div class="graph-build-warning">${escapeHtml(activity.message)}</div>` : ""}
       ${failed ? `
         <div class="optimize-error-detail">
           <strong>${escapeHtml(status.error_type ? `错误类型：${status.error_type}` : "失败原因")}</strong>

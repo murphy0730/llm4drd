@@ -263,6 +263,16 @@ class NSGA2Optimizer:
 
     def run(self, callback=None) -> list:
         rng = _random.Random(self.seed)
+        total_evals = self.pop_size * (1 + self.generations)
+        done_evals = 0
+
+        def evaluate(weights, generation):
+            nonlocal done_evals
+            objectives = self._evaluate(weights)
+            done_evals += 1
+            if callback:
+                callback(done_evals, total_evals, generation)
+            return objectives
 
         # Initialize population
         pop_weights = [self._random_weights(rng) for _ in range(self.pop_size)]
@@ -273,15 +283,9 @@ class NSGA2Optimizer:
             w[i] = 1.0
             pop_weights[i] = w
 
-        pop_objs = [self._evaluate(w) for w in pop_weights]
-
-        total_evals = self.pop_size * (1 + self.generations)
-        done_evals = self.pop_size
+        pop_objs = [evaluate(w, 0) for w in pop_weights]
 
         for gen in range(self.generations):
-            if callback:
-                callback(done_evals, total_evals, gen)
-
             # Tournament selection + crossover + mutation -> offspring
             # rank 在一代内不变，提到循环外只算一次（原先每个子代都重排一遍全种群，O(pop³)）
             rank, _ = self._fast_nondominated_sort(pop_objs)
@@ -298,8 +302,9 @@ class NSGA2Optimizer:
                 child = self._polynomial_mutation(child, rng)
                 offspring_weights.append(child)
 
-            offspring_objs = [self._evaluate(w) for w in offspring_weights]
-            done_evals += self.pop_size
+            offspring_objs = [
+                evaluate(w, gen + 1) for w in offspring_weights
+            ]
 
             # Combine parent + offspring
             combined_w = pop_weights + offspring_weights

@@ -64,6 +64,7 @@ _hybrid_tasks: dict = {}
 _graph_tasks: dict = {}
 _latest_hybrid_task_id: Optional[str] = None
 OPTIMIZE_HEARTBEAT_INTERVAL_S = 1.0
+OPTIMIZE_STALL_THRESHOLD_S = 60.0
 online_scheduler_v3: Optional[OnlineSchedulerV3] = None
 # 仿真在线程池里跑（def 端点），锁串行化对全局 shop/last_result/runtime 缓存的读写。
 # runtime 构建要深拷贝整个实例（大实例十几秒），按内容键缓存：_active_shop() 每次
@@ -2881,6 +2882,30 @@ async def optimize_exact_reference(req: ExactReferenceReq):
 async def optimize_objectives():
     return {"objectives": objective_summary_payload()}
 
+
+def _optimization_activity_payload(task: dict, now: float | None = None) -> dict:
+    now = time.time() if now is None else now
+    last_real_progress_at = task.get("last_real_progress_at")
+    if not isinstance(last_real_progress_at, (int, float)):
+        last_real_progress_at = task.get("created_at", now)
+    seconds_since = max(0.0, now - float(last_real_progress_at))
+    threshold = max(
+        1e-3,
+        float(task.get("stall_threshold_s", OPTIMIZE_STALL_THRESHOLD_S)),
+    )
+    stalled = (
+        task.get("status") == "running"
+        and seconds_since >= threshold
+    )
+    return {
+        "last_real_progress_at": last_real_progress_at,
+        "seconds_since_real_progress": round(seconds_since, 2),
+        "stalled": stalled,
+        "slow": stalled,
+        "stall_threshold_s": threshold,
+    }
+
+
 @app.post("/api/optimize/hybrid")
 async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
     global _hybrid_tasks, _latest_hybrid_task_id
@@ -2891,12 +2916,23 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
     graph_context_mode = resolve_graph_context_mode()
     task_id = str(uuid.uuid4())[:8]
     _latest_hybrid_task_id = task_id
+    created_at = time.time()
     _hybrid_tasks[task_id] = {
         "status": "running",
         "phase": "initializing",
         "message": "正在初始化优化器并校验实例数据",
-        "created_at": time.time(),
-        "updated_at": time.time(),
+        "created_at": created_at,
+        "updated_at": created_at,
+        "last_real_progress_at": created_at,
+        "stall_threshold_s": OPTIMIZE_STALL_THRESHOLD_S,
+        "stalled": False,
+        "slow": False,
+        "seconds_since_real_progress": 0.0,
+        "real_progress": 0.0,
+        "phase_progress": 0.0,
+        "phase_completed": 0,
+        "phase_total": 1,
+        "activity": "正在初始化优化任务",
         "config": req.model_dump(),
         "current_generation": 0,
         "archive_size": 0,
@@ -2929,6 +2965,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 now = time.time()
                 task["elapsed_s"] = round(now - heartbeat_started_at, 2)
                 task["updated_at"] = now
+                task.update(_optimization_activity_payload(task, now))
 
         heartbeat_thread = threading.Thread(
             target=_heartbeat,
@@ -3007,6 +3044,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
 
             def _progress(snapshot: dict):
                 task = _hybrid_tasks[task_id]
+                now = time.time()
                 phase = snapshot.get("phase", "coarse")
                 phase_messages = {
                     "coarse": "正在进行近似评估与候选广搜",
@@ -3016,7 +3054,17 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 }
                 task["phase"] = phase
                 task["message"] = phase_messages.get(phase, "优化任务正在运行")
-                task["updated_at"] = time.time()
+                task["updated_at"] = now
+                previous_signal = (
+                    float(task.get("real_progress", 0.0)),
+                    int(task.get("current_generation", 0)),
+                    int(task.get("total_evaluations", 0)),
+                    int(task.get("phase_completed", 0)),
+                )
+                incoming_progress = max(
+                    float(task.get("real_progress", 0.0)),
+                    float(snapshot.get("real_progress", 0.0)),
+                )
                 task["current_generation"] = snapshot.get("generation", 0)
                 task["archive_size"] = snapshot.get("archive_size", 0)
                 task["population_size"] = snapshot.get("population_size", req.population_size)
@@ -3028,6 +3076,20 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 task["approximate_evaluations"] = snapshot.get("approximate_evaluations", 0)
                 task["exact_evaluations"] = snapshot.get("exact_evaluations", 0)
                 task["bottleneck_machine_ids"] = snapshot.get("bottleneck_machine_ids", [])
+                task["real_progress"] = incoming_progress
+                task["phase_progress"] = snapshot.get("phase_progress", 0.0)
+                task["phase_completed"] = snapshot.get("phase_completed", 0)
+                task["phase_total"] = snapshot.get("phase_total", 1)
+                task["activity"] = snapshot.get("activity", "")
+                current_signal = (
+                    incoming_progress,
+                    int(task["current_generation"]),
+                    int(task["total_evaluations"]),
+                    int(task["phase_completed"]),
+                )
+                if current_signal != previous_signal:
+                    task["last_real_progress_at"] = now
+                task.update(_optimization_activity_payload(task, now))
                 task["history"].append(snapshot)
                 task["history"] = task["history"][-50:]
 
@@ -3045,7 +3107,19 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             _hybrid_tasks[task_id]["status"] = "done"
             _hybrid_tasks[task_id]["phase"] = "done"
             _hybrid_tasks[task_id]["message"] = "优化完成，方案已可用于评审"
-            _hybrid_tasks[task_id]["updated_at"] = time.time()
+            completed_at = time.time()
+            _hybrid_tasks[task_id]["updated_at"] = completed_at
+            _hybrid_tasks[task_id]["last_real_progress_at"] = completed_at
+            _hybrid_tasks[task_id]["real_progress"] = 1.0
+            _hybrid_tasks[task_id]["phase_progress"] = 1.0
+            _hybrid_tasks[task_id]["phase_completed"] = 1
+            _hybrid_tasks[task_id]["phase_total"] = 1
+            _hybrid_tasks[task_id]["activity"] = "Pareto 解与排程已生成"
+            _hybrid_tasks[task_id].update(
+                _optimization_activity_payload(
+                    _hybrid_tasks[task_id], completed_at
+                )
+            )
             _hybrid_tasks[task_id]["result"] = payload
             _hybrid_tasks[task_id]["export_result"] = export_payload
             _hybrid_tasks[task_id]["archive_size"] = payload["archive_size"]
@@ -3084,6 +3158,7 @@ async def optimize_hybrid_status(task_id: str):
     task = _hybrid_tasks.get(task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
+    activity = _optimization_activity_payload(task)
     return {
         "task_id": task_id,
         "status": task["status"],
@@ -3091,7 +3166,14 @@ async def optimize_hybrid_status(task_id: str):
         "message": task.get("message", "优化任务正在运行"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
+        **activity,
         "config": task.get("config"),
+        "real_progress": task.get("real_progress", 0.0),
+        "progress": round(float(task.get("real_progress", 0.0)) * 100, 2),
+        "phase_progress": task.get("phase_progress", 0.0),
+        "phase_completed": task.get("phase_completed", 0),
+        "phase_total": task.get("phase_total", 1),
+        "activity": task.get("activity", ""),
         "current_generation": task.get("current_generation", 0),
         "archive_size": task.get("archive_size", 0),
         "population_size": task.get("population_size", 0),
@@ -3385,13 +3467,65 @@ async def nsga2_start(req: NSGA2Req, bg: BackgroundTasks):
     if not shop:
         raise HTTPException(400, "请先生成实例")
     task_id = str(uuid.uuid4())[:8]
-    _nsga2_tasks[task_id] = {"status": "running", "progress": 0, "total": 1, "gen": 0, "result": None}
+    created_at = time.time()
+    total_evaluations = req.pop_size * (1 + req.generations)
+    _nsga2_tasks[task_id] = {
+        "status": "running",
+        "phase": "evolution",
+        "message": "正在评估 NSGA-II 初始种群",
+        "progress": 0,
+        "total": total_evaluations,
+        "gen": 0,
+        "result": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "last_real_progress_at": created_at,
+        "stall_threshold_s": OPTIMIZE_STALL_THRESHOLD_S,
+        "real_progress": 0.0,
+        "phase_progress": 0.0,
+        "phase_completed": 0,
+        "phase_total": total_evaluations,
+        "elapsed_s": 0.0,
+    }
 
     def _run():
+        task = _nsga2_tasks[task_id]
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat():
+            while not heartbeat_stop.wait(OPTIMIZE_HEARTBEAT_INTERVAL_S):
+                if task.get("status") != "running":
+                    return
+                now = time.time()
+                task["elapsed_s"] = round(now - created_at, 2)
+                task["updated_at"] = now
+                task.update(_optimization_activity_payload(task, now))
+
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat,
+            name=f"nsga2-heartbeat-{task_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
         def cb(done, total, gen):
-            _nsga2_tasks[task_id]["progress"] = done
-            _nsga2_tasks[task_id]["total"] = total
-            _nsga2_tasks[task_id]["gen"] = gen
+            now = time.time()
+            previous_done = task.get("progress", 0)
+            task["progress"] = done
+            task["total"] = total
+            task["gen"] = gen
+            task["phase_completed"] = done
+            task["phase_total"] = total
+            task["phase_progress"] = done / max(1, total)
+            task["real_progress"] = done / max(1, total)
+            task["activity"] = f"已完成个体评估 {done} / {total}"
+            task["message"] = f"NSGA-II 第 {gen} 代：个体评估 {done} / {total}"
+            task["elapsed_s"] = round(now - created_at, 2)
+            task["updated_at"] = now
+            if done != previous_done:
+                task["last_real_progress_at"] = now
+            task.update(_optimization_activity_payload(task, now))
+
         try:
             opt = NSGA2Optimizer(shop, req.objectives, pop_size=req.pop_size,
                                   generations=req.generations, seed=req.seed)
@@ -3407,15 +3541,34 @@ async def nsga2_start(req: NSGA2Req, bg: BackgroundTasks):
                 if hasattr(s, 'weights'):
                     pt["weights"] = [round(w, 3) for w in s.weights]
                 pts.append(pt)
-            _nsga2_tasks[task_id]["result"] = {
+            task["result"] = {
                 "objectives": obj_keys,
                 "solutions": pts,
                 "pareto_front": [p for p in pts if p["is_pareto"]],
             }
-            _nsga2_tasks[task_id]["status"] = "done"
+            completed_at = time.time()
+            task.update({
+                "status": "done",
+                "phase": "done",
+                "message": "NSGA-II 优化完成",
+                "real_progress": 1.0,
+                "phase_progress": 1.0,
+                "phase_completed": total_evaluations,
+                "phase_total": total_evaluations,
+                "last_real_progress_at": completed_at,
+                "updated_at": completed_at,
+                "elapsed_s": round(completed_at - created_at, 2),
+            })
         except Exception as e:
-            _nsga2_tasks[task_id]["status"] = "error"
-            _nsga2_tasks[task_id]["error"] = str(e)
+            task["status"] = "error"
+            task["phase"] = "error"
+            task["error"] = str(e)
+            task["updated_at"] = time.time()
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(
+                timeout=max(0.1, OPTIMIZE_HEARTBEAT_INTERVAL_S * 2)
+            )
 
     bg.add_task(_run)
     return {"task_id": task_id, "status": "started"}
@@ -3425,7 +3578,7 @@ async def nsga2_status(task_id: str):
     t = _nsga2_tasks.get(task_id)
     if not t:
         raise HTTPException(404, "任务不存在")
-    return t
+    return {**t, **_optimization_activity_payload(t)}
 
 
 # === Exact Solver ===
@@ -3434,18 +3587,108 @@ async def exact_solve(req: ExactReq, bg: BackgroundTasks):
     if not shop:
         raise HTTPException(400, "请先生成实例")
     task_id = str(uuid.uuid4())[:8]
-    _exact_tasks[task_id] = {"status": "running", "result": None}
+    created_at = time.time()
+    _exact_tasks[task_id] = {
+        "status": "running",
+        "phase": "model_build",
+        "message": "正在构建 CP-SAT 精确模型",
+        "result": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "last_real_progress_at": created_at,
+        "stall_threshold_s": OPTIMIZE_STALL_THRESHOLD_S,
+        "real_progress": 0.0,
+        "phase_progress": 0.0,
+        "phase_completed": 0,
+        "phase_total": 1,
+        "elapsed_s": 0.0,
+    }
 
     def _run():
+        task = _exact_tasks[task_id]
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat():
+            while not heartbeat_stop.wait(OPTIMIZE_HEARTBEAT_INTERVAL_S):
+                if task.get("status") != "running":
+                    return
+                now = time.time()
+                task["elapsed_s"] = round(now - created_at, 2)
+                task["updated_at"] = now
+                task.update(_optimization_activity_payload(task, now))
+
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat,
+            name=f"exact-heartbeat-{task_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
+        def cb(snapshot: dict):
+            now = time.time()
+            previous_signal = (
+                task.get("real_progress", 0.0),
+                task.get("phase_completed", 0),
+                task.get("phase"),
+            )
+            task["phase"] = snapshot.get("phase", task.get("phase"))
+            task["message"] = snapshot.get(
+                "activity", "精确求解正在运行"
+            )
+            task["activity"] = snapshot.get("activity", "")
+            task["real_progress"] = max(
+                float(task.get("real_progress", 0.0)),
+                float(snapshot.get("real_progress", 0.0)),
+            )
+            task["phase_progress"] = snapshot.get("phase_progress", 0.0)
+            task["phase_completed"] = snapshot.get("phase_completed", 0)
+            task["phase_total"] = snapshot.get("phase_total", 0)
+            for key in (
+                "incumbent_count",
+                "objective_value",
+                "best_objective_bound",
+            ):
+                if key in snapshot:
+                    task[key] = snapshot[key]
+            task["elapsed_s"] = round(now - created_at, 2)
+            task["updated_at"] = now
+            current_signal = (
+                task["real_progress"],
+                task["phase_completed"],
+                task["phase"],
+            )
+            if current_signal != previous_signal:
+                task["last_real_progress_at"] = now
+            task.update(_optimization_activity_payload(task, now))
+
         try:
             solver = ExactSolver(shop, req.objectives, req.time_limit_s)
-            result = solver.solve()
-            _exact_tasks[task_id]["result"] = result.to_dict()
-            _exact_tasks[task_id]["result"]["schedule"] = [_serialize_schedule_entry(shop, entry) for entry in result.schedule[:100]]
-            _exact_tasks[task_id]["status"] = "done"
+            result = solver.solve(progress_callback=cb)
+            task["result"] = result.to_dict()
+            task["result"]["schedule"] = [_serialize_schedule_entry(shop, entry) for entry in result.schedule[:100]]
+            completed_at = time.time()
+            task.update({
+                "status": "done",
+                "phase": "done",
+                "message": "精确求解完成",
+                "real_progress": 1.0,
+                "phase_progress": 1.0,
+                "phase_completed": 1,
+                "phase_total": 1,
+                "last_real_progress_at": completed_at,
+                "updated_at": completed_at,
+                "elapsed_s": round(completed_at - created_at, 2),
+            })
         except Exception as e:
-            _exact_tasks[task_id]["status"] = "error"
-            _exact_tasks[task_id]["error"] = str(e)
+            task["status"] = "error"
+            task["phase"] = "error"
+            task["error"] = str(e)
+            task["updated_at"] = time.time()
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(
+                timeout=max(0.1, OPTIMIZE_HEARTBEAT_INTERVAL_S * 2)
+            )
 
     bg.add_task(_run)
     return {"task_id": task_id, "status": "started"}
@@ -3455,7 +3698,7 @@ async def exact_status(task_id: str):
     t = _exact_tasks.get(task_id)
     if not t:
         raise HTTPException(404, "任务不存在")
-    return t
+    return {**t, **_optimization_activity_payload(t)}
 
 
 # === Online Scheduling ===

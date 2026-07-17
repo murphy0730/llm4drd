@@ -111,8 +111,37 @@ class ExactSolver:
             "support": {objective_key: spec.support_mode},
         }
 
-    def solve(self, warm_start_schedule=None) -> ExactResult:
+    def solve(self, warm_start_schedule=None, progress_callback=None) -> ExactResult:
         del warm_start_schedule
+
+        def emit_progress(
+            phase: str,
+            real_progress: float,
+            completed: int,
+            total: int,
+            activity: str,
+            **extra,
+        ) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                {
+                    "phase": phase,
+                    "real_progress": round(
+                        min(1.0, max(0.0, real_progress)), 6
+                    ),
+                    "phase_completed": max(0, int(completed)),
+                    "phase_total": max(0, int(total)),
+                    "phase_progress": (
+                        round(min(1.0, max(0.0, completed / total)), 6)
+                        if total > 0
+                        else 0.0
+                    ),
+                    "activity": activity,
+                    **extra,
+                }
+            )
+
         try:
             from ortools.sat.python import cp_model
         except ImportError:
@@ -129,6 +158,42 @@ class ExactSolver:
 
         self.shop.build_indexes()
         completed_ops, fixed_processing_ops, decision_ops = self._classify_operations(operations)
+        model_total = max(
+            1,
+            3 * len(decision_ops)
+            + len(self.shop.machines)
+            + len(self.shop.toolings)
+            + len(self.shop.personnel)
+            + len(self.shop.tasks),
+        )
+        model_completed = 0
+        model_emit_interval = max(1, model_total // 100)
+        last_model_emit = -model_emit_interval
+
+        def model_step(activity: str) -> None:
+            nonlocal model_completed, last_model_emit
+            model_completed += 1
+            if (
+                model_completed - last_model_emit >= model_emit_interval
+                or model_completed >= model_total
+            ):
+                last_model_emit = model_completed
+                ratio = min(1.0, model_completed / model_total)
+                emit_progress(
+                    "model_build",
+                    0.02 + 0.58 * ratio,
+                    model_completed,
+                    model_total,
+                    activity,
+                )
+
+        emit_progress(
+            "model_build",
+            0.02,
+            0,
+            model_total,
+            "正在构建 CP-SAT 模型",
+        )
 
         # 任务缺省交期为 inf（数据未填交期），参与 horizon / 整数换算前必须剔除，
         # 否则 int(round(inf * scale)) 会直接 OverflowError
@@ -177,6 +242,7 @@ class ExactSolver:
             op_vars[op.id] = {"start": start, "end": end, "interval": interval, "duration": duration}
             op_end_exprs[op.id] = end
             model.Add(start >= max(0, int(round(self.shop.get_operation_release_time(op) * scale))))
+            model_step(f"正在创建工序变量 {model_completed + 1} / {model_total}")
 
         machine_intervals: dict[str, list] = {}
         tooling_intervals: dict[str, list] = {}
@@ -275,22 +341,26 @@ class ExactSolver:
                         bools[person.id] = selector
                     model.AddExactlyOne(bools.values())
                     personnel_choices[(op.id, requirement_index)] = {"selected": None, "bools": bools}
+            model_step(f"正在创建资源约束 {model_completed + 1} / {model_total}")
 
         for resource_id, resource in self.shop.machines.items():
             intervals = machine_intervals.setdefault(resource_id, [])
             intervals.extend(self._fixed_unavailability_intervals(model, resource.unavailable_windows(horizon_hours), scale, resource_id))
             if intervals:
                 model.AddNoOverlap(intervals)
+            model_step(f"正在创建机器约束 {model_completed + 1} / {model_total}")
         for resource_id, resource in self.shop.toolings.items():
             intervals = tooling_intervals.setdefault(resource_id, [])
             intervals.extend(self._fixed_unavailability_intervals(model, resource.unavailable_windows(horizon_hours), scale, resource_id))
             if intervals:
                 model.AddNoOverlap(intervals)
+            model_step(f"正在创建工装约束 {model_completed + 1} / {model_total}")
         for resource_id, resource in self.shop.personnel.items():
             intervals = personnel_intervals.setdefault(resource_id, [])
             intervals.extend(self._fixed_unavailability_intervals(model, resource.unavailable_windows(horizon_hours), scale, resource_id))
             if intervals:
                 model.AddNoOverlap(intervals)
+            model_step(f"正在创建人员约束 {model_completed + 1} / {model_total}")
 
         def add_flow_precedence(start_var, predecessor_op) -> None:
             predecessor_end = op_end_exprs.get(predecessor_op.id)
@@ -315,6 +385,7 @@ class ExactSolver:
                     continue
                 for predecessor_op in predecessor_task.operations:
                     add_flow_precedence(start_var, predecessor_op)
+            model_step(f"正在创建前置约束 {model_completed + 1} / {model_total}")
 
         makespan_var = model.NewIntVar(0, horizon, "makespan")
         all_end_exprs = list(op_end_exprs.values())
@@ -353,6 +424,7 @@ class ExactSolver:
             if task.is_main:
                 main_tardiness_vars[task.id] = tardiness
                 main_tardy_flags[task.id] = tardy_flag
+            model_step(f"正在创建交期目标 {model_completed + 1} / {model_total}")
 
         total_completion_time = model.NewIntVar(0, horizon * max(1, len(completion_terms)), "total_completion_time")
         if completion_terms:
@@ -423,10 +495,55 @@ class ExactSolver:
             model.Minimize(objective_terms[spec.solver_key])
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = self.time_limit_s
+        # time_limit_s 是整个 solve() 的预算，不只是 CP-SAT 搜索预算。
+        # 大实例建模本身可能很久，搜索阶段只使用扣除建模耗时后的余额。
+        solver.parameters.max_time_in_seconds = max(
+            0.01,
+            self.time_limit_s - (time.time() - started_at),
+        )
         solver.parameters.num_search_workers = 4
-        status = solver.Solve(model)
+        emit_progress(
+            "search",
+            0.62,
+            0,
+            0,
+            "CP-SAT 正在搜索可行解与改进界",
+            incumbent_count=0,
+        )
+
+        incumbent_count = 0
+
+        class SearchProgressCallback(cp_model.CpSolverSolutionCallback):
+            def on_solution_callback(callback_self):
+                nonlocal incumbent_count
+                incumbent_count += 1
+                # CP-SAT 不提供可靠的“已搜索百分比”。这里只在发现真实新解时
+                # 推进活动分数，并同时暴露当前目标/界，绝不按墙钟伪造进度。
+                search_score = min(
+                    0.9,
+                    0.62 + 0.04 * math.log2(incumbent_count + 1),
+                )
+                emit_progress(
+                    "search",
+                    search_score,
+                    incumbent_count,
+                    0,
+                    f"CP-SAT 已发现 {incumbent_count} 个改进解",
+                    incumbent_count=incumbent_count,
+                    objective_value=callback_self.ObjectiveValue(),
+                    best_objective_bound=callback_self.BestObjectiveBound(),
+                )
+
+        status = solver.Solve(model, SearchProgressCallback())
         solve_time = time.time() - started_at
+        emit_progress(
+            "search",
+            0.91,
+            incumbent_count,
+            0,
+            "CP-SAT 搜索结束，正在读取求解结果",
+            incumbent_count=incumbent_count,
+        )
 
         status_map = {
             cp_model.OPTIMAL: "OPTIMAL",
@@ -439,7 +556,8 @@ class ExactSolver:
             return ExactResult(status=status_label, solve_time_s=solve_time, request=request)
 
         schedule = list(fixed_schedule)
-        for op in decision_ops:
+        schedule_total = max(1, len(decision_ops))
+        for schedule_index, op in enumerate(decision_ops, start=1):
             machine_id = self._selected_resource(solver, machine_choices[op.id])
             tooling_ids = [self._selected_resource(solver, tooling_choices[(op.id, idx)]) for idx, _ in enumerate(op.required_tooling_types)]
             personnel_ids = [self._selected_resource(solver, personnel_choices[(op.id, idx)]) for idx, _ in enumerate(op.required_personnel_skills)]
@@ -459,6 +577,17 @@ class ExactSolver:
                     "status": "scheduled",
                 }
             )
+            if (
+                schedule_index == schedule_total
+                or schedule_index % max(1, schedule_total // 50) == 0
+            ):
+                emit_progress(
+                    "schedule_build",
+                    0.91 + 0.08 * (schedule_index / schedule_total),
+                    schedule_index,
+                    schedule_total,
+                    f"正在生成排程 {schedule_index} / {schedule_total}",
+                )
         schedule.sort(key=lambda entry: (entry.get("start", 0.0), entry.get("machine_id") or "", entry.get("op_id") or ""))
 
         analytics = build_schedule_analytics(self.shop, SimResult(schedule=schedule))
@@ -477,7 +606,7 @@ class ExactSolver:
             spec = EXACT_OBJECTIVES[request["objective_key"]]
             bounds[f"{spec.solver_key}_lb"] = solver.BestObjectiveBound() / scale
 
-        return ExactResult(
+        result = ExactResult(
             status=status_label,
             objectives=objectives,
             schedule=schedule,
@@ -485,6 +614,14 @@ class ExactSolver:
             bounds=bounds,
             request=request,
         )
+        emit_progress(
+            "done",
+            1.0,
+            1,
+            1,
+            "精确求解与排程生成完成",
+        )
+        return result
 
     def solve_pareto_front(self, num_points: int = 10) -> list:
         del num_points
