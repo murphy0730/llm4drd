@@ -5,6 +5,7 @@ import math
 import os
 import pickle
 import random
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -310,6 +311,7 @@ class HybridNSGA3ALNSOptimizer:
         self.refine_parallel_workers = self._phase_parallel_workers("refine")
         self._process_pool = None
         self._process_backend_failed = False
+        self._payload_path: str | None = None
         # 池按各阶段的最大并发建一次：懒建的池会被首个批次的 worker 数永久定容，
         # 之后阶段要求更高并发时也拿不到。
         self._max_pool_workers = max(
@@ -896,27 +898,56 @@ class HybridNSGA3ALNSOptimizer:
             protocol=pickle.HIGHEST_PROTOCOL,
         )
 
+    def _write_worker_payload(self) -> str:
+        """把 payload 落到临时文件，只把路径交给 worker。
+
+        initargs 里的 bytes 会被每个 worker 的主循环栈帧引用到进程退出——大实例
+        下那是每进程上百 MB 的常驻开销，且父进程自己也要一直留着同一份。
+        """
+        handle, path = tempfile.mkstemp(prefix="llm4drd_worker_", suffix=".pkl")
+        try:
+            with os.fdopen(handle, "wb") as payload_file:
+                payload_file.write(self._worker_payload_bytes())
+        except BaseException:
+            os.unlink(path)
+            raise
+        return path
+
     def _ensure_process_pool(self, worker_count: int):
         """worker_count 只用于"要不要并行"的判断；池本身按全局最大并发定容。"""
         if self._process_backend_failed or self.config.parallel_backend != "process":
             return None
         if self._process_pool is None:
             try:
+                self._payload_path = self._write_worker_payload()
                 self._process_pool = ProcessPoolExecutor(
                     max_workers=self._max_pool_workers,
                     initializer=init_worker,
-                    initargs=(self._worker_payload_bytes(),),
+                    initargs=(self._payload_path,),
                 )
             except Exception as exc:
                 logging.warning("hybrid: process pool unavailable (%s), using threads", exc)
                 self._process_backend_failed = True
+                self._discard_worker_payload()
                 return None
         return self._process_pool
 
+    def _discard_worker_payload(self) -> None:
+        if self._payload_path is None:
+            return
+        try:
+            os.unlink(self._payload_path)
+        except OSError:
+            logging.warning("hybrid: worker payload %s not removed", self._payload_path)
+        self._payload_path = None
+
     def _shutdown_process_pool(self) -> None:
         if self._process_pool is not None:
+            # 必须等 worker 真正退出再删 payload：shutdown 默认 wait=True，
+            # 此时不会再有新 worker 去读这个文件。
             self._process_pool.shutdown(cancel_futures=True)
             self._process_pool = None
+        self._discard_worker_payload()
 
     def _abandon_process_backend(self, exc: BaseException) -> None:
         logging.warning("hybrid: process backend failed (%s), falling back to threads", exc)

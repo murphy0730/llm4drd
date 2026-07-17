@@ -61,16 +61,25 @@ def build_candidate_rule(candidate, graph_features, time_scale, busy_scale,
     return _rule
 
 
-def init_worker(payload_bytes: bytes) -> None:
-    payload = pickle.loads(payload_bytes)
-    shop = payload["shop"]
+def init_worker(payload_path: str) -> None:
+    """从磁盘载入一次 payload，进程内自建 runtime 与近似评估器。
+
+    走文件而非 bytes 形参：ProcessPoolExecutor 的 initargs 会被 worker 主循环
+    的栈帧一直引用，大实例的 payload（百 MB 级）会在每个 worker 里常驻到进程
+    退出，白白占满内存。
+    """
+    with open(payload_path, "rb") as payload_file:
+        payload = pickle.load(payload_file)
     scales = payload["scales"]
-    _STATE["shop"] = shop
+    # runtime 直接接管这份刚反序列化出来的私有 shop（不再深拷贝），approx 也复用
+    # 同一个对象：三份 shop 拷贝正是大实例 worker 初始化 MemoryError 的来源。
+    runtime = SimulationRuntime(payload["shop"], copy_shop=False)
+    _STATE["shop"] = runtime.shop
     _STATE["graph_features"] = payload["graph_features"]
     _STATE["scales"] = scales
-    _STATE["runtime"] = SimulationRuntime(shop)
+    _STATE["runtime"] = runtime
     _STATE["approx"] = ApproximateScheduleEvaluator(
-        shop,
+        runtime.shop,
         payload["graph_features"],
         scales["time_scale"],
         scales["due_scale"],
@@ -92,4 +101,8 @@ def run_exact_simulation(candidate: CandidateParameters) -> SimResult:
 
 def run_approx_evaluation(candidate: CandidateParameters, source: str,
                           generation: int) -> OptimizationSolution:
+    # approx 与 runtime 共用同一个 shop（省一份大实例深拷贝），而上一次精确仿真
+    # 会把它留在"全部完成"的终态；approx 的 analytics 要读 op.status/end_time，
+    # 故必须先复位回初始状态。reset() 是 O(N) 的，相对一次评估可忽略。
+    _STATE["runtime"].reset()
     return _STATE["approx"].evaluate(candidate, source, generation)

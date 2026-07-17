@@ -78,10 +78,14 @@ class ApproximateScheduleEvaluator:
             op_id: self.shop.get_operation_release_time(op)
             for op_id, op in self.shop.operations.items()
         }
-        self._eligible_machines = {
-            op_id: list(self.shop.get_eligible_machines(op))
-            for op_id, op in self.shop.operations.items()
-        }
+        # 同工艺类型的工序共用同一份可用机台序列（只读）——逐工序各存一份
+        # 在大实例上是 20MB 量级的纯重复。
+        machines_cache: dict[tuple, tuple] = {}
+        self._eligible_machines = {}
+        for op_id, op in self.shop.operations.items():
+            eligible = tuple(self.shop.get_eligible_machines(op))
+            key = tuple(machine.id for machine in eligible)
+            self._eligible_machines[op_id] = machines_cache.setdefault(key, eligible)
         self._tooling_candidates = {
             op_id: {
                 tooling_type: list(self.shop.get_toolings_for_type(tooling_type))

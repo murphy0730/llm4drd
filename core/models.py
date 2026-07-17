@@ -4,6 +4,7 @@ from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from functools import lru_cache
 import math
 from typing import Optional
 import csv
@@ -30,11 +31,23 @@ class ResourceState(Enum):
 MachineState = ResourceState
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Shift:
+    """不可变值对象——只由 (day, start_hour, hours) 定义，没有身份。
+
+    大实例里 Shift 是内存第一大头：日历按天铺开后是"机台数 × 天数 × 每天班次数"
+    个实例（1147 台 × 618 天 × 2 班 ≈ 142 万个）。frozen+slots 去掉了每实例的
+    __dict__，更关键的是让相同班次可以跨资源安全共享（见 _intern_shift）。
+    """
+
     day: int
     start_hour: float
     hours: float
+
+    def __deepcopy__(self, memo):
+        # 不可变 ⇒ 深拷贝没有意义。仿真前的 shop 深拷贝要复制上百万个 Shift，
+        # 既是耗时大头也是内存大头；直接复用自身即可。
+        return self
 
     @property
     def start_offset(self) -> float:
@@ -58,6 +71,40 @@ class Downtime:
         return max(0.0, self.end_time - self.start_time)
 
 
+@lru_cache(maxsize=256)
+def _compile_calendar_windows(
+    shifts: tuple[Shift, ...],
+    downtime_windows: tuple[tuple[float, float], ...],
+    anchor_hour: float,
+) -> tuple[tuple, tuple, tuple, tuple]:
+    """把班次日历编译成可用时间窗；相同日历只算一次并共享结果。
+
+    编译结果是纯派生数据，只由 (shifts, downtimes, anchor) 决定，而车间里成百上千
+    台设备的日历通常完全相同。逐台各存一份时，1232 个窗口 × 每个窗口一个 tuple
+    ≈ 每台 260KB，1147 台就是 ~300MB——比工序本身大一个数量级。
+    Shift 不可变可哈希，故可直接作为缓存键；返回的 tuple 同样不可变，多台设备
+    共享一份是安全的。
+    """
+    shift_windows = _merge_windows(
+        [
+            (
+                shift.day * 24.0 + shift.start_hour - anchor_hour,
+                shift.day * 24.0 + shift.start_hour - anchor_hour + shift.hours,
+            )
+            for shift in shifts
+            if shift.hours > 0
+        ]
+    )
+    base_windows = shift_windows if shift_windows else [(0.0, float("inf"))]
+    available_windows = _subtract_windows(base_windows, _merge_windows(list(downtime_windows)))
+    return (
+        tuple(shift_windows),
+        tuple(start for start, _ in shift_windows),
+        tuple(available_windows),
+        tuple(start for start, _ in available_windows),
+    )
+
+
 class CalendarResourceMixin:
     shifts: list[Shift]
     downtimes: list[Downtime]
@@ -68,26 +115,23 @@ class CalendarResourceMixin:
         shifts = getattr(self, "shifts", [])
         downtimes = sorted(getattr(self, "downtimes", []), key=lambda dt: (dt.start_time, dt.end_time))
 
-        shift_windows = _merge_windows(
-            [
-                (
-                    shift.day * 24.0 + shift.start_hour - anchor_hour,
-                    shift.day * 24.0 + shift.start_hour - anchor_hour + shift.hours,
-                )
-                for shift in shifts
-                if shift.hours > 0
-            ]
+        (
+            shift_windows,
+            shift_starts,
+            available_windows,
+            available_starts,
+        ) = _compile_calendar_windows(
+            tuple(shifts),
+            tuple((dt.start_time, dt.end_time) for dt in downtimes),
+            anchor_hour,
         )
-        downtime_windows = _merge_windows([(dt.start_time, dt.end_time) for dt in downtimes])
-        base_windows = shift_windows if shift_windows else [(0.0, float("inf"))]
-        available_windows = _subtract_windows(base_windows, downtime_windows)
 
-        self._calendar_shift_windows = tuple(shift_windows)
-        self._calendar_shift_starts = tuple(start for start, _ in shift_windows)
+        self._calendar_shift_windows = shift_windows
+        self._calendar_shift_starts = shift_starts
         self._calendar_downtimes = tuple(downtimes)
         self._calendar_downtime_starts = tuple(dt.start_time for dt in downtimes)
-        self._calendar_available_windows = tuple(available_windows)
-        self._calendar_available_starts = tuple(start for start, _ in available_windows)
+        self._calendar_available_windows = available_windows
+        self._calendar_available_starts = available_starts
         self._calendar_compiled = True
 
     def _ensure_calendar_cache(self) -> None:
@@ -572,8 +616,11 @@ class ShopFloor:
         if target_days <= current_days:
             return False
 
+        # 一个 cache 贯穿所有资源：跨机台共享相同班次才是省内存的关键，
+        # 否则每台机器仍各留一份内容相同的实例。
+        shift_cache: dict = {}
         for resource in [*self.machines.values(), *self.toolings.values(), *self.personnel.values()]:
-            resource.shifts = _extend_shift_calendar(resource.shifts, target_days)
+            resource.shifts = _extend_shift_calendar(resource.shifts, target_days, shift_cache)
 
         self.build_indexes()
         return True
@@ -1133,9 +1180,27 @@ def _resource_parallel_units(resources: list, schedule_days: int) -> float:
     return max(total_hours / horizon_hours, 0.1)
 
 
-def _extend_shift_calendar(shifts: list[Shift], target_days: int) -> list[Shift]:
+def _intern_shift(cache: dict, day: int, start_hour: float, hours: float) -> Shift:
+    """同一 (day, start_hour, hours) 只保留一个共享实例。
+
+    各资源的日历通常逐日重复且彼此雷同，逐台造对象会得到百万级内容相同的实例。
+    Shift 不可变，共享是安全的。注意 8 与 8.0 是同一个键——两者语义等价，
+    指纹计算本就按数值归一（见 test_numeric_representation_does_not_change_fingerprint）。
+    """
+    key = (day, start_hour, hours)
+    shift = cache.get(key)
+    if shift is None:
+        shift = Shift(day=day, start_hour=start_hour, hours=hours)
+        cache[key] = shift
+    return shift
+
+
+def _extend_shift_calendar(shifts: list[Shift], target_days: int,
+                           cache: dict | None = None) -> list[Shift]:
     if not shifts:
         return list(shifts)
+    if cache is None:
+        cache = {}
 
     grouped: dict[int, list[Shift]] = {}
     for shift in shifts:
@@ -1160,11 +1225,12 @@ def _extend_shift_calendar(shifts: list[Shift], target_days: int) -> list[Shift]
         fallback = sorted(shifts, key=lambda item: (item.day, item.start_hour))
         template = [[Shift(day=0, start_hour=shift.start_hour, hours=shift.hours) for shift in fallback if shift.hours > 0]]
 
-    extended = list(shifts)
+    # 已有的天数一并过一遍 intern：基线日历同样是每台机器各造一份。
+    extended = [_intern_shift(cache, s.day, s.start_hour, s.hours) for s in shifts]
     for day in range(current_days, target_days):
         source = template[(day - template_start) % len(template)]
         for shift in source:
-            extended.append(Shift(day=day, start_hour=shift.start_hour, hours=shift.hours))
+            extended.append(_intern_shift(cache, day, shift.start_hour, shift.hours))
     return extended
 
 

@@ -1,8 +1,10 @@
+import os
 import pickle
 import unittest
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 
+from llm4drd.core.models import OpStatus
 from llm4drd.optimization import parallel_eval
 from llm4drd.optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
@@ -20,6 +22,16 @@ def _small_config(**overrides) -> HybridConfig:
 
 
 class ParallelEvalTests(unittest.TestCase):
+    def _init_worker(self, optimizer) -> None:
+        """在本进程里初始化 worker；payload 文件由测试自己回收。
+
+        正常路径下文件随 _shutdown_process_pool 删除，直接调 init_worker 的测试
+        绕开了池的生命周期，不清理就会在临时目录里堆下大实例 payload。
+        """
+        path = optimizer._write_worker_payload()
+        self.addCleanup(os.unlink, path)
+        parallel_eval.init_worker(path)
+
     def test_worker_matches_inline_simulation(self):
         # 在当前进程直接调用 worker 的初始化与任务函数（不真正 spawn），
         # 验证 worker 路径与主进程 _simulate_candidate 产出一致。
@@ -27,7 +39,7 @@ class ParallelEvalTests(unittest.TestCase):
         optimizer = HybridNSGA3ALNSOptimizer(shop, _small_config())
         candidate = optimizer._default_candidate(optimizer.config.baseline_rule_name)
 
-        parallel_eval.init_worker(optimizer._worker_payload_bytes())
+        self._init_worker(optimizer)
         worker_sim = parallel_eval.run_exact_simulation(candidate)
         worker_solution = optimizer._solution_from_sim_result(
             candidate, worker_sim, "test", 0,
@@ -40,6 +52,43 @@ class ParallelEvalTests(unittest.TestCase):
             return metrics, solution.schedule_signature
 
         self.assertEqual(comparable(worker_solution), comparable(inline_solution))
+
+    def test_worker_keeps_a_single_shop_copy(self):
+        # 每份 shop 在生产实例上达数百 MB：worker 里 runtime / approx / _STATE
+        # 必须是同一个对象，多一份深拷贝就会把并行 worker 推进 MemoryError。
+        optimizer = HybridNSGA3ALNSOptimizer(make_graph_context_shop(), _small_config())
+        self._init_worker(optimizer)
+        runtime_shop = parallel_eval._STATE["runtime"].shop
+        self.assertIs(parallel_eval._STATE["shop"], runtime_shop)
+        self.assertIs(parallel_eval._STATE["approx"].shop, runtime_shop)
+
+    def test_approx_never_sees_the_exact_runs_terminal_state(self):
+        # 共用 shop 的代价：精确仿真结束后 shop 停在"全部完成"的终态，而
+        # approx 的 build_schedule_analytics 会读 op.status/end_time。不复位就会
+        # 把候选算成 feasible 并混入上一轮的完工时间——数值上未必立刻看得出，
+        # 所以这里直接钉住"approx 评估时看到的必须是初始状态"。
+        optimizer = HybridNSGA3ALNSOptimizer(make_graph_context_shop(), _small_config())
+        candidate = optimizer._default_candidate(optimizer.config.baseline_rule_name)
+        self._init_worker(optimizer)
+        before = parallel_eval.run_approx_evaluation(candidate, "test", 0)
+
+        parallel_eval.run_exact_simulation(candidate)
+
+        approx = parallel_eval._STATE["approx"]
+        seen: dict = {}
+        original_evaluate = approx.evaluate
+
+        def spy(*args, **kwargs):
+            seen["statuses"] = {op.status for op in approx.shop.operations.values()}
+            seen["ended"] = [op.end_time for op in approx.shop.operations.values()]
+            return original_evaluate(*args, **kwargs)
+
+        approx.evaluate = spy
+        after = parallel_eval.run_approx_evaluation(candidate, "test", 0)
+
+        self.assertEqual(seen["statuses"], {OpStatus.PENDING})
+        self.assertEqual(seen["ended"], [None] * len(approx.shop.operations))
+        self.assertEqual(before.metrics, after.metrics)
 
     def test_pool_capacity_is_not_pinned_by_the_first_batch(self):
         # 近似阶段先以小 worker 数建池，精确阶段再要求更大并发时，

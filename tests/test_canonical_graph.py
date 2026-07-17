@@ -3,7 +3,7 @@ import math
 import unittest
 from unittest.mock import patch
 
-from llm4drd.core.models import Order, ShopFloor
+from llm4drd.core.models import Order, Shift, ShopFloor
 from llm4drd.knowledge.canonical import CanonicalGraphBuilder, compute_graph_fingerprint
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 
@@ -82,18 +82,20 @@ class GraphFingerprintTests(unittest.TestCase):
             *left.toolings.values(),
             *left.personnel.values(),
         ]:
-            for shift in resource.shifts:
-                shift.start_hour = int(shift.start_hour)
-                shift.hours = int(shift.hours)
+            resource.shifts = [
+                Shift(day=shift.day, start_hour=int(shift.start_hour), hours=int(shift.hours))
+                for shift in resource.shifts
+            ]
         right = copy.deepcopy(left)
         for resource in [
             *right.machines.values(),
             *right.toolings.values(),
             *right.personnel.values(),
         ]:
-            for shift in resource.shifts:
-                shift.start_hour = float(shift.start_hour)
-                shift.hours = float(shift.hours)
+            resource.shifts = [
+                Shift(day=shift.day, start_hour=float(shift.start_hour), hours=float(shift.hours))
+                for shift in resource.shifts
+            ]
 
         self.assertEqual(
             compute_graph_fingerprint(left),

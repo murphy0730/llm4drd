@@ -131,13 +131,17 @@ def detect_dependency_cycles(shop: ShopFloor) -> list[dict]:
 
 
 class SimulationRuntime:
-    def __init__(self, shop: ShopFloor):
-        self.shop = copy.deepcopy(shop)
+    def __init__(self, shop: ShopFloor, copy_shop: bool = True):
+        # 默认深拷贝：调用方的 shop 不能被仿真改动。copy_shop=False 表示调用方
+        # 把所有权移交给 runtime（如子进程刚反序列化出来的私有副本），此后不得
+        # 再直接读写该 shop 的动态字段——大实例一份 shop 达数百 MB，这份拷贝
+        # 省下的内存决定了并行 worker 数能否开到位。
+        self.shop = copy.deepcopy(shop) if copy_shop else shop
         self.shop.build_indexes()
         self.dependency_cycles = detect_dependency_cycles(self.shop)
 
-        self.eligible_machine_ids: dict[str, set[str]] = {}
-        self.op_dispatch_type_ids: dict[str, set[str]] = {}
+        self.eligible_machine_ids: dict[str, frozenset[str]] = {}
+        self.op_dispatch_type_ids: dict[str, frozenset[str]] = {}
         self.tooling_candidates: dict[str, dict[str, list]] = {}
         self.personnel_candidates: dict[str, dict[str, list]] = {}
         self.release_time_cache: dict[str, float] = {}
@@ -150,15 +154,22 @@ class SimulationRuntime:
         self.task_op_counts: dict[str, int] = {
             task_id: len(task.operations) for task_id, task in self.shop.tasks.items()
         }
+        # 同工艺类型的工序，可用机台集合逐字相同：逐工序各存一份 set 时，
+        # 1.6 万工序 × 144 台 ≈ 138MB，而实际不同的集合只有工艺类型那么多。
+        # 这两张表只做成员判断与遍历（只读），故共享 frozenset 是安全的。
+        eligible_cache: dict[frozenset, frozenset] = {}
+        dispatch_cache: dict[frozenset, frozenset] = {}
         for op_id, op in self.shop.operations.items():
             eligible_machines = self.shop.get_eligible_machines(op)
-            self.eligible_machine_ids[op_id] = {machine.id for machine in eligible_machines}
+            eligible_ids = frozenset(machine.id for machine in eligible_machines)
+            self.eligible_machine_ids[op_id] = eligible_cache.setdefault(eligible_ids, eligible_ids)
             # 派工桶必须按"可用机台的实际类型"建立：工序显式指定 eligible_machine_ids 时，
             # 机台类型可能不等于工序的 process_type——若仍按 process_type 建桶，
             # 指定机台所在类型的机器永远扫描不到该工序，导致其被永久饿死
             # （表现为"前驱已完成但抢不到资源"，且与派工规则无关）。
-            dispatch_types = {machine.type_id for machine in eligible_machines}
-            self.op_dispatch_type_ids[op_id] = dispatch_types or {op.process_type}
+            dispatch_types = frozenset(machine.type_id for machine in eligible_machines)
+            dispatch_types = dispatch_types or frozenset((op.process_type,))
+            self.op_dispatch_type_ids[op_id] = dispatch_cache.setdefault(dispatch_types, dispatch_types)
             self.tooling_candidates[op_id] = {
                 tooling_type: list(self.shop.get_toolings_for_type(tooling_type))
                 for tooling_type in op.required_tooling_types
