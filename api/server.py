@@ -416,8 +416,11 @@ def _serialize_downtime_row(current_shop: ShopFloor, row: dict) -> dict:
     return payload
 
 
-def _shift_payload(current_shop: ShopFloor, shift) -> dict:
-    start = shift.day * 24.0 + shift.start_hour
+def _shift_payload(current_shop: ShopFloor, resource, shift) -> dict:
+    # start_hour 是墙上时钟小时，须按 plan_start_at 的钟点锚定成偏移，
+    # 口径与 CalendarResourceMixin.compile_calendar 保持一致。
+    anchor_hour = getattr(resource, "calendar_anchor_hour", 0.0)
+    start = shift.day * 24.0 + shift.start_hour - anchor_hour
     end = start + shift.hours
     return {
         "day": shift.day,
@@ -432,7 +435,7 @@ def _shift_payload(current_shop: ShopFloor, shift) -> dict:
 
 def _resource_calendar_payload(current_shop: ShopFloor, resource) -> dict:
     return {
-        "shifts": [_shift_payload(current_shop, shift) for shift in getattr(resource, "shifts", [])],
+        "shifts": [_shift_payload(current_shop, resource, shift) for shift in getattr(resource, "shifts", [])],
         "downtimes": [
             {
                 "id": downtime.id,
@@ -4054,7 +4057,7 @@ def _calendar_export_rows(current_shop: ShopFloor, schedule: list[dict]) -> list
     for machine_id in sorted(touched_machine_ids):
         machine = current_shop.machines[machine_id]
         for shift in machine.shifts:
-            payload = _shift_payload(current_shop, shift)
+            payload = _shift_payload(current_shop, machine, shift)
             rows.append(
                 {
                     "machine_id": machine_id,

@@ -15,6 +15,33 @@ PORT = 8888
 TARGET_URL = f"http://{HOST}:{PORT}/"
 
 
+def _register_package() -> None:
+    """把项目根目录注册成 llm4drd_platform 包。
+
+    必须在模块顶层执行：spawn 出的子进程（进程池 worker）会以 __mp_main__ 之名
+    重新执行本文件，随后才反序列化任务负载。若注册只在 main() 里做，子进程反
+    序列化 llm4drd_platform.* 对象时会 ModuleNotFoundError。
+    """
+    if "llm4drd_platform" in sys.modules:
+        return
+
+    root = pathlib.Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "llm4drd_platform",
+        root / "__init__.py",
+        submodule_search_locations=[str(root)],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Failed to create package spec for llm4drd_platform")
+
+    pkg = importlib.util.module_from_spec(spec)
+    sys.modules["llm4drd_platform"] = pkg
+    spec.loader.exec_module(pkg)
+
+
+_register_package()
+
+
 def _port_in_use() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         return sock.connect_ex((HOST, PORT)) == 0
@@ -37,19 +64,6 @@ def _open_when_ready() -> None:
 
 
 def main() -> None:
-    root = pathlib.Path(__file__).resolve().parent
-    spec = importlib.util.spec_from_file_location(
-        "llm4drd_platform",
-        root / "__init__.py",
-        submodule_search_locations=[str(root)],
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Failed to create package spec for llm4drd_platform")
-
-    pkg = importlib.util.module_from_spec(spec)
-    sys.modules["llm4drd_platform"] = pkg
-    spec.loader.exec_module(pkg)
-
     if _port_in_use():
         if _is_this_app_running():
             print(f"LLM4DRD 已在运行：{TARGET_URL}")

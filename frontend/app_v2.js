@@ -75,10 +75,10 @@ const NAV_MAP = {
   dashboard: { page: "dashboard", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
   // 旧的通用 "workflow" 书签 hash（原 rail 导航已移除）统一落到「规则仿真」。
-  workflow: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
+  workflow: { page: "workflow", workflowStep: 3, requiresScene: true },
   // 图谱视图已并入「数据导入」页，旧的 graph 书签 hash 落到该页。
   graph: { page: "new-scene" },
-  simulate: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
+  simulate: { page: "workflow", workflowStep: 3, requiresScene: true },
   "optimize-config": { page: "workflow", workflowStep: 4, requiresScene: true },
   "optimize-launch": { page: "workflow", workflowStep: 4, requiresScene: true },
   "pareto-library": { page: "review", reviewTab: "library", requiresScene: true },
@@ -132,7 +132,6 @@ const app = {
   systemTab: "llm",
   reviewTab: "library",
   workflowStep: 1,
-  workflowFocus: null,
   filters: { orders: "", operations: "", resources: "", downtime: "" },
   reviewSelection: [],
   reviewDetailId: null,
@@ -1185,7 +1184,6 @@ async function navigate(navKey, pushHash = true) {
   if (resolved.reviewTab) app.reviewTab = resolved.reviewTab;
   if (resolved.systemTab) app.systemTab = resolved.systemTab;
   if (resolved.workflowStep) app.workflowStep = resolved.workflowStep;
-  if (resolved.workflowFocus) app.workflowFocus = resolved.workflowFocus;
   setActiveNav(navKey);
   showPage(resolved.page);
   if (pushHash) window.location.hash = navKey;
@@ -2886,7 +2884,6 @@ function renderWorkflowStep3() {
       </div>
       <div class="form-actions form-actions--gap">
         <button class="btn btn-primary" type="button" data-action="run-simulate">运行仿真</button>
-        <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">打开完整仿真页</button>
       </div>
       <div id="sim-status">${renderSimStatusInner(app.simStatus)}</div>
       ${app.simResult && simMetrics.feasible === false ? `
@@ -2930,7 +2927,7 @@ function renderWorkflowStep3() {
   return `
     <div class="workflow-stage-stack">
       ${simulationPanel}
-      ${(app.workflowFocus || "graph") === "simulate" ? simulationDetail : ""}
+      ${simulationDetail}
     </div>
   `;
 }
@@ -4396,9 +4393,11 @@ function mountGantts() {
         start: data.window.start,
         end: data.window.end,
         showTooltips: true,
+        // 内置 moment 只打包了 de/en/ja/ru/uk 语料且全局 locale 被 uk 覆盖，
+        // 因此各刻度一律用与语言无关的数字格式，不能依赖 ddd / MMMM。
         format: {
-          minorLabels: { minute: "HH:mm", hour: "HH:mm", day: "D日", week: "w周", month: "M月", year: "YYYY" },
-          majorLabels: { minute: "M月D日", hour: "M月D日", day: "YYYY年M月", week: "YYYY年M月", month: "YYYY年", year: "" },
+          minorLabels: { minute: "HH:mm", hour: "HH:mm", weekday: "D日", day: "D日", week: "w周", month: "M月", year: "YYYY" },
+          majorLabels: { minute: "M月D日", hour: "M月D日", weekday: "YYYY年M月", day: "YYYY年M月", week: "YYYY年M月", month: "YYYY年", year: "" },
         },
       }
     );
@@ -5482,10 +5481,6 @@ async function handleAction(action, target) {
     if (stepNavKey) return navigate(stepNavKey);
     app.workflowStep = step;
     return navigate("workflow");
-  }
-  if (action === "set-workflow-focus") {
-    app.workflowFocus = target.dataset.focus || "graph";
-    return renderWorkflow();
   }
   if (action === "toggle-graph-fullscreen") {
     const shell = target.closest(".graph-workbench") || document.querySelector(".graph-workbench");
