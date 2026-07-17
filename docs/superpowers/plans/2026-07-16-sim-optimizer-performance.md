@@ -1282,7 +1282,7 @@ review 修复让端到端从 2.88 回升到 3.12：Finding 3 的修复取消了"
    `cd /Users/zhouwentao/Desktop && python -m unittest llm4drd.tests.X` 执行。
 2. **基准命令有误**：计划正文里 `result.exact_eval_time_total` 不存在（该计数在 optimizer 实例上），
    且 `make_graph_context_shop()` 只有 4 道工序、0.05 秒跑完，测不出差异。改用
-   `scratchpad/bench_perf.py`（生成器造的 366 工序实例）。
+   `tools/benchmark_simulation_perf.py`（生成器造的 366 工序实例）。
 3. **Task 4 的测试补强**：计划里的 `test_process_backend_runs_end_to_end` 是**假通过**——
    进程池 spawn 失败会静默回退线程池，断言照样成立。已加 `assertFalse(_process_backend_failed)`
    显式确认进程后端未被放弃，并新增 `test_process_backend_falls_back_when_pool_breaks`
