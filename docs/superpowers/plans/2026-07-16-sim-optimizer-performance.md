@@ -1234,20 +1234,30 @@ git commit -m "docs: record perf benchmark before/after"
 
 （Task 1 Step 0 与 Task 6 Step 2 在此追加）
 
-基准脚本：`scratchpad/bench_perf.py`（`InstanceGenerator(seed=17)`，30 订单 / 109 任务 / 366 工序 / 19 机器）。
-计划正文 Global Constraints 里的原始命令有误——`exact_eval_time_total` 在 optimizer 实例上而非 `HybridResult` 上，
-且 `make_graph_context_shop()` 仅 4 道工序，测不出差异。以本脚本为准。
+基准脚本：`tools/benchmark_simulation_perf.py`（在仓库内，可复现）。
+
+```
+cd /Users/zhouwentao/Desktop && python -m llm4drd.tools.benchmark_simulation_perf
+```
+
+实例：`InstanceGenerator(seed=17)`，30 订单 / 109 任务 / 366 工序 / 19 机器。
+计划正文 Global Constraints 里的原始命令有误——`exact_eval_time_total` 在 optimizer 实例上而非 `HybridResult` 上
+（直接 AttributeError），且 `make_graph_context_shop()` 仅 4 道工序、0.05 秒跑完，测不出差异。以本脚本为准。
 
 - baseline (2026-07-16, main@bd8d9da):
   - single_simulation_median_s: 0.0492（events=1110, feasible=True）
   - optimizer_elapsed_s: 6.95
   - exact_evaluations: 85, approx_evaluations: 60, exact_eval_time_total: 13.02
   - found_solution_count: 1
-- optimized (2026-07-17, perf/simulation-optimizer@bd889b2):
-  - single_simulation_median_s: 0.0516（events=1110, feasible=True）
-  - optimizer_elapsed_s: **2.88**（baseline 6.95 → **-59%**，2.4x）
-  - exact_evaluations: 85, approx_evaluations: 60, exact_eval_time_total: **6.50**（baseline 13.02 → -50%）
+- optimized (2026-07-17, code review 修复后):
+  - single_simulation_median_s: 0.0502（events=1110, feasible=True）
+  - optimizer_elapsed_s: **3.12**（baseline 6.95 → **-55%**，2.2x）
+  - workers: approx=4 exact=4 refine=4 pool_capacity=4；process_backend_failed=False
+  - exact_evaluations: 85, approx_evaluations: 60, exact_eval_time_total: **6.88**（baseline 13.02 → -47%）
   - found_solution_count: 1
+
+后端对照（同实例、同 seed）：进程池 **3.12s** vs 线程池 **4.99s** —— 证明 GIL 确实是瓶颈，
+且进程池的加速不是测量噪声。
 
 分阶段实测（同脚本、同机器）：
 
@@ -1257,6 +1267,11 @@ git commit -m "docs: record perf benchmark before/after"
 | Task 1+2+3（runtime 复用） | 4.83 (-30%) | 7.29 (-44%) |
 | Task 4（进程池） | 3.02 (-57%) | 6.57 |
 | Task 5（克隆共享） | 2.88 (-59%) | 6.50 |
+| **review 修复后** | **3.12 (-55%)** | **6.88** |
+
+review 修复让端到端从 2.88 回升到 3.12：Finding 3 的修复取消了"隐式 runtime 永久缓存"，
+未显式传 runtime 的 `Simulator` 恢复为每次 run() 重建——那部分加速本来就是靠破坏语义换来的，不该保留。
+优化器内部仍走显式 runtime 池，收益不受影响。
 
 注：单次仿真耗时（~50ms）基本持平——本计划的收益集中在**跨评估的重复构建开销**与**并行度**，
 而非单次仿真内环。评估次数（85 精确 / 60 近似）全程不变，证明搜索行为未被改动。
@@ -1272,11 +1287,35 @@ git commit -m "docs: record perf benchmark before/after"
    进程池 spawn 失败会静默回退线程池，断言照样成立。已加 `assertFalse(_process_backend_failed)`
    显式确认进程后端未被放弃，并新增 `test_process_backend_falls_back_when_pool_breaks`
    验证回退路径能把候选补齐。
-4. **`approx_parallel_workers` 恒为 1**：近似评估的批量并行实际不走进程池（`_worker_count_for_batch("approx", n)`
-   在当前配置下返回 1），故 Task 4 的收益全部来自精确评估路径。若要让粗筛也并行，需另行调整
-   `_phase_parallel_workers("approx")` 的取值策略——不在本计划范围。
+4. **`approx_parallel_workers` 随工序规模变化**（本条为 code review 后的更正，原先写反了）：
+   `_phase_parallel_workers("approx")` 仅在 `op_count < 250` 时返回 1；基准实例有 366 工序，
+   `parallel_workers=4` 时返回 **4**——近似评估同样并行。此前文档断言"恒为 1、进程池收益全部来自
+   精确评估"，那是用 4 工序的 `make_graph_context_shop()` 验证后错误外推到 366 工序实例的结论，已作废。
 5. **`tools/analyze_unscheduled.py` 自带一份 `_iterative_tarjan_scc` 副本**（本地定义，非从 simulator 导入）。
    属预先存在的重复，按「不动无关代码」原则未合并。
+
+## Code review 修复（2026-07-17）
+
+首版实现有 5 处缺陷，均已修复，每处先写复现测试：
+
+1. **[P1] 资源快照跨类型 ID 冲突**（`core/sim_runtime.py`）：快照只按 `resource.id` 索引，而机器/工装/人员
+   存在三个独立 dict、模型不保证 ID 跨类型唯一。同名时 `reset()` 会静默把机器状态恢复成工装的
+   （实测 `total_busy_time` 11 → 3），在第一次仿真前就篡改初始状态。改用 `(kind, id)` 为键。
+   这是本计划引入的**回归**——旧代码每次 deepcopy 重建，不存在此问题。
+2. **[P1] 进程池回退漏掉启动期异常**（`hybrid_nsga3_alns.py`）：worker 通常到首次 `submit()` 才启动，
+   届时抛的是 `RuntimeError` / `OSError` / `AssertionError`（如 daemon 进程内不允许再起子进程——
+   本服务跑在 FastAPI worker 里正是该场景），而非 `BrokenProcessPool`。原实现只捕获后两者，异常直接
+   炸穿且 `_process_backend_failed` 仍为 False。新增 `_submit_to_pool` + `_ProcessBackendUnavailable`
+   把「基础设施故障」（回退）与「任务内部异常」（上抛）分开。
+3. **[P2] 隐式 runtime 冻结 shop**（`core/simulator.py`）：首次 `run()` 把自建 runtime 永久存到
+   `self._runtime`，此后调用方修改 shop 也不生效（实测 9 / 9 / 45）。改为仅复用显式传入的 runtime，
+   隐式的每次 run() 现建——恢复重构前语义。
+4. **[P2] 进程池容量被首批固定**（`hybrid_nsga3_alns.py`）：懒建的池以首个批次的 worker 数定容，
+   后续阶段要求更高并发也拿不到。改为按各阶段最大并发 `_max_pool_workers` 一次建池。
+5. **[P3] 基准不可复现 + 文档结论错误**：基准脚本原在会话临时目录，已移入
+   `tools/benchmark_simulation_perf.py`；文档原称"366 工序下 approx worker 恒为 1、进程池收益全部来自
+   精确评估"，实为用 4 工序夹具验证后错误外推——`_phase_parallel_workers` 只在 `op_count < 250` 时返回 1，
+   366 工序时返回 4。该结论已作废，基准脚本现在会直接打印各阶段实际并发数。
 
 ## 已知限制（本计划不处理）
 

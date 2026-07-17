@@ -188,20 +188,26 @@ class SimulationRuntime:
         self._task_snapshot = {
             task_id: task.completion_time for task_id, task in self.shop.tasks.items()
         }
+        # 键必须带资源类型：机器/工装/人员各存一个 dict，模型不保证 ID 跨类型唯一，
+        # 只按 id 索引会让同名资源互相覆盖（且静默篡改初始状态）。
         self._resource_snapshot = {
-            resource.id: (
+            (kind, resource.id): (
                 resource.state,
                 resource.current_op_id,
                 resource.current_finish_time,
                 resource.total_busy_time,
             )
-            for resource in self._iter_resources()
+            for kind, resource in self._iter_resources()
         }
 
     def _iter_resources(self):
-        yield from self.shop.machines.values()
-        yield from self.shop.toolings.values()
-        yield from self.shop.personnel.values()
+        """产出 (kind, resource)；kind 用于区分跨类型同名 ID。"""
+        for machine in self.shop.machines.values():
+            yield "machine", machine
+        for tooling in self.shop.toolings.values():
+            yield "tooling", tooling
+        for person in self.shop.personnel.values():
+            yield "personnel", person
 
     def reset(self) -> None:
         for op_id, op in self.shop.operations.items():
@@ -216,10 +222,10 @@ class SimulationRuntime:
             op.remaining_processing_time = remaining
         for task_id, task in self.shop.tasks.items():
             task.completion_time = self._task_snapshot[task_id]
-        for resource in self._iter_resources():
+        for kind, resource in self._iter_resources():
             (resource.state, resource.current_op_id,
              resource.current_finish_time, resource.total_busy_time) = (
-                self._resource_snapshot[resource.id]
+                self._resource_snapshot[(kind, resource.id)]
             )
 
 

@@ -108,9 +108,12 @@ class Simulator:
 
     def run(self, max_time: float = 999999) -> SimResult:
         started_at = wall_time.time()
+        # 只复用调用方显式传入的 runtime——那是"shop 不会变，请复用"的契约。
+        # 未传时每次 run() 现建一个（等价于重构前的每次深拷贝语义）：若缓存到
+        # self，调用方之后对 shop 的修改就会被旧快照静默忽略。
         runtime = self._runtime
         if runtime is None:
-            runtime = self._runtime = SimulationRuntime(self.orig_shop)
+            runtime = SimulationRuntime(self.orig_shop)
         # reset() 对新建实例是恒等操作，统一执行以保证复用路径与首用路径一致。
         runtime.reset()
         shop = runtime.shop

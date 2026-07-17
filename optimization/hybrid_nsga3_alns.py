@@ -37,6 +37,14 @@ from .solution_model import (
 )
 
 
+class _ProcessBackendUnavailable(Exception):
+    """进程池基础设施故障（起不来/连接断）；不含任务自身的异常。"""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 RULE_TEMPLATES: dict[str, dict[str, float]] = {
     "EDD": {"due_date": 2.8, "slack": 1.8, "urgency": 1.0},
     "SPT": {"processing_time": 2.8, "remaining": 1.0},
@@ -301,15 +309,16 @@ class HybridNSGA3ALNSOptimizer:
         self.refine_parallel_workers = self._phase_parallel_workers("refine")
         self._process_pool = None
         self._process_backend_failed = False
-        # 每个并发 worker 一个互不共享的 runtime；静态数据只构建一次。
-        self._runtime_pool = SimulationRuntimePool(
-            self.shop,
-            max(
-                self.parallel_workers,
-                self.exact_parallel_workers,
-                self.refine_parallel_workers,
-            ),
+        # 池按各阶段的最大并发建一次：懒建的池会被首个批次的 worker 数永久定容，
+        # 之后阶段要求更高并发时也拿不到。
+        self._max_pool_workers = max(
+            self.parallel_workers,
+            self.approx_parallel_workers,
+            self.exact_parallel_workers,
+            self.refine_parallel_workers,
         )
+        # 每个并发 worker 一个互不共享的 runtime；静态数据只构建一次。
+        self._runtime_pool = SimulationRuntimePool(self.shop, self._max_pool_workers)
 
         processing_times = [op.processing_time for op in self.shop.operations.values()]
         due_dates = [task.due_date for task in self.shop.tasks.values()]
@@ -887,12 +896,13 @@ class HybridNSGA3ALNSOptimizer:
         )
 
     def _ensure_process_pool(self, worker_count: int):
+        """worker_count 只用于"要不要并行"的判断；池本身按全局最大并发定容。"""
         if self._process_backend_failed or self.config.parallel_backend != "process":
             return None
         if self._process_pool is None:
             try:
                 self._process_pool = ProcessPoolExecutor(
-                    max_workers=worker_count,
+                    max_workers=self._max_pool_workers,
                     initializer=init_worker,
                     initargs=(self._worker_payload_bytes(),),
                 )
@@ -911,6 +921,19 @@ class HybridNSGA3ALNSOptimizer:
         logging.warning("hybrid: process backend failed (%s), falling back to threads", exc)
         self._process_backend_failed = True
         self._shutdown_process_pool()
+
+    def _submit_to_pool(self, executor, function, *args):
+        """提交任务；把"进程池起不来"与"任务本身出错"分开。
+
+        worker 进程往往到首次 submit() 才真正启动，届时抛的是 RuntimeError /
+        OSError / AssertionError（如 daemon 进程内不允许再起子进程——本服务跑在
+        FastAPI worker 里正是该场景），而不是 BrokenProcessPool。这些属于基础设施
+        故障，应当回退线程池；任务内部的异常则必须原样上抛，不能被回退掩盖。
+        """
+        try:
+            return executor.submit(function, *args)
+        except (BrokenProcessPool, pickle.PicklingError, RuntimeError, OSError, AssertionError) as exc:
+            raise _ProcessBackendUnavailable(exc) from exc
 
     def _evaluate_candidate(self, candidate: CandidateParameters, source: str, generation: int) -> OptimizationSolution:
         signature = candidate.signature()
@@ -982,12 +1005,16 @@ class HybridNSGA3ALNSOptimizer:
                 new_exact = 0
                 try:
                     futures = {
-                        executor.submit(run_exact_simulation, candidate): signature
+                        self._submit_to_pool(executor, run_exact_simulation, candidate): signature
                         for signature, candidate in pending
                     }
                     for future in as_completed(futures):
                         signature = futures[future]
-                        sim_result = future.result()
+                        try:
+                            sim_result = future.result()
+                        except (BrokenProcessPool, pickle.PicklingError) as exc:
+                            # 池在任务执行期间崩掉——基础设施故障，回退。
+                            raise _ProcessBackendUnavailable(exc) from exc
                         solution = self._solution_from_sim_result(
                             unique_candidates[signature], sim_result, source, generation,
                         )
@@ -1001,8 +1028,8 @@ class HybridNSGA3ALNSOptimizer:
                                 results_by_signature[signature] = solution
                             else:
                                 results_by_signature[signature] = self._clone_solution(existing, source, generation)
-                except (BrokenProcessPool, pickle.PicklingError) as exc:
-                    self._abandon_process_backend(exc)
+                except _ProcessBackendUnavailable as exc:
+                    self._abandon_process_backend(exc.cause)
                 if new_exact > 0:
                     self.exact_eval_time_total += max(0.0, time.time() - batch_started)
                 # 进程池中途失败时，未完成的候选走缓存感知的串行路径补齐
@@ -1083,16 +1110,19 @@ class HybridNSGA3ALNSOptimizer:
             submitted = list(remaining)
             try:
                 futures = {
-                    executor.submit(run_approx_evaluation, candidate, source, generation): candidate
+                    self._submit_to_pool(executor, run_approx_evaluation, candidate, source, generation): candidate
                     for candidate in remaining
                 }
                 for future in as_completed(futures):
                     candidate = futures[future]
-                    solution = future.result()
+                    try:
+                        solution = future.result()
+                    except (BrokenProcessPool, pickle.PicklingError) as exc:
+                        raise _ProcessBackendUnavailable(exc) from exc
                     results.append(self._register_approx_solution(candidate.signature(), solution, source, generation))
                     submitted.remove(candidate)
-            except (BrokenProcessPool, pickle.PicklingError) as exc:
-                self._abandon_process_backend(exc)
+            except _ProcessBackendUnavailable as exc:
+                self._abandon_process_backend(exc.cause)
                 for candidate in submitted:
                     results.append(self._evaluate_candidate_approx(candidate, source, generation))
         elif worker_count > 1:
