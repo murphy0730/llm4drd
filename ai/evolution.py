@@ -10,6 +10,7 @@ import json, random, time, copy, logging, inspect, math
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 from ..core.models import ShopFloor
+from ..core.sim_runtime import SimulationRuntime
 from ..core.simulator import Simulator
 from ..core.rules import BUILTIN_RULES, compile_rule_from_code
 
@@ -211,6 +212,7 @@ class EvolutionEngine:
 
         best_fit = float('inf')
         patience = 0
+        runtimes = [SimulationRuntime(instance) for instance in train_instances]
 
         for gen in range(self.config.max_generations):
             # Evaluate
@@ -218,8 +220,8 @@ class EvolutionEngine:
                 try:
                     func = compile_rule_from_code(ind.code)
                     fits = []
-                    for inst in train_instances:
-                        r = Simulator(inst, func).run()
+                    for inst, runtime in zip(train_instances, runtimes):
+                        r = Simulator(inst, func, runtime=runtime).run()
                         fits.append(r.total_tardiness)
                     ind.fitness = sum(fits) / len(fits)
                 except Exception:

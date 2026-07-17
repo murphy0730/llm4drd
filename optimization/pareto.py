@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 from ..core.models import ShopFloor
+from ..core.sim_runtime import SimulationRuntime
 from ..core.simulator import Simulator, SimResult
 from ..core.rules import BUILTIN_RULES, compile_rule_from_code
 
@@ -70,8 +71,9 @@ class ParetoOptimizer:
     def evaluate(self, rules: dict[str, Callable] = None) -> list[ParetoSolution]:
         rules = rules or BUILTIN_RULES
         solutions = []
+        runtime = SimulationRuntime(self.shop)
         for name, func in rules.items():
-            sim = Simulator(self.shop, func)
+            sim = Simulator(self.shop, func, runtime=runtime)
             result = sim.run()
             obj_vals = {o.key: getattr(result, o.key, 0) for o in self.objs}
             solutions.append(ParetoSolution(
@@ -162,14 +164,17 @@ class NSGA2Optimizer:
         self.pop_size = pop_size
         self.generations = generations
         self.seed = seed
+        self._runtime = None
 
     def _random_weights(self, rng):
         w = [rng.gauss(0, 1) for _ in range(self.K)]
         return w
 
     def _evaluate(self, weights):
+        if self._runtime is None:
+            self._runtime = SimulationRuntime(self.shop)
         rule = WeightedEnsembleRule(weights, self.rule_fns)
-        sim = Simulator(self.shop, rule)
+        sim = Simulator(self.shop, rule, runtime=self._runtime)
         result = sim.run()
         return {o.key: getattr(result, o.key, 0) for o in self.objs}
 

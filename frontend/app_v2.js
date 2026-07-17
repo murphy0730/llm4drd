@@ -505,6 +505,8 @@ function optimizePhaseLabel(phase) {
   return ({
     submitting: "提交任务",
     initializing: "初始化",
+    graph_context_loading: "加载图上下文",
+    graph_context_building: "构建图上下文",
     coarse: "候选广搜",
     exact_promotion: "精确评估",
     elite_refine: "精英精修",
@@ -524,6 +526,10 @@ function optimizeProgress(status) {
   const phase = String(status?.phase || "initializing");
   const generationRatio = Number(status?.current_generation || 0) / Math.max(1, Number(status?.config?.generations || app.optimizeForm.generations || 1));
   const timeRatio = Number(status?.elapsed_s || 0) / Math.max(1, Number(status?.config?.time_limit_s || app.optimizeForm.timeLimitS || 1));
+  if (["initializing", "graph_context_loading", "graph_context_building"].includes(phase)) {
+    const initializationWindowS = Math.min(10, Math.max(3, Number(status?.config?.time_limit_s || app.optimizeForm.timeLimitS || 1) * 0.15));
+    return Math.round(5 + Math.min(1, Number(status?.elapsed_s || 0) / initializationWindowS) * 3);
+  }
   if (phase === "coarse") return Math.round(8 + Math.min(1, Math.max(generationRatio, timeRatio)) * 57);
   if (phase === "exact_promotion") return 72;
   if (phase === "elite_refine") return 84;

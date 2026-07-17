@@ -54,6 +54,7 @@ _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
 _graph_tasks: dict = {}
 _latest_hybrid_task_id: Optional[str] = None
+OPTIMIZE_HEARTBEAT_INTERVAL_S = 1.0
 online_scheduler_v3: Optional[OnlineSchedulerV3] = None
 # 仿真在线程池里跑（def 端点），锁串行化对全局 shop/last_result/runtime 缓存的读写。
 # runtime 构建要深拷贝整个实例（大实例十几秒），按内容键缓存：_active_shop() 每次
@@ -2847,6 +2848,24 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
 
     def _run():
         global _latest_hybrid_task_id
+        heartbeat_stop = threading.Event()
+        heartbeat_started_at = time.time()
+
+        def _heartbeat():
+            while not heartbeat_stop.wait(OPTIMIZE_HEARTBEAT_INTERVAL_S):
+                task = _hybrid_tasks.get(task_id)
+                if not task or task.get("status") != "running":
+                    return
+                now = time.time()
+                task["elapsed_s"] = round(now - heartbeat_started_at, 2)
+                task["updated_at"] = now
+
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat,
+            name=f"hybrid-heartbeat-{task_id}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             graph_context = None
             graph_context_diagnostics = None
@@ -2911,6 +2930,11 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                     ),
                 }
 
+            task = _hybrid_tasks[task_id]
+            task["phase"] = "coarse"
+            task["message"] = "正在建立基线并初始化候选池"
+            task["updated_at"] = time.time()
+
             def _progress(snapshot: dict):
                 task = _hybrid_tasks[task_id]
                 phase = snapshot.get("phase", "coarse")
@@ -2973,6 +2997,11 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 "technical_detail": error_trace[-4000:],
                 "updated_at": time.time(),
             })
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(
+                timeout=max(0.1, OPTIMIZE_HEARTBEAT_INTERVAL_S * 2)
+            )
 
     bg.add_task(_run)
     return {"task_id": task_id, "status": "started", "config": req.model_dump()}

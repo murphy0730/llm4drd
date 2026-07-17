@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import logging
+import importlib.util
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
@@ -29,16 +30,29 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(mes
 _pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _pkg_dir not in sys.path:
     sys.path.insert(0, _pkg_dir)
+if importlib.util.find_spec("llm4drd_platform") is None:
+    _root = os.path.dirname(os.path.abspath(__file__))
+    _spec = importlib.util.spec_from_file_location(
+        "llm4drd_platform",
+        os.path.join(_root, "__init__.py"),
+        submodule_search_locations=[_root],
+    )
+    if _spec is None or _spec.loader is None:
+        raise RuntimeError("无法注册 llm4drd_platform 包")
+    _package = importlib.util.module_from_spec(_spec)
+    sys.modules["llm4drd_platform"] = _package
+    _spec.loader.exec_module(_package)
 
 from llm4drd_platform.config import get_config
 from llm4drd_platform.data.generator import InstanceGenerator
 from llm4drd_platform.core.simulator import Simulator
+from llm4drd_platform.core.sim_runtime import SimulationRuntime
 from llm4drd_platform.core.rules import BUILTIN_RULES, compile_rule_from_code
 from llm4drd_platform.knowledge.graph import HeterogeneousGraph
 from llm4drd_platform.optimization.pareto import ParetoOptimizer, NSGA2Optimizer
 from llm4drd_platform.optimization.exact import ExactSolver
 from llm4drd_platform.scheduling.online import OnlineSchedulerV3
-from llm4drd_platform.data.db import init_db, RuleStore
+from llm4drd_platform.data.db import init_db, InstanceStore, RuleStore
 from llm4drd_platform.ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 
 DIVIDER = "─" * 60
@@ -67,6 +81,9 @@ def step1_generate():
         machines_per_type=2,
         processing_time_range=(1, 8),
         due_date_factor=1.4,
+        # ExactSolver 当前按非抢占 IntervalVar 建模；保证最长 15h 的装配工序
+        # 能落在单个连续班次内，避免 demo 实例被日历语义误判为不可行。
+        day_shift_hours=16,
     )
     s = shop.summary()
     ok(f"车间: {s['orders']} 订单 / {s['tasks']} 任务 / "
@@ -79,8 +96,9 @@ def step2_simulate(shop):
     section("Step 2 / 9  仿真 + 内置调度规则对比")
     rules_to_compare = ["ATC", "EDD", "SPT", "COMPOSITE", "BOTTLENECK"]
     results = {}
+    runtime = SimulationRuntime(shop)
     for name in rules_to_compare:
-        r = Simulator(shop, BUILTIN_RULES[name]).run()
+        r = Simulator(shop, BUILTIN_RULES[name], runtime=runtime).run()
         results[name] = r
         ok(f"{name:12s}  makespan={r.makespan:6.1f}h  "
            f"tardiness={r.total_tardiness:7.2f}  "
@@ -93,7 +111,7 @@ def step2_simulate(shop):
     fn_custom = compile_rule_from_code(
         "def my_rule(op, m, f, s): return f['priority']*3 - f['processing_time']*0.1"
     )
-    r_c = Simulator(shop, fn_custom).run()
+    r_c = Simulator(shop, fn_custom, runtime=runtime).run()
     ok(f"自定义规则      makespan={r_c.makespan:6.1f}h  tardiness={r_c.total_tardiness:7.2f}")
     return results
 
@@ -185,7 +203,19 @@ def step7_online(shop):
     info(f"→ 机器 {first_mid} 恢复")
 
     status = scheduler.advance(200.0)
-    ok(f"全部推进完毕 → 完成 {status['ops_completed']}/{status['ops_total']} 工序")
+    for _ in range(10):
+        if status["ops_completed"] >= status["ops_total"]:
+            break
+        previous = status["ops_completed"]
+        status = scheduler.advance(200.0)
+        if (
+            status["ops_completed"] == previous
+            and status["ops_in_progress"] == 0
+            and status["ops_ready"] == 0
+        ):
+            break
+    label = "全部推进完毕" if status["ops_completed"] >= status["ops_total"] else "推进停止（仍有未完成工序）"
+    ok(f"{label} → 完成 {status['ops_completed']}/{status['ops_total']} 工序")
     gantt = status.get("gantt", [])
     if gantt:
         last = gantt[-1]
@@ -195,22 +225,30 @@ def step7_online(shop):
 
 
 # ── Step 8: 数据库 ──────────────────────────────────────────────────────
-def step8_database():
+def step8_database(shop, simulation_results):
     section("Step 8 / 9  数据库：规则存取")
     db_path = "/tmp/llm4drd_demo.db"
     init_db(db_path)
     ok(f"数据库初始化: {db_path}")
 
     store = RuleStore(db_path)
-    import uuid
+    rule_id = "demo_rule"
     store.save_rule(
-        rule_id=str(uuid.uuid4())[:8],
+        rule_id=rule_id,
         name="demo_rule",
         code="def demo_rule(op,m,f,s): return f['priority']",
         objective="total_tardiness",
         fitness=42.0,
     )
     ok("规则已保存")
+
+    InstanceStore(db_path).save_from_shopfloor(shop)
+    ok(f"实例已保存: {len(shop.orders)} 订单 / {len(shop.operations)} 工序")
+
+    baseline = simulation_results["ATC"]
+    baseline_payload = {**baseline.to_dict(), "schedule": baseline.schedule}
+    store.save_schedule_result(rule_id, "demo-instance", baseline_payload)
+    ok(f"排程结果已保存: {len(baseline.schedule)} 条")
 
     rules = store.get_all_rules(active_only=True)
     ok(f"活跃规则数: {len(rules)}, 首条: {rules[0]['name'] if rules else '(空)'}")
@@ -245,6 +283,16 @@ def step9_evolution(shop, db_path):
        f"最优 fitness={best_fit:.2f}, LLM 调用 {call_count[0]} 次")
     if best_rule:
         info(f"最优规则: {best_rule.name}")
+        RuleStore(db_path).save_rule(
+            rule_id=best_rule.id,
+            name=best_rule.name,
+            code=best_rule.code,
+            objective="total_tardiness",
+            fitness=best_rule.fitness,
+            hybrid_score=best_rule.hybrid_score,
+            llm_score=best_rule.llm_score,
+            generation=best_rule.generation,
+        )
     return best_rule
 
 
@@ -255,13 +303,13 @@ def main():
     print("=" * 60)
 
     shop    = step1_generate()
-    step2_simulate(shop)
+    simulation_results = step2_simulate(shop)
     step3_graph(shop)
     step4_pareto(shop)
     step5_nsga2(shop)
     step6_exact(shop)
     step7_online(shop)
-    db_path = step8_database()
+    db_path = step8_database(shop, simulation_results)
     step9_evolution(shop, db_path)
 
     print(f"\n{'=' * 60}")

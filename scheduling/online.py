@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import heapq
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from ..core.models import Downtime, OpStatus, ResourceState, ShopFloor, uid
@@ -39,6 +41,44 @@ class OnlineSchedulerV3:
                 "breakdown_until": None,
                 "next_dispatch_at": 0.0,
             }
+        self._eligible_machine_ids: dict[str, set[str]] = {}
+        self._op_dispatch_type_ids: dict[str, set[str]] = {}
+        self._ready_by_type: dict[str, set[str]] = defaultdict(set)
+        self._dependent_ops_by_op: dict[str, list[str]] = defaultdict(list)
+        self._dependent_ops_by_task: dict[str, list[str]] = defaultdict(list)
+        self._release_heap: list[tuple[float, str]] = []
+        self._release_scheduled: set[str] = set()
+        self._task_total_ops = {
+            task_id: len(task.operations)
+            for task_id, task in self.sim_shop.tasks.items()
+        }
+        self._task_remaining_ops = {
+            task_id: sum(op.status != OpStatus.COMPLETED for op in task.operations)
+            for task_id, task in self.sim_shop.tasks.items()
+        }
+        self._task_remaining_work = {
+            task_id: sum(op.work_remaining for op in task.operations)
+            for task_id, task in self.sim_shop.tasks.items()
+        }
+        for op in self.sim_shop.operations.values():
+            eligible = self.sim_shop.get_eligible_machines(op)
+            self._eligible_machine_ids[op.id] = {machine.id for machine in eligible}
+            dispatch_types = {machine.type_id for machine in eligible}
+            self._op_dispatch_type_ids[op.id] = dispatch_types or {op.process_type}
+            for predecessor_id in op.predecessor_ops:
+                self._dependent_ops_by_op[predecessor_id].append(op.id)
+            for predecessor_task_id in op.predecessor_tasks:
+                self._dependent_ops_by_task[predecessor_task_id].append(op.id)
+        for op in self.sim_shop.operations.values():
+            if op.status != OpStatus.READY:
+                continue
+            if (
+                self.sim_shop.check_op_ready(op)
+                and self.sim_shop.get_operation_flow_ready_time(op) <= 1e-9
+            ):
+                self._mark_ready(op)
+            else:
+                op.status = OpStatus.PENDING
         self._promote_ready_ops(0.0)
 
     def _resource_available_now(self, resource, now: float) -> bool:
@@ -134,12 +174,41 @@ class OnlineSchedulerV3:
             probe = next_aux_ready
         return float("inf"), [], []
 
-    def _promote_ready_ops(self, now: float) -> None:
-        for op in self.sim_shop.operations.values():
+    def _mark_ready(self, op) -> None:
+        op.status = OpStatus.READY
+        for type_id in self._op_dispatch_type_ids.get(op.id, {op.process_type}):
+            self._ready_by_type[type_id].add(op.id)
+
+    def _discard_ready(self, op) -> None:
+        for type_id in self._op_dispatch_type_ids.get(op.id, {op.process_type}):
+            self._ready_by_type[type_id].discard(op.id)
+
+    def _promote_ready_ops(self, now: float, candidate_ids=None) -> None:
+        while self._release_heap and self._release_heap[0][0] <= now + 1e-9:
+            _, op_id = heapq.heappop(self._release_heap)
+            self._release_scheduled.discard(op_id)
+            op = self.sim_shop.operations.get(op_id)
+            if op and op.status == OpStatus.PENDING and self.sim_shop.check_op_ready(op):
+                self._mark_ready(op)
+
+        candidates = (
+            self.sim_shop.operations.values()
+            if candidate_ids is None
+            else (self.sim_shop.operations.get(op_id) for op_id in candidate_ids)
+        )
+        for op in candidates:
+            if op is None:
+                continue
             if op.status != OpStatus.PENDING:
                 continue
-            if self.sim_shop.check_op_ready(op) and self.sim_shop.get_operation_flow_ready_time(op) <= now:
-                op.status = OpStatus.READY
+            if not self.sim_shop.check_op_ready(op):
+                continue
+            release_time = self.sim_shop.get_operation_flow_ready_time(op)
+            if release_time <= now + 1e-9:
+                self._mark_ready(op)
+            elif op.id not in self._release_scheduled:
+                self._release_scheduled.add(op.id)
+                heapq.heappush(self._release_heap, (release_time, op.id))
 
     def _dispatch_idle_machines(self, now: float, rule_fn) -> None:
         for machine in self.sim_shop.machines.values():
@@ -158,10 +227,14 @@ class OnlineSchedulerV3:
 
             best = None
             next_dispatch_time = float("inf")
-            for op in self.sim_shop.operations.values():
-                if op.status != OpStatus.READY:
+            candidate_ids = list(self._ready_by_type.get(machine.type_id, ()))
+            for op_id in candidate_ids:
+                op = self.sim_shop.operations.get(op_id)
+                if op is None or op.status != OpStatus.READY:
+                    if op is not None:
+                        self._discard_ready(op)
                     continue
-                if machine.id not in {candidate.id for candidate in self.sim_shop.get_eligible_machines(op)}:
+                if machine.id not in self._eligible_machine_ids.get(op.id, set()):
                     continue
                 start_time, toolings, people = self._earliest_feasible_start(machine, op, now)
                 if start_time == float("inf"):
@@ -172,7 +245,9 @@ class OnlineSchedulerV3:
                 task = self.sim_shop.tasks.get(op.task_id)
                 order = self.sim_shop.orders.get(task.order_id) if task else None
                 due = task.due_date if task else (order.due_date if order else 9999.0)
-                remaining = task.remaining_time if task else op.work_remaining
+                remaining = self._task_remaining_work.get(task.id, task.remaining_time) if task else op.work_remaining
+                total_ops = self._task_total_ops.get(task.id, len(task.operations)) if task else 0
+                remaining_ops = self._task_remaining_ops.get(task.id, total_ops) if task else 0
                 slack = due - now - remaining
                 features = {
                     "slack": slack,
@@ -180,7 +255,7 @@ class OnlineSchedulerV3:
                     "processing_time": op.work_remaining,
                     "due_date": due,
                     "urgency": max(0.0, -slack),
-                    "progress": task.progress if task else 0.0,
+                    "progress": (total_ops - remaining_ops) / total_ops if total_ops else 0.0,
                     "priority": order.priority if order else 1,
                     "is_main": 1.0 if (task and task.is_main) else 0.0,
                     "wait_time": max(0.0, now - self.sim_shop.get_operation_flow_ready_time(op)),
@@ -214,6 +289,7 @@ class OnlineSchedulerV3:
             op.assigned_personnel_ids = [person.id for person in people]
             op.start_time = start_time
             op.end_time = end_time
+            self._discard_ready(op)
 
             for resource in resources:
                 resource.state = ResourceState.BUSY
@@ -246,6 +322,7 @@ class OnlineSchedulerV3:
             )
 
     def _complete_finished_ops(self, now: float) -> None:
+        impacted_ops: set[str] = set()
         for machine in self.sim_shop.machines.values():
             if machine.state != ResourceState.BUSY or machine.current_finish_time > now + 1e-9:
                 continue
@@ -258,9 +335,19 @@ class OnlineSchedulerV3:
             op.status = OpStatus.COMPLETED
             op.end_time = now
             op.remaining_processing_time = 0.0
+            self._task_remaining_work[op.task_id] = max(
+                0.0,
+                self._task_remaining_work.get(op.task_id, productive_duration) - productive_duration,
+            )
+            self._task_remaining_ops[op.task_id] = max(
+                0,
+                self._task_remaining_ops.get(op.task_id, 1) - 1,
+            )
+            impacted_ops.update(self._dependent_ops_by_op.get(op.id, ()))
             task = self.sim_shop.tasks.get(op.task_id)
             if task and task.is_completed:
                 task.completion_time = now
+                impacted_ops.update(self._dependent_ops_by_task.get(task.id, ()))
 
             for tooling_id in op.assigned_tooling_ids:
                 tooling = self.sim_shop.toolings.get(tooling_id)
@@ -294,7 +381,7 @@ class OnlineSchedulerV3:
                     entry["actual_end"] = round(now, 3)
                     break
 
-        self._promote_ready_ops(now)
+        self._promote_ready_ops(now, impacted_ops)
 
     def advance(self, delta: float) -> dict:
         target_time = self.state.current_time + delta
@@ -314,11 +401,8 @@ class OnlineSchedulerV3:
                 if machine_state.get("breakdown_until") and machine_state["breakdown_until"] > now + 1e-9:
                     next_times.append(machine_state["breakdown_until"])
 
-            for op in self.sim_shop.operations.values():
-                if op.status == OpStatus.PENDING and self.sim_shop.check_op_ready(op):
-                    release_time = self.sim_shop.get_operation_flow_ready_time(op)
-                    if release_time > now + 1e-9:
-                        next_times.append(release_time)
+            if self._release_heap and self._release_heap[0][0] > now + 1e-9:
+                next_times.append(self._release_heap[0][0])
 
             next_time = min(next_times)
             if next_time <= now + 1e-9:
@@ -373,7 +457,7 @@ class OnlineSchedulerV3:
                 processed = _joint_productive_time([machine, *toolings, *people], op.start_time, now)
                 processed = min(processed, allocated_duration)
                 op.remaining_processing_time = max(0.001, allocated_duration - processed)
-                op.status = OpStatus.READY
+                self._mark_ready(op)
                 machine.total_busy_time += processed
                 for tooling_id in op.assigned_tooling_ids:
                     tooling = self.sim_shop.toolings.get(tooling_id)
