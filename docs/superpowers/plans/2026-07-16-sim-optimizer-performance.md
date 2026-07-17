@@ -1243,7 +1243,40 @@ git commit -m "docs: record perf benchmark before/after"
   - optimizer_elapsed_s: 6.95
   - exact_evaluations: 85, approx_evaluations: 60, exact_eval_time_total: 13.02
   - found_solution_count: 1
-- optimized: <待填>
+- optimized (2026-07-17, perf/simulation-optimizer@bd889b2):
+  - single_simulation_median_s: 0.0516（events=1110, feasible=True）
+  - optimizer_elapsed_s: **2.88**（baseline 6.95 → **-59%**，2.4x）
+  - exact_evaluations: 85, approx_evaluations: 60, exact_eval_time_total: **6.50**（baseline 13.02 → -50%）
+  - found_solution_count: 1
+
+分阶段实测（同脚本、同机器）：
+
+| 阶段 | optimizer_elapsed_s | exact_eval_time_total |
+|---|---|---|
+| baseline | 6.95 | 13.02 |
+| Task 1+2+3（runtime 复用） | 4.83 (-30%) | 7.29 (-44%) |
+| Task 4（进程池） | 3.02 (-57%) | 6.57 |
+| Task 5（克隆共享） | 2.88 (-59%) | 6.50 |
+
+注：单次仿真耗时（~50ms）基本持平——本计划的收益集中在**跨评估的重复构建开销**与**并行度**，
+而非单次仿真内环。评估次数（85 精确 / 60 近似）全程不变，证明搜索行为未被改动。
+
+## 实施记录：与计划的偏差
+
+1. **pytest 不存在**：venv 里没装 pytest，所有 `python -m pytest X` 实际用
+   `cd /Users/zhouwentao/Desktop && python -m unittest llm4drd.tests.X` 执行。
+2. **基准命令有误**：计划正文里 `result.exact_eval_time_total` 不存在（该计数在 optimizer 实例上），
+   且 `make_graph_context_shop()` 只有 4 道工序、0.05 秒跑完，测不出差异。改用
+   `scratchpad/bench_perf.py`（生成器造的 366 工序实例）。
+3. **Task 4 的测试补强**：计划里的 `test_process_backend_runs_end_to_end` 是**假通过**——
+   进程池 spawn 失败会静默回退线程池，断言照样成立。已加 `assertFalse(_process_backend_failed)`
+   显式确认进程后端未被放弃，并新增 `test_process_backend_falls_back_when_pool_breaks`
+   验证回退路径能把候选补齐。
+4. **`approx_parallel_workers` 恒为 1**：近似评估的批量并行实际不走进程池（`_worker_count_for_batch("approx", n)`
+   在当前配置下返回 1），故 Task 4 的收益全部来自精确评估路径。若要让粗筛也并行，需另行调整
+   `_phase_parallel_workers("approx")` 的取值策略——不在本计划范围。
+5. **`tools/analyze_unscheduled.py` 自带一份 `_iterative_tarjan_scc` 副本**（本地定义，非从 simulator 导入）。
+   属预先存在的重复，按「不动无关代码」原则未合并。
 
 ## 已知限制（本计划不处理）
 
