@@ -55,6 +55,47 @@ _hybrid_tasks: dict = {}
 _graph_tasks: dict = {}
 _latest_hybrid_task_id: Optional[str] = None
 online_scheduler_v3: Optional[OnlineSchedulerV3] = None
+# 仿真在线程池里跑（def 端点），锁串行化对全局 shop/last_result/runtime 缓存的读写。
+# runtime 构建要深拷贝整个实例（大实例十几秒），按内容键缓存：_active_shop() 每次
+# 都从库重建 ShopFloor 新对象，对象身份不能当键。键 = 实例指纹（含班次/停机/交期，
+# 见 knowledge.canonical）+ 指纹未覆盖的工序在制字段哈希。
+_sim_lock = threading.Lock()
+_sim_runtime_cache: Optional[tuple[str, SimulationRuntime]] = None
+
+
+def _sim_runtime_cache_key(current_shop: ShopFloor) -> str:
+    instance_hash = compute_graph_fingerprint(current_shop).instance_hash
+    wip_fields = [
+        (
+            op_id,
+            op.status.value,
+            op.assigned_machine_id or "",
+            tuple(op.assigned_tooling_ids),
+            tuple(op.assigned_personnel_ids),
+            op.start_time,
+            op.end_time,
+            op.remaining_processing_time,
+        )
+        for op_id, op in sorted(current_shop.operations.items())
+        if op.status != OpStatus.PENDING or op.remaining_processing_time is not None
+    ]
+    wip_hash = hashlib.sha256(repr(wip_fields).encode()).hexdigest()
+    return f"{instance_hash}|{wip_hash}"
+
+
+def _cached_sim_runtime(current_shop: ShopFloor) -> SimulationRuntime:
+    global _sim_runtime_cache
+    try:
+        key = _sim_runtime_cache_key(current_shop)
+    except Exception:
+        # 指纹计算失败（如数据含非有限值）不应阻断仿真，退化为不缓存。
+        logging.exception("simulate: runtime cache key failed, building uncached runtime")
+        return SimulationRuntime(current_shop)
+    if _sim_runtime_cache is not None and _sim_runtime_cache[0] == key:
+        return _sim_runtime_cache[1]
+    runtime = SimulationRuntime(current_shop)
+    _sim_runtime_cache = (key, runtime)
+    return runtime
 
 
 def _invalidate_graph_context(reason: str) -> None:
@@ -2605,14 +2646,21 @@ def _simulation_diagnosis(current_shop: ShopFloor, result: SimResult, analytics)
 
 
 @app.post("/api/simulate")
-async def simulate(req: SimReq):
+def simulate(req: SimReq):
+    # def 端点由 FastAPI 放进线程池执行：仿真大实例可能跑数十秒，
+    # 若在事件循环里同步跑会让整个后端（含前端所有请求）失去响应。
+    with _sim_lock:
+        return _simulate_locked(req)
+
+
+def _simulate_locked(req: SimReq):
     global last_result, last_sim_payload, shop
     current_shop = _active_shop()
     if current_shop is None:
         raise HTTPException(400, "请先生成实例")
     shop = current_shop
     func = BUILTIN_RULES.get(req.rule_name, BUILTIN_RULES["ATC"])
-    sim = Simulator(current_shop, func)
+    sim = Simulator(current_shop, func, runtime=_cached_sim_runtime(current_shop))
     r = sim.run()
     analytics = build_schedule_analytics(current_shop, r)
     # 调试日志：确认计算真实执行，并输出关键中间变量
@@ -2676,20 +2724,22 @@ async def simulate(req: SimReq):
     return payload
 
 @app.post("/api/simulate/compare")
-async def compare(rule_names: list[str] = None):
+def compare(rule_names: list[str] = None):
+    # 同 /api/simulate：def 端点走线程池，避免多规则串行仿真阻塞事件循环。
     current_shop = _active_shop()
     if current_shop is None: raise HTTPException(400, "请先生成实例")
     names = rule_names or get_all_rule_names()
     results = []
     # 逐规则复用同一个 runtime：静态数据(深拷贝/日历/派生时刻/环检测)只建一次。
-    runtime = SimulationRuntime(current_shop)
-    for n in names:
-        if n not in BUILTIN_RULES: continue
-        r = Simulator(current_shop, BUILTIN_RULES[n], runtime=runtime).run()
-        analytics = build_schedule_analytics(current_shop, r)
-        metrics = r.to_dict()
-        metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
-        results.append({"rule": n, "metrics": metrics})
+    with _sim_lock:
+        runtime = _cached_sim_runtime(current_shop)
+        for n in names:
+            if n not in BUILTIN_RULES: continue
+            r = Simulator(current_shop, BUILTIN_RULES[n], runtime=runtime).run()
+            analytics = build_schedule_analytics(current_shop, r)
+            metrics = r.to_dict()
+            metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
+            results.append({"rule": n, "metrics": metrics})
     results.sort(key=lambda x: x["metrics"]["total_tardiness"])
     return _json_safe({"comparison": results})
 

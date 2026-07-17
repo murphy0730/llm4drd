@@ -76,6 +76,11 @@ class Simulator:
         self._completed_ops: set[str] = set()
         self._completed_tasks: set[str] = set()
         self._task_remaining_ops: dict[str, int] = {}
+        # 任务级聚合缓存：剩余工时总和 / 工序总数。_features 在派工内层循环里
+        # 每候选都要用，直接读 Task.remaining_time/progress 属性会对任务下全部
+        # 工序求和，在大实例上是最大热点——改为完成事件时增量维护。
+        self._task_remaining_work: dict[str, float] = {}
+        self._task_total_ops: dict[str, int] = {}
         # 因资源日历耗尽等原因永远排不出的工序（保持 READY 状态但不再参与派工，
         # 避免被反复评估或把资源锁死在无穷远）
         self._unschedulable_ops: set[str] = set()
@@ -101,6 +106,8 @@ class Simulator:
         self._completed_ops = set()
         self._completed_tasks = set()
         self._task_remaining_ops = dict(runtime.task_op_counts)
+        self._task_remaining_work = {}
+        self._task_total_ops = runtime.task_op_counts
         self._unschedulable_ops = set()
         self._flow_gate_cache = {}
         self._pdr_error_logged = False
@@ -128,6 +135,12 @@ class Simulator:
         self._seq = 0
 
         completed_ops += self._seed_initial_state(shop, ready_ops, event_queue, schedule)
+
+        # 种子状态确定后一次性建好任务剩余工时聚合（已完成工序 work_remaining 为 0）。
+        self._task_remaining_work = {
+            task_id: sum(op.work_remaining for op in task.operations)
+            for task_id, task in shop.tasks.items()
+        }
 
         for op in shop.operations.values():
             if op.status == OpStatus.PENDING and self._is_op_ready(op):
@@ -287,10 +300,14 @@ class Simulator:
                 newly_ready_types: set[str] = set()
 
                 if op:
+                    finished_work = op.work_remaining
                     op.status = OpStatus.COMPLETED
                     op.end_time = now
                     op.remaining_processing_time = 0.0
                     self._completed_ops.add(op.id)
+                    remaining_work = self._task_remaining_work.get(op.task_id)
+                    if remaining_work is not None:
+                        self._task_remaining_work[op.task_id] = max(0.0, remaining_work - finished_work)
                     completed_ops += 1
                     task = shop.tasks.get(op.task_id)
                     impacted_ops = set(self._dependent_ops_by_op.get(op.id, []))
@@ -608,6 +625,9 @@ class Simulator:
 
     def _earliest_feasible_start(self, shop: ShopFloor, machine, op: Operation, not_before: float):
         probe = max(not_before, self._flow_ready_time(shop, op), machine.current_finish_time)
+        if not op.required_tooling_types and not op.required_personnel_skills:
+            # 无辅助资源需求时只受机器日历约束，跳过选配/联合推进循环。
+            return machine.next_available_time(probe), [], []
         ready_cache: dict[tuple[str, float], float] = {}
         for _ in range(1000):
             machine_ready = machine.next_available_time(probe)
@@ -632,9 +652,20 @@ class Simulator:
     def _features(self, op, task, order, machine, shop, now: float) -> dict:
         external_due = task.due_date if task else (order.due_date if order else 9999.0)
         due = op.derived_due_date if op and op.derived_due_date < float("inf") else external_due
-        remaining = task.remaining_time if task else op.work_remaining
+        if task:
+            remaining = self._task_remaining_work.get(task.id)
+            if remaining is None:
+                remaining = task.remaining_time
+            total_ops = self._task_total_ops.get(task.id, 0) or len(task.operations)
+            progress = (
+                (total_ops - self._task_remaining_ops.get(task.id, total_ops)) / total_ops
+                if total_ops > 0
+                else 0.0
+            )
+        else:
+            remaining = op.work_remaining
+            progress = 0.0
         slack = due - now - remaining
-        progress = task.progress if task else 0.0
         priority = order.priority if order else 1
         release_time = self._flow_ready_time(shop, op)
 

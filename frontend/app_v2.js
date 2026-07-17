@@ -7,6 +7,10 @@ const CONFIG = {
   GRAPH_FOCUS_NODE_LIMIT: 80,
   GRAPH_ALL_NODE_LIMIT: 150,
   GRAPH_ALL_EDGE_LIMIT: 320,
+  // vis-timeline 在数千分组/数万条目时会锁死主线程直至页面崩溃，超限时只画最忙的前 N 台机器
+  GANTT_MAX_GROUPS: 40,
+  // 甘特图"全部订单"选项仅在条目数不超过该值时提供，大实例强制按订单聚焦
+  GANTT_ALL_ORDERS_MAX_OPS: 2000,
 };
 
 const GRAPH_NODE_ORDER = ["order", "task", "operation", "machine", "tooling", "personnel"];
@@ -162,6 +166,8 @@ const app = {
   },
   pendingGantts: new Map(),
   ganttInstances: [],
+  // 甘特图订单筛选：canvasId -> 选中的订单 id（"__all__" 表示全部，仅小实例提供）
+  ganttOrderFilter: {},
 };
 
 function defaultGraphView() {
@@ -1400,14 +1406,30 @@ function buildGanttData(entries, options = {}) {
 
   const groupsMap = new Map();
   normalized.forEach((item) => { if (!groupsMap.has(item.machineId)) groupsMap.set(item.machineId, item.machineName); });
-  const groups = Array.from(groupsMap, ([id, content]) => ({ id, content: escapeHtml(content) }));
+  let groups = Array.from(groupsMap, ([id, content]) => ({ id, content: escapeHtml(content) }));
+
+  // 大实例保护：分组超限时只保留工序条目最多的前 N 台机器，避免 vis-timeline 锁死主线程
+  const totalGroups = groups.length;
+  const totalOps = normalized.length;
+  let visible = normalized;
+  if (groups.length > CONFIG.GANTT_MAX_GROUPS) {
+    const countByMachine = new Map();
+    normalized.forEach((item) => countByMachine.set(item.machineId, (countByMachine.get(item.machineId) || 0) + 1));
+    const keep = new Set(
+      Array.from(countByMachine.keys())
+        .sort((a, b) => countByMachine.get(b) - countByMachine.get(a))
+        .slice(0, CONFIG.GANTT_MAX_GROUPS)
+    );
+    visible = normalized.filter((item) => keep.has(item.machineId));
+    groups = groups.filter((g) => keep.has(g.id));
+  }
 
   const machineMap = getMachineMap();
-  const horizonStart = Math.min(...normalized.map((i) => i.start));
-  const horizonEnd = Math.max(...normalized.map((i) => i.end));
+  const horizonStart = Math.min(...visible.map((i) => i.start));
+  const horizonEnd = Math.max(...visible.map((i) => i.end));
 
   const items = [];
-  normalized.forEach((item, index) => {
+  visible.forEach((item, index) => {
     items.push({
       id: `op-${index}`,
       group: item.machineId,
@@ -1440,17 +1462,53 @@ function buildGanttData(entries, options = {}) {
     groups,
     items,
     hasRealBase,
+    truncation: totalGroups > groups.length
+      ? { totalGroups, shownGroups: groups.length, totalOps, shownOps: visible.length }
+      : null,
     window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
   };
 }
 
 function renderTimeline(entries, options = {}) {
-  const data = buildGanttData(entries, options);
+  const id = options.canvasId || `gantt-${(options.title || "t").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
+  const allEntries = asArray(entries);
+
+  // 订单筛选（同图谱页的按订单聚焦逻辑）：大实例整图渲染会锁死主线程，
+  // 一次只展示一个订单及其工序、涉及的机器；小实例才提供"全部订单"。
+  const orderNames = new Map();
+  allEntries.forEach((item) => {
+    const key = item.order_id || "-";
+    if (!orderNames.has(key)) orderNames.set(key, item.order_name || "");
+  });
+  const orderOptions = Array.from(orderNames.keys())
+    .sort((a, b) => String(a).localeCompare(String(b), "zh-CN", { numeric: true }));
+  const allowAll = allEntries.length <= CONFIG.GANTT_ALL_ORDERS_MAX_OPS;
+  let selectedOrder = app.ganttOrderFilter[id];
+  if (selectedOrder === "__all__" && !allowAll) selectedOrder = null;
+  if (selectedOrder !== "__all__" && !orderOptions.includes(selectedOrder)) selectedOrder = null;
+  if (!selectedOrder) selectedOrder = allowAll ? "__all__" : orderOptions[0];
+  const visibleEntries = selectedOrder === "__all__"
+    ? allEntries
+    : allEntries.filter((item) => (item.order_id || "-") === selectedOrder);
+
+  const data = buildGanttData(visibleEntries, options);
   if (!data) {
     return renderEmptyState("暂无甘特数据", "当前方案还没有可显示的资源排程。");
   }
-  const id = options.canvasId || `gantt-${(options.title || "t").replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
-  app.pendingGantts.set(id, { entries, options });
+  app.pendingGantts.set(id, { entries: visibleEntries, options });
+
+  const orderSelector = orderOptions.length > 1 || !allowAll ? `
+    <div class="field-inline">
+      <span>订单</span>
+      <select data-gantt-order-select data-canvas="${escapeHtml(id)}">
+        ${allowAll ? `<option value="__all__" ${selectedOrder === "__all__" ? "selected" : ""}>全部订单（${formatInt(allEntries.length)} 道工序）</option>` : ""}
+        ${orderOptions.map((orderId) => {
+          const name = orderNames.get(orderId);
+          return `<option value="${escapeHtml(orderId)}" ${orderId === selectedOrder ? "selected" : ""}>${escapeHtml(name && name !== orderId ? `${orderId} · ${name}` : orderId)}</option>`;
+        }).join("")}
+      </select>
+    </div>
+  ` : "";
 
   const statusCounts = data.items.reduce((acc, it) => {
     if (it.type === "background") return acc;
@@ -1465,11 +1523,14 @@ function renderTimeline(entries, options = {}) {
         <h3>${escapeHtml(options.title || "资源甘特图")}</h3>
         <p>可滚轮缩放、左右拖拽平移查看全程；条块颜色区分已完成 / 进行中 / 未来排产，斜纹遮罩显示班次外与停机占用。</p>
       </div>
+      ${orderSelector}
       <div class="timeline-summary-strip">
-        <div class="timeline-summary-card"><span>资源行数</span><strong>${formatInt(data.groups.length)}</strong></div>
+        <div class="timeline-summary-card"><span>当前展示</span><strong>${selectedOrder === "__all__" ? "全部订单" : escapeHtml(selectedOrder)}（共 ${formatInt(orderOptions.length)} 个订单）</strong></div>
+        <div class="timeline-summary-card"><span>工序 / 资源行数</span><strong>${formatInt(visibleEntries.length)} / ${formatInt(data.groups.length)}</strong></div>
         <div class="timeline-summary-card"><span>已完成 / 进行中 / 未来</span><strong>${formatInt(statusCounts.completed)} / ${formatInt(statusCounts.processing)} / ${formatInt(statusCounts.future)}</strong></div>
         <div class="timeline-summary-card"><span>时间基准</span><strong>${data.hasRealBase ? "计划起始时间" : "相对小时（无 plan_start_at）"}</strong></div>
       </div>
+      ${data.truncation ? `<p class="subtle-note">当前视图仍超出渲染上限：仅展示排程最多的前 ${formatInt(data.truncation.shownGroups)} / ${formatInt(data.truncation.totalGroups)} 台机器（${formatInt(data.truncation.shownOps)} / ${formatInt(data.truncation.totalOps)} 道工序），完整结果请使用导出 Excel。</p>` : ""}
       <div class="legend">
         <span class="legend-item"><span class="legend-swatch status-completed"></span>已完成</span>
         <span class="legend-item"><span class="legend-swatch status-processing"></span>进行中</span>
@@ -4299,9 +4360,12 @@ function renderLegacyCytoscapeGraph() {
 function mountGantts() {
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
   const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
-  // Destroy only orphaned instances (canvas no longer in the active DOM); keep bound, still-visible instances intact so a redundant mountGantts call never blanks a live canvas.
+  // Destroy orphaned instances: canvas id no longer in the active DOM, or the id exists but
+  // the bound element was replaced by a re-render (entry.el detached). Keep bound, still-visible
+  // instances intact so a redundant mountGantts call never blanks a live canvas.
   app.ganttInstances = app.ganttInstances.filter((entry) => {
-    if (liveCanvasIds.has(entry.canvasId)) return true;
+    const stillLive = liveCanvasIds.has(entry.canvasId) && (!entry.el || entry.el.isConnected);
+    if (stillLive) return true;
     try { entry.timeline.destroy(); } catch (_) {}
     return false;
   });
@@ -4335,7 +4399,7 @@ function mountGantts() {
         },
       }
     );
-    app.ganttInstances.push({ canvasId: el.id, timeline });
+    app.ganttInstances.push({ canvasId: el.id, el, timeline });
   });
 }
 
@@ -5453,6 +5517,10 @@ function bindGlobalEvents() {
       app.optimizeForm.objectiveKeys = selected;
       updateOptimizeBudgetHint();
       return;
+    }
+    if (target.matches("[data-gantt-order-select]")) {
+      app.ganttOrderFilter[target.dataset.canvas] = target.value;
+      return renderCurrentPage();
     }
     if (target.matches("[data-heuristic-rule]")) {
       app.heuristicSelection = Array.from(document.querySelectorAll("[data-heuristic-rule]"))
