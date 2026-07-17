@@ -1,5 +1,5 @@
 """FastAPI 服务 v3 — 完整后端"""
-import os, csv, io, json, inspect, logging, math, time, uuid, threading, traceback
+import os, csv, hashlib, io, json, inspect, logging, math, time, uuid, threading, traceback
 from datetime import datetime
 from typing import Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
