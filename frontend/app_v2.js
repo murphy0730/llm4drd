@@ -70,9 +70,10 @@ const NAV_MAP = {
   "new-scene": { page: "new-scene" },
   dashboard: { page: "dashboard", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
-  // 旧的通用 "workflow" 书签 hash（原 rail 导航已移除）统一落到「仿真与洞察」图谱视图。
+  // 旧的通用 "workflow" 书签 hash（原 rail 导航已移除）统一落到「规则仿真」。
   workflow: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
-  graph: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
+  // 图谱视图已并入「数据导入」页，旧的 graph 书签 hash 落到该页。
+  graph: { page: "new-scene" },
   simulate: { page: "workflow", workflowStep: 3, workflowFocus: "graph", requiresScene: true },
   "optimize-config": { page: "workflow", workflowStep: 4, requiresScene: true },
   "optimize-launch": { page: "workflow", workflowStep: 4, requiresScene: true },
@@ -93,6 +94,7 @@ const app = {
   instanceDetails: null,
   validation: null,
   validationBusy: false,
+  validationCollapsed: false,
   importBusy: false,
   simBusy: false,
   instanceDb: null,
@@ -108,6 +110,7 @@ const app = {
   selectedGraphNodeId: null,
   selectedGraphOrderId: null,
   graphOrderOptions: [],
+  graphDetailCollapsed: false,
   graphView: defaultGraphView(),
   simResult: null,
   simStatus: null,
@@ -473,6 +476,15 @@ function isCountMetric(key) {
 
 function statusChip(label, tone = "info") {
   return `<span class="status-chip ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function renderCollapseButton(action, collapsed, subject) {
+  const label = `${collapsed ? "展开" : "折叠"}${subject}`;
+  return `
+    <button class="collapse-btn" type="button" data-action="${escapeHtml(action)}" aria-expanded="${collapsed ? "false" : "true"}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+  `;
 }
 
 function graphBuildIsRunning() {
@@ -1132,7 +1144,6 @@ function updateShell() {
   const hasScene = !!app.currentScene;
   const summary = getSceneSummary();
   el("topbar-scene-name").textContent = hasScene ? app.currentScene.name : "未加载场景";
-  el("topbar-scene-meta").textContent = hasScene ? "查看实例摘要" : "请新建或导入实例";
   el("topbar-orders").textContent = hasScene ? formatInt(summary.orders) : "-";
   el("topbar-tasks").textContent = hasScene ? formatInt(summary.tasks) : "-";
   el("topbar-operations").textContent = hasScene ? formatInt(summary.operations) : "-";
@@ -2772,28 +2783,34 @@ function renderInteractiveGraph() {
   `;
 }
 
-function renderWorkflowStep3() {
-  const focus = app.workflowFocus || "graph";
-  const simMetrics = app.simResult?.metrics || {};
-  const graphPanel = `
+function renderGraphSection() {
+  const graphMetaGrid = app.graphMeta
+    ? renderKeyValueGrid([
+      { label: "节点", value: formatInt(app.graphMeta.total_nodes) },
+      { label: "边", value: formatInt(app.graphMeta.total_edges) },
+      { label: "创建时间", value: formatDateTime(app.graphMeta.created_at) },
+      { label: "节点类型", value: formatInt(Object.keys(app.graphMeta.node_type_counts || {}).length) },
+    ], "context-grid cols-4")
+    : graphBuildIsRunning()
+      ? ""
+      : renderEmptyState("尚未构建图谱", "数据强校验通过后会自动构建图谱，也可以点击下方按钮手动构建。");
+  return `
     <div class="workflow-stage-stack">
       <article class="surface-card">
-      <div class="card-head"><h3>图谱构建</h3></div>
-      ${renderGraphBuildStatus()}
-      ${app.graphMeta ? renderKeyValueGrid([
-        { label: "节点", value: formatInt(app.graphMeta.total_nodes) },
-        { label: "边", value: formatInt(app.graphMeta.total_edges) },
-        { label: "创建时间", value: formatDateTime(app.graphMeta.created_at) },
-        { label: "节点类型", value: formatInt(Object.keys(app.graphMeta.node_type_counts || {}).length) },
-      ], "context-grid cols-4") : renderEmptyState("尚未构建图谱", "点击下方按钮即可根据当前实例构建图谱。")}
-      <div class="form-actions form-actions--gap">
-        <button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>
-      </div>
+        <div class="card-head"><h3>图谱构建</h3></div>
+        ${renderGraphBuildStatus()}
+        ${graphMetaGrid}
+        <div class="form-actions form-actions--gap">
+          <button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>
+        </div>
       </article>
       ${app.graphMeta ? renderLegacyCytoscapeGraph() : ""}
     </div>
   `;
+}
 
+function renderWorkflowStep3() {
+  const simMetrics = app.simResult?.metrics || {};
   const simulationPanel = `
     <article class="surface-card">
       <div class="card-head"><h3>规则仿真</h3><p>先用规则基线验证数据、班次、停机和初始在制状态是否合理，再决定是否进入优化。</p></div>
@@ -2803,10 +2820,9 @@ function renderWorkflowStep3() {
           ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.simRule ? "selected" : ""}>${rule}</option>`).join("")}
         </select>
       </div>
-      <div class="form-actions">
+      <div class="form-actions form-actions--gap">
         <button class="btn btn-primary" type="button" data-action="run-simulate">运行仿真</button>
         <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="simulate">打开完整仿真页</button>
-        <button class="btn btn-ghost" type="button" data-action="set-workflow-focus" data-focus="graph">返回图谱视图</button>
       </div>
       <div id="sim-status">${renderSimStatusInner(app.simStatus)}</div>
       ${app.simResult && simMetrics.feasible === false ? `
@@ -2848,21 +2864,10 @@ function renderWorkflowStep3() {
   ` : "";
 
   return `
-    <div class="workflow-focus-tabs">
-      <button class="focus-tab ${focus === "graph" ? "active" : ""}" type="button" data-action="set-workflow-focus" data-focus="graph">图谱视图</button>
-      <button class="focus-tab ${focus === "simulate" ? "active" : ""}" type="button" data-action="set-workflow-focus" data-focus="simulate">完整仿真页</button>
+    <div class="workflow-stage-stack">
+      ${simulationPanel}
+      ${(app.workflowFocus || "graph") === "simulate" ? simulationDetail : ""}
     </div>
-    ${focus === "simulate" ? `
-      <div class="workflow-stage-stack">
-        ${simulationPanel}
-        ${simulationDetail || ""}
-      </div>
-    ` : `
-      <div class="workflow-stage-stack">
-        ${graphPanel}
-        ${simulationPanel}
-      </div>
-    `}
   `;
 }
 
@@ -2934,9 +2939,14 @@ function renderWorkflow() {
   if (app.workflowStep === 4) html = renderWorkflowStep4();
   container.innerHTML = html;
   requestAnimationFrame(() => mountGantts());
-  if (app.workflowStep === 3 && (app.workflowFocus || "graph") === "graph" && app.graphMeta) {
-    requestAnimationFrame(() => mountLegacyCytoscapeGraph());
-  }
+}
+
+function renderNewScene() {
+  const validationBox = el("new-scene-validation");
+  if (validationBox) validationBox.innerHTML = app.currentScene ? renderValidationPanel() : "";
+  const graphBox = el("new-scene-graph");
+  if (graphBox) graphBox.innerHTML = app.currentScene ? renderGraphSection() : "";
+  if (app.currentScene && app.graphMeta) requestAnimationFrame(() => mountLegacyCytoscapeGraph());
 }
 
 function renderValidationPanel() {
@@ -2961,33 +2971,40 @@ function renderValidationPanel() {
   const tone = failed ? "danger" : validation.status === "warning" ? "warning" : "success";
   const label = failed ? "校验未通过" : validation.status === "warning" ? "校验通过（有警告）" : "校验通过";
   const issues = [...asArray(validation.errors), ...asArray(validation.warnings)];
+  const collapsed = !!app.validationCollapsed;
   return `
-    <article class="surface-card validation-panel ${tone}">
+    <article class="surface-card validation-panel ${tone} ${collapsed ? "is-collapsed" : ""}">
       <div class="card-head">
-        <div><h3>数据强校验</h3><p>覆盖数据完整性、关联关系与约束条件；错误级问题会导致仿真/优化静默失败。</p></div>
-        ${statusChip(label, tone === "danger" ? "danger" : tone)}
+        <div class="validation-head-main">
+          <h3>数据强校验</h3>
+          ${statusChip(label, tone === "danger" ? "danger" : tone)}
+        </div>
+        ${renderCollapseButton("toggle-validation-collapse", collapsed, "数据强校验详情")}
       </div>
-      ${renderKeyValueGrid([
-        { label: "错误", value: formatInt(validation.error_count || 0) },
-        { label: "警告", value: formatInt(validation.warning_count || 0) },
-        { label: "校验时间", value: formatDateTime(validation.checked_at) },
-        { label: "日历天数", value: `${formatInt(validation.stats?.calendar?.final_days || 0)} 天` },
-      ])}
-      ${issues.length ? renderSimpleTable(
-        ["级别", "问题 Sheet", "类别", "实体", "问题明细"],
-        issues.slice(0, 50).map((item) => [
-          statusChip(item.severity === "error" ? "错误" : "警告", item.severity === "error" ? "danger" : "warning"),
-          escapeHtml(item.sheet || "-"),
-          escapeHtml(item.category || "-"),
-          escapeHtml(item.entity || "-"),
-          escapeHtml(item.message || "-"),
-        ]),
-        { footer: issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条，导出 Excel 可查看全部。` : `共 ${issues.length} 条问题。` },
-      ) : '<div class="subtle-note">未发现脏数据或格式问题，可以进入仿真与优化。</div>'}
-      <div class="form-actions">
-        <button class="btn btn-ghost" type="button" data-action="run-validation">重新校验</button>
-        ${issues.length ? '<button class="btn btn-ghost" type="button" data-action="export-validation">导出校验结果 Excel</button>' : ""}
-        ${failed ? '<span class="subtle-note">请先修复上述错误（可在下方各标签页直接编辑数据），否则仿真指标会显示为 0。</span>' : ""}
+      <div class="validation-body collapsible-body">
+        <p class="subtle-note">覆盖数据完整性、关联关系与约束条件；错误级问题会导致仿真/优化静默失败。</p>
+        ${renderKeyValueGrid([
+          { label: "错误", value: formatInt(validation.error_count || 0) },
+          { label: "警告", value: formatInt(validation.warning_count || 0) },
+          { label: "校验时间", value: formatDateTime(validation.checked_at) },
+          { label: "日历天数", value: `${formatInt(validation.stats?.calendar?.final_days || 0)} 天` },
+        ])}
+        ${issues.length ? renderSimpleTable(
+          ["级别", "问题 Sheet", "类别", "实体", "问题明细"],
+          issues.slice(0, 50).map((item) => [
+            statusChip(item.severity === "error" ? "错误" : "警告", item.severity === "error" ? "danger" : "warning"),
+            escapeHtml(item.sheet || "-"),
+            escapeHtml(item.category || "-"),
+            escapeHtml(item.entity || "-"),
+            escapeHtml(item.message || "-"),
+          ]),
+          { footer: issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条，导出 Excel 可查看全部。` : `共 ${issues.length} 条问题。` },
+        ) : '<div class="subtle-note">未发现脏数据或格式问题，可以进入仿真与优化。</div>'}
+        <div class="form-actions">
+          <button class="btn btn-ghost" type="button" data-action="run-validation">重新校验</button>
+          ${issues.length ? '<button class="btn btn-ghost" type="button" data-action="export-validation">导出校验结果 Excel</button>' : ""}
+          ${failed ? '<span class="subtle-note">请先修复上述错误（可在下方各标签页直接编辑数据），否则仿真指标会显示为 0。</span>' : ""}
+        </div>
       </div>
     </article>
   `;
@@ -4121,17 +4138,22 @@ function selectedGraphOrderOption() {
 
 function legacyGraphDetailContent(selectedNode, selectedEdges) {
   return `
-    <div class="card-head"><h3>节点详情</h3><p>点击左侧节点后，这里会同步显示属性与直接关系。</p></div>
-    ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, selectedEdges)) : ""}
-    ${selectedEdges.length ? renderSimpleTable(
-      ["关系", "来源", "目标"],
-      selectedEdges.slice(0, 16).map((edge) => [
-        escapeHtml(humanizeCodeLabel(edge.edgeType || "-")),
-        escapeHtml(edge.source),
-        escapeHtml(edge.target),
-      ]),
-      { footer: selectedEdges.length > 16 ? `当前节点共 ${selectedEdges.length} 条直接关系，仅展示前 16 条。` : "" },
-    ) : renderEmptyState("暂无直接关系", "当前节点在已加载样本中没有直接关系。")}
+    <div class="card-head">
+      <div><h3>节点详情</h3><p>点击左侧节点后，这里会同步显示属性与直接关系。</p></div>
+      ${renderCollapseButton("toggle-graph-detail", !!app.graphDetailCollapsed, "节点详情")}
+    </div>
+    <div class="collapsible-body">
+      ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, selectedEdges)) : ""}
+      ${selectedEdges.length ? renderSimpleTable(
+        ["关系", "来源", "目标"],
+        selectedEdges.slice(0, 16).map((edge) => [
+          escapeHtml(humanizeCodeLabel(edge.edgeType || "-")),
+          escapeHtml(edge.source),
+          escapeHtml(edge.target),
+        ]),
+        { footer: selectedEdges.length > 16 ? `当前节点共 ${selectedEdges.length} 条直接关系，仅展示前 16 条。` : "" },
+      ) : renderEmptyState("暂无直接关系", "当前节点在已加载样本中没有直接关系。")}
+    </div>
   `;
 }
 
@@ -4159,6 +4181,20 @@ function legacyGraphSelectionContent(selectedNode, selectedEdges, nodes) {
     ${relationButtons || '<span class="subtle-note">当前节点没有直接关系</span>'}
     ${selectedEdges.length > 12 ? `<span class="subtle-note">另有 ${formatInt(selectedEdges.length - 12)} 条直接关系</span>` : ""}
   `;
+}
+
+function syncGraphDetailCollapse() {
+  const collapsed = !!app.graphDetailCollapsed;
+  document.querySelectorAll(".graph-detail-card").forEach((card) => {
+    card.classList.toggle("is-collapsed", collapsed);
+    const button = card.querySelector('[data-action="toggle-graph-detail"]');
+    if (!button) return;
+    const label = `${collapsed ? "展开" : "折叠"}节点详情`;
+    button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    button.setAttribute("aria-label", label);
+    button.setAttribute("title", label);
+  });
+  app.cyGraphInstance?.resize();
 }
 
 function focusLegacyCytoscapeNode(nodeId, options = {}) {
@@ -4206,38 +4242,35 @@ function renderLegacyCytoscapeGraph() {
 
   return `
     <div class="surface-card graph-workbench legacy-graph-workbench">
-      <div class="card-head">
-        <h3>订单关联图谱</h3>
-        <p>从上到下展开 · 仅展示当前订单完整关联</p>
+      <div class="card-head graph-card-head">
+        <div>
+          <h3>订单关联图谱</h3>
+          <p>从上到下展开 · 仅展示当前订单完整关联</p>
+        </div>
+        <div class="graph-stage-meta">
+          <span>当前订单 ${escapeHtml(selectedOrderValue || "-")}</span>
+          <span>关联节点 ${formatInt(nodes.length)} · 关联边 ${formatInt(edges.length)}</span>
+          <span>单击节点查看邻域，双击节点聚焦</span>
+        </div>
       </div>
       <div class="graph-toolbar legacy-graph-toolbar">
         <div class="graph-order-bar">
           <label class="graph-order-filter">
             <span>筛选订单</span>
-            <select data-cy-order-select>
+            <input type="search" list="graph-order-options" data-cy-order-input placeholder="输入或下拉选择订单号" autocomplete="off" value="${escapeHtml(selectedOrderValue || "")}">
+            <datalist id="graph-order-options">
               ${asArray(app.graphOrderOptions).map((node) => {
                 const order = normalizeGraphNode(node);
-                const selected = order.id === app.selectedGraphOrderId ? " selected" : "";
-                return `<option value="${escapeHtml(order.entity_id)}"${selected}>${escapeHtml(order.label || order.entity_id)}</option>`;
+                return `<option value="${escapeHtml(order.entity_id)}">${escapeHtml(order.label || order.entity_id)}</option>`;
               }).join("")}
-            </select>
-          </label>
-          <label class="graph-order-input">
-            <span>筛选输入框</span>
-            <input type="search" data-cy-order-input placeholder="输入订单号" autocomplete="off">
+            </datalist>
           </label>
           <button class="btn btn-primary" type="button" data-cy-order-search>搜索</button>
         </div>
         <div class="graph-toolbar-actions">
-          <label class="legacy-graph-switch"><input type="checkbox" data-cy-resource-edges checked> 显示资源可行边</label>
-          <button class="btn btn-ghost" type="button" data-cy-fit>适配视图</button>
+          <button class="btn btn-ghost" type="button" data-cy-fit>重置视图</button>
           <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen" aria-pressed="false">全屏查看</button>
         </div>
-      </div>
-      <div class="graph-stage-meta">
-        <span>当前订单 ${escapeHtml(selectedOrderValue || "-")}</span>
-        <span>关联节点 ${formatInt(nodes.length)} · 关联边 ${formatInt(edges.length)}</span>
-        <span>单击节点查看邻域，双击节点聚焦</span>
       </div>
       <div class="graph-neighbor-pills legacy-graph-shortcuts" data-graph-selection aria-label="当前选中节点与直接关系">
         ${legacyGraphSelectionContent(selectedNode, selectedEdges, nodes)}
@@ -4251,7 +4284,7 @@ function renderLegacyCytoscapeGraph() {
             `).join("")}
           </div>
         </article>
-        <article class="surface-card graph-detail-card">
+        <article class="surface-card graph-detail-card ${app.graphDetailCollapsed ? "is-collapsed" : ""}">
           ${legacyGraphDetailContent(selectedNode, selectedEdges)}
         </article>
       </div>
@@ -4417,7 +4450,6 @@ function mountLegacyCytoscapeGraph() {
     cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
   });
 
-  const orderSelect = root?.querySelector("[data-cy-order-select]");
   const orderInput = root?.querySelector("[data-cy-order-input]");
   const runOrderSearch = async (query) => {
     const value = String(query || "").trim();
@@ -4440,21 +4472,19 @@ function mountLegacyCytoscapeGraph() {
     }
   };
   root?.querySelector("[data-cy-order-search]")?.addEventListener("click", () => {
-    runOrderSearch(String(orderInput?.value || "").trim() || String(orderSelect?.value || "").trim());
+    runOrderSearch(orderInput?.value);
   });
   orderInput?.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    runOrderSearch(String(orderInput.value || "").trim() || String(orderSelect?.value || "").trim());
+    runOrderSearch(orderInput.value);
   });
-  orderSelect?.addEventListener("change", (event) => {
-    runOrderSearch(event.target.value);
+  // 从下拉列表中选中订单时直接加载，无需再点搜索；失焦时的空值不提示
+  orderInput?.addEventListener("change", (event) => {
+    const value = String(event.target.value || "").trim();
+    if (value) runOrderSearch(value);
   });
   root?.querySelector("[data-cy-fit]")?.addEventListener("click", () => cy.fit(undefined, 40));
-  root?.querySelector("[data-cy-resource-edges]")?.addEventListener("change", (event) => {
-    cy.edges('[edge_group="resource"]').style("display", event.target.checked ? "element" : "none");
-    runLayout();
-  });
 }
 
 
@@ -4462,8 +4492,7 @@ async function renderCurrentPage() {
   ensureReviewSelection();
   updateShell();
   if (app.currentPage === "new-scene") {
-    const box = el("new-scene-validation");
-    if (box) box.innerHTML = app.currentScene ? renderValidationPanel() : "";
+    renderNewScene();
     if (!app.validation && !app.validationBusy && app.currentScene) handleRunValidation(true);
   }
   if (app.currentPage === "dashboard") renderDashboard();
@@ -4655,6 +4684,8 @@ async function handleRunValidation(silent = false) {
   } finally {
     app.validationBusy = false;
   }
+  // 校验通过后自动折叠面板，只有存在错误时才保持展开
+  app.validationCollapsed = app.validation ? app.validation.status !== "failed" : false;
   // Re-render validation panel on new-scene page after validation completes
   if (app.currentPage === "new-scene") {
     const box = el("new-scene-validation");
@@ -4685,6 +4716,7 @@ async function handleImportFile(file) {
     resetInstanceDerivedState();
     const validation = app.validation;
     const failed = validation?.status === "failed";
+    app.validationCollapsed = !!validation && !failed;
     setImportProgress({
       busy: false,
       percent: 100,
@@ -4703,6 +4735,8 @@ async function handleImportFile(file) {
     }
     if (app.currentPage !== "new-scene") await navigate("new-scene");
     else await renderCurrentPage();
+    // 强校验通过后自动构建图谱，构建进度显示在本页“图谱构建”卡片中
+    if (!failed) await handleBuildGraph();
   } catch (error) {
     setImportProgress({ busy: false, percent: 100, tone: "error", label: "导入失败", note: error.message });
     toast(`导入失败：${error.message}`, "error");
@@ -4776,7 +4810,7 @@ function stopGraphBuildPolling() {
 async function refreshGraphBuildFeedback() {
   const panel = el("graph-build-status-panel");
   if (panel) panel.outerHTML = renderGraphBuildStatus();
-  else if (app.currentPage === "workflow") await renderCurrentPage();
+  else if (app.currentPage === "new-scene") await renderCurrentPage();
   syncGraphBuildControls();
 }
 
@@ -5237,6 +5271,17 @@ async function handleAction(action, target) {
     return;
   }
   if (action === "run-validation") return handleRunValidation();
+  if (action === "toggle-validation-collapse") {
+    app.validationCollapsed = !app.validationCollapsed;
+    const box = el("new-scene-validation");
+    if (box) box.innerHTML = app.currentScene ? renderValidationPanel() : "";
+    return;
+  }
+  if (action === "toggle-graph-detail") {
+    app.graphDetailCollapsed = !app.graphDetailCollapsed;
+    syncGraphDetailCollapse();
+    return;
+  }
   if (action === "export-validation") {
     const blob = await api.exportValidation();
     downloadBlob(blob, `validation_result_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`);
@@ -5491,9 +5536,14 @@ async function init() {
   bindGlobalEvents();
   await loadCatalogs();
   await syncCurrentScene(true);
-  if (app.currentScene) await loadExistingGraph();
+  // 用户可能在初始化尚未完成时就开始导入 Excel：此时不再抢占页面，
+  // 导入流程会自行渲染“数据导入”页，避免导入途中被切到“工作概览”。
+  if (app.importBusy) return;
+  // 先落到目标页面再加载图谱：图谱加载较慢，放在导航之前会推迟首屏。
   const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
   await navigate(navKey, false);
+  if (!app.currentScene || app.importBusy) return;
+  if (await loadExistingGraph() && !app.importBusy) await renderCurrentPage();
 }
 
 document.addEventListener("DOMContentLoaded", () => {

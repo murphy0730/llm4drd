@@ -79,17 +79,18 @@ body {
 }
 
 .topbar {
-  grid-template-columns: 224px minmax(220px, 0.8fr) minmax(390px, 1fr) auto;
-  gap: 20px;
+  /* 第一列与侧边栏同宽（减去 1px 分割线），让状态区左缘正好压在侧边栏竖线上 */
+  grid-template-columns: calc(var(--sidebar-w) - 1px) minmax(0, 1fr) auto;
+  gap: 0;
   height: var(--topbar-h);
-  padding: 0 18px;
+  padding: 0 18px 0 0;
   background: color-mix(in srgb, var(--canvas) 92%, transparent);
   border-color: var(--line);
   box-shadow: none;
   backdrop-filter: blur(12px);
 }
 
-.brand-block { gap: 10px; }
+.brand-block { gap: 10px; padding-left: 18px; }
 
 .brand-mark {
   width: 30px;
@@ -127,7 +128,7 @@ body {
   color: var(--text-faint);
 }
 
-.topbar-scene .eyebrow { display: none; }
+.topbar-scene { margin-left: 18px; }
 
 .scene-pill {
   min-height: 36px;
@@ -140,9 +141,8 @@ body {
 
 .scene-pill:hover { background: var(--surface-strong); }
 .scene-pill span:first-child { color: var(--text); font-size: 12px; }
-.scene-pill-meta { color: var(--text-faint); font-size: 10px; }
 
-.topbar-status { gap: 0; justify-content: flex-end; }
+.topbar-status { display: flex; gap: 0; justify-content: flex-start; }
 .status-box {
   min-width: 118px;
   padding: 0 14px;
@@ -422,8 +422,7 @@ input:focus,
 select:focus,
 textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent); }
 
-.objective-pill,
-.focus-tab { border-radius: 6px; background: var(--surface); box-shadow: none; }
+.objective-pill { border-radius: 6px; background: var(--surface); box-shadow: none; }
 .objective-pill:has(input:checked) { border-color: color-mix(in srgb, var(--primary) 35%, transparent); background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
 
 .table-shell,
@@ -446,8 +445,7 @@ td { border-color: var(--line); }
 .toast { border-radius: 8px; box-shadow: var(--shadow-md); }
 
 @media (max-width: 1340px) {
-  .workspace { grid-template-columns: 210px minmax(0, 1fr); }
-  .topbar { grid-template-columns: 210px minmax(200px, 0.8fr) minmax(340px, 1fr); }
+  :root { --sidebar-w: 210px; }
 }
 
 @media (max-width: 1080px) {

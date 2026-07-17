@@ -7,8 +7,8 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>LLM4DRD 智能调度决策中枢</title>
-  <link rel="stylesheet" href="/static/app_v2.css?v=20260716-3">
-  <link rel="stylesheet" href="/static/design-system.css?v=20260716-1">
+  <link rel="stylesheet" href="/static/app_v2.css?v=20260717-1">
+  <link rel="stylesheet" href="/static/design-system.css?v=20260717-1">
   <link rel="stylesheet" href="/static/vendor/vis-timeline-graph2d.min.css?v=7.7.3">
 </head>
 <body>
@@ -24,14 +24,6 @@
         </div>
       </div>
 
-      <div class="topbar-scene">
-        <span class="eyebrow">当前实例</span>
-        <button class="scene-pill" type="button" data-action="goto-new-scene">
-          <span id="topbar-scene-name">未加载实例</span>
-          <span class="scene-pill-meta" id="topbar-scene-meta">查看实例摘要</span>
-        </button>
-      </div>
-
       <div class="topbar-status">
         <div class="status-box"><span>订单</span><strong id="topbar-orders">-</strong></div>
         <div class="status-box"><span>任务令</span><strong id="topbar-tasks">-</strong></div>
@@ -40,6 +32,12 @@
         <div class="status-box"><span>工装</span><strong id="topbar-toolings">-</strong></div>
         <div class="status-box"><span>人员</span><strong id="topbar-personnel">-</strong></div>
       </div>
+
+      <div class="topbar-scene">
+        <button class="scene-pill" type="button" data-action="goto-new-scene">
+          <span id="topbar-scene-name">未加载实例</span>
+        </button>
+      </div>
     </header>
 
     <div class="workspace">
@@ -47,7 +45,7 @@
         <div class="sidebar-group">
           <div class="sidebar-title">调度流程</div>
           <button class="nav-item" type="button" data-nav="new-scene"><span class="nav-index">01</span>数据导入</button>
-          <button class="nav-item requires-scene" type="button" data-nav="simulate"><span class="nav-index">02</span>仿真与洞察</button>
+          <button class="nav-item requires-scene" type="button" data-nav="simulate"><span class="nav-index">02</span>规则仿真</button>
           <button class="nav-item requires-scene" type="button" data-nav="optimize-launch"><span class="nav-index">03</span>优化求解</button>
           <button class="nav-item requires-scene" type="button" data-nav="solution-review"><span class="nav-index">04</span>方案评审</button>
         </div>
@@ -86,6 +84,7 @@
               </div>
             </article>
             <div id="new-scene-validation"></div>
+            <div id="new-scene-graph"></div>
           </div>
         </section>
 
@@ -148,6 +147,6 @@
   <script src="/static/vendor/dagre.min.js?v=0.8.5"></script>
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
   <script src="/static/vendor/vis-timeline-graph2d.min.js?v=7.7.3"></script>
-  <script src="/static/app_v2.js?v=20260716-9"></script>
+  <script src="/static/app_v2.js?v=20260717-1"></script>
 </body>
 </html>
