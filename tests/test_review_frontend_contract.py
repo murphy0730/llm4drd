@@ -75,8 +75,9 @@ class ReviewFrontendContractTests(unittest.TestCase):
 
     def test_combobox_selection_paths_preserve_gantt_loading_contracts(self):
         self.assertIn("ReviewRuntime.rankOrders(", JS)
+        self.assertIn("ReviewRuntime.createOrderComboboxController(", JS)
         self.assertIn("reviewDataClient.searchOrders(", JS)
-        self.assertIn("api.searchReviewOrders(", JS)
+        self.assertIn("api.searchReviewOrders(taskId, [solutionId], query, signal)", JS)
         self.assertIn("loadReviewData(getSelectedReviewCandidates(), order.order_id, false)", JS)
         self.assertIn("loadPlanGantt(taskId, solutionId, order.order_id)", JS)
 

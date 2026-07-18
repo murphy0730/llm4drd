@@ -73,6 +73,161 @@
       .slice(0, Math.max(1, Math.min(Number(limit) || 50, 50)));
   }
 
+  function createOrderComboboxController({
+    search,
+    select,
+    delay = 200,
+    limit = 50,
+    schedule = (fn, ms) => setTimeout(fn, ms),
+    cancelSchedule = (handle) => clearTimeout(handle),
+    onState = () => {},
+  }) {
+    let timer = null;
+    let requestController = null;
+    let generation = 0;
+    let selecting = false;
+    let disposed = false;
+    let state = { results: [], activeIndex: -1, open: false };
+
+    function getState() {
+      return {
+        results: state.results.slice(),
+        activeIndex: state.activeIndex,
+        open: state.open,
+      };
+    }
+
+    function emit() {
+      onState(getState());
+    }
+
+    function invalidateSearch() {
+      generation += 1;
+      if (timer !== null) cancelSchedule(timer);
+      timer = null;
+      if (requestController) requestController.abort();
+      requestController = null;
+    }
+
+    function resetResults() {
+      state = { results: [], activeIndex: -1, open: false };
+    }
+
+    function close() {
+      invalidateSearch();
+      resetResults();
+      emit();
+    }
+
+    async function runSearch(query, requestedGeneration) {
+      timer = null;
+      if (disposed || requestedGeneration !== generation) return;
+      const controller = new AbortController();
+      requestController = controller;
+      let matches;
+      try {
+        matches = await search(query, controller.signal);
+      } catch (error) {
+        if (
+          disposed ||
+          controller.signal.aborted ||
+          requestedGeneration !== generation ||
+          error?.name === "AbortError"
+        ) {
+          return;
+        }
+        matches = [];
+      }
+      if (
+        disposed ||
+        controller.signal.aborted ||
+        requestedGeneration !== generation ||
+        requestController !== controller
+      ) {
+        return;
+      }
+      requestController = null;
+      const results = Array.isArray(matches)
+        ? matches.slice(0, Math.max(1, Math.min(Number(limit) || 50, 50)))
+        : [];
+      state = {
+        results,
+        activeIndex: results.length ? 0 : -1,
+        open: true,
+      };
+      emit();
+    }
+
+    function input(query) {
+      if (disposed) return;
+      invalidateSearch();
+      resetResults();
+      emit();
+      const requestedGeneration = generation;
+      timer = schedule(
+        () => runSearch(query, requestedGeneration),
+        delay
+      );
+    }
+
+    function move(delta) {
+      if (!state.open || !state.results.length) return false;
+      state = {
+        ...state,
+        activeIndex: Math.max(
+          0,
+          Math.min(state.results.length - 1, state.activeIndex + delta)
+        ),
+      };
+      emit();
+      return true;
+    }
+
+    async function choose(order) {
+      if (
+        disposed ||
+        selecting ||
+        !state.open ||
+        !order ||
+        !state.results.includes(order)
+      ) {
+        return false;
+      }
+      selecting = true;
+      close();
+      try {
+        await select(order);
+        return true;
+      } finally {
+        selecting = false;
+      }
+    }
+
+    function chooseActive() {
+      if (!state.open || state.activeIndex < 0) {
+        return Promise.resolve(false);
+      }
+      return choose(state.results[state.activeIndex]);
+    }
+
+    function dispose() {
+      if (disposed) return;
+      invalidateSearch();
+      disposed = true;
+      resetResults();
+    }
+
+    return {
+      input,
+      close,
+      move,
+      choose,
+      chooseActive,
+      dispose,
+      getState,
+    };
+  }
+
   function createClient({ fetchReviewData, fetchOrders }) {
     const dataCache = new Map();
     const orderCache = new Map();
@@ -159,6 +314,7 @@
     selectionKey,
     scheduleKey,
     rankOrders,
+    createOrderComboboxController,
     createClient,
   };
 });

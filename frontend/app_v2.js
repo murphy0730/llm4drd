@@ -199,6 +199,7 @@ const app = {
   // 评审批量读取状态：选中方案、订单排程和利用率由一个 review-data 请求共同维护。
   reviewRead: emptyReviewRead(),
   orderComboboxSources: new Map(),
+  orderComboboxMounts: new Map(),
 };
 
 function emptyReviewRead() {
@@ -457,6 +458,11 @@ function renderOrderCombobox(config) {
 }
 
 function mountOrderComboboxes() {
+  app.orderComboboxMounts.forEach((controller, mountedContainer) => {
+    if (mountedContainer.isConnected) return;
+    controller.dispose();
+    app.orderComboboxMounts.delete(mountedContainer);
+  });
   document.querySelectorAll(".page.active [data-order-combobox]:not([data-order-combobox-bound='1'])").forEach((container) => {
     const source = app.orderComboboxSources.get(container.dataset.orderCombobox);
     const input = container.querySelector('[role="combobox"]');
@@ -464,85 +470,59 @@ function mountOrderComboboxes() {
     if (!source || !input || !list) return;
     container.dataset.orderComboboxBound = "1";
 
-    let timer = null;
-    let results = [];
-    let activeIndex = -1;
-    let searchGeneration = 0;
-    let selecting = false;
-
-    const close = () => {
-      list.hidden = true;
-      input.setAttribute("aria-expanded", "false");
-      input.removeAttribute("aria-activedescendant");
-    };
-
-    const choose = async (order) => {
-      if (!order || selecting) return;
-      selecting = true;
-      input.value = orderComboboxLabel(order);
-      close();
-      try {
-        await source.select(order);
-      } finally {
-        selecting = false;
-      }
-    };
-
-    const renderResults = () => {
-      list.innerHTML = results.map((order, index) => {
+    let controller;
+    const renderState = (state) => {
+      list.innerHTML = state.results.map((order, index) => {
         const optionId = `${source.id}-option-${index}`;
-        const active = index === activeIndex;
+        const active = index === state.activeIndex;
         return `<button type="button" id="${escapeHtml(optionId)}" class="order-combobox-option${active ? " is-active" : ""}" role="option" aria-selected="${active ? "true" : "false"}" data-order-result="${index}">${escapeHtml(orderComboboxLabel(order))}</button>`;
       }).join("");
-      if (activeIndex >= 0) {
-        input.setAttribute("aria-activedescendant", `${source.id}-option-${activeIndex}`);
+      list.hidden = !state.open;
+      input.setAttribute("aria-expanded", state.open ? "true" : "false");
+      if (state.open && state.activeIndex >= 0) {
+        input.setAttribute("aria-activedescendant", `${source.id}-option-${state.activeIndex}`);
         list.querySelector(".is-active")?.scrollIntoView({ block: "nearest" });
       } else {
         input.removeAttribute("aria-activedescendant");
       }
       list.querySelectorAll("[data-order-result]").forEach((option) => {
-        option.addEventListener("click", () => choose(results[Number(option.dataset.orderResult)]));
+        option.addEventListener("click", () => {
+          controller.choose(state.results[Number(option.dataset.orderResult)]);
+        });
       });
     };
 
-    const search = async () => {
-      const generation = ++searchGeneration;
-      try {
-        const matches = await source.search(input.value);
-        if (generation !== searchGeneration || !container.isConnected) return;
-        results = asArray(matches).slice(0, ORDER_SEARCH_LIMIT);
-      } catch (_) {
-        if (generation !== searchGeneration || !container.isConnected) return;
-        results = [];
-      }
-      activeIndex = results.length ? 0 : -1;
-      renderResults();
-      list.hidden = false;
-      input.setAttribute("aria-expanded", "true");
-    };
+    controller = ReviewRuntime.createOrderComboboxController({
+      search: source.search,
+      select: async (order) => {
+        input.value = orderComboboxLabel(order);
+        await source.select(order);
+      },
+      delay: ORDER_SEARCH_DEBOUNCE_MS,
+      limit: ORDER_SEARCH_LIMIT,
+      onState: renderState,
+    });
+    app.orderComboboxMounts.set(container, controller);
 
     input.addEventListener("keydown", async (event) => {
       if (event.key === "Escape") {
-        close();
+        controller.close();
         return;
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        if (!results.length) return;
         const delta = event.key === "ArrowDown" ? 1 : -1;
-        activeIndex = Math.max(0, Math.min(results.length - 1, activeIndex + delta));
-        renderResults();
+        controller.move(delta);
         return;
       }
-      if (event.key === "Enter" && results[activeIndex]) {
+      if (event.key === "Enter") {
         event.preventDefault();
-        await choose(results[activeIndex]);
+        await controller.chooseActive();
       }
     });
 
     input.addEventListener("input", () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(search, ORDER_SEARCH_DEBOUNCE_MS);
+      controller.input(input.value);
     });
   });
 }
@@ -2093,8 +2073,8 @@ function renderTimeline(entries, options = {}) {
         id: orderComboboxId,
         selected: selectedOrderItem,
         search: serverMode
-          ? async (query) => {
-            const payload = await api.searchReviewOrders(taskId, [solutionId], query);
+          ? async (query, signal) => {
+            const payload = await api.searchReviewOrders(taskId, [solutionId], query, signal);
             return asArray(payload?.orders);
           }
           : (query) => ReviewRuntime.rankOrders(orderSearchItems, query, ORDER_SEARCH_LIMIT),

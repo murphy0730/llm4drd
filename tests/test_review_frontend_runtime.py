@@ -111,6 +111,178 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
+    def test_combobox_new_input_invalidates_old_response_before_debounce_runs(self):
+        self._run_node(
+            """
+            const timers = [];
+            const scheduler = {
+              set(fn) {
+                const handle = {fn, cancelled: false};
+                timers.push(handle);
+                return handle;
+              },
+              clear(handle) {
+                if (handle) handle.cancelled = true;
+              },
+              flushNext() {
+                const handle = timers.shift();
+                if (handle && !handle.cancelled) handle.fn();
+              }
+            };
+            const finishes = {};
+            const signals = {};
+            const controller = runtime.createOrderComboboxController({
+              delay: 200,
+              schedule: scheduler.set,
+              cancelSchedule: scheduler.clear,
+              search: (query, signal) => new Promise((resolve) => {
+                finishes[query] = resolve;
+                signals[query] = signal;
+              }),
+              select: async () => {}
+            });
+
+            controller.input("old");
+            scheduler.flushNext();
+            controller.input("new");
+            assert.strictEqual(signals.old.aborted, true);
+            finishes.old([{order_id: "OLD"}]);
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.strictEqual(controller.getState().open, false);
+            assert.deepStrictEqual(controller.getState().results, []);
+
+            scheduler.flushNext();
+            finishes.new([{order_id: "NEW"}]);
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.strictEqual(controller.getState().open, true);
+            assert.deepStrictEqual(
+              controller.getState().results.map((item) => item.order_id),
+              ["NEW"]
+            );
+            """
+        )
+
+    def test_combobox_escape_cancels_pending_and_inflight_searches(self):
+        self._run_node(
+            """
+            const timers = [];
+            const scheduler = {
+              set(fn) {
+                const handle = {fn, cancelled: false};
+                timers.push(handle);
+                return handle;
+              },
+              clear(handle) {
+                if (handle) handle.cancelled = true;
+              },
+              flushAll() {
+                while (timers.length) {
+                  const handle = timers.shift();
+                  if (!handle.cancelled) handle.fn();
+                }
+              }
+            };
+            let calls = 0;
+            let finish;
+            let signal;
+            let selections = 0;
+            const controller = runtime.createOrderComboboxController({
+              schedule: scheduler.set,
+              cancelSchedule: scheduler.clear,
+              search: (_query, currentSignal) => {
+                calls += 1;
+                signal = currentSignal;
+                return new Promise((resolve) => { finish = resolve; });
+              },
+              select: async () => { selections += 1; }
+            });
+
+            controller.input("pending");
+            controller.close();
+            scheduler.flushAll();
+            assert.strictEqual(calls, 0);
+
+            controller.input("running");
+            scheduler.flushAll();
+            assert.strictEqual(calls, 1);
+            controller.close();
+            assert.strictEqual(signal.aborted, true);
+            finish([{order_id: "STALE"}]);
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.strictEqual(controller.getState().open, false);
+            assert.strictEqual(controller.getState().activeIndex, -1);
+            assert.deepStrictEqual(controller.getState().results, []);
+            assert.strictEqual(await controller.chooseActive(), false);
+            assert.strictEqual(selections, 0);
+
+            controller.input("detached");
+            scheduler.flushAll();
+            assert.strictEqual(calls, 2);
+            controller.dispose();
+            assert.strictEqual(signal.aborted, true);
+            """
+        )
+
+    def test_combobox_rapid_queries_and_selection_guard_are_deterministic(self):
+        self._run_node(
+            """
+            const timers = [];
+            const scheduler = {
+              set(fn) {
+                const handle = {fn, cancelled: false};
+                timers.push(handle);
+                return handle;
+              },
+              clear(handle) {
+                if (handle) handle.cancelled = true;
+              },
+              flushAll() {
+                while (timers.length) {
+                  const handle = timers.shift();
+                  if (!handle.cancelled) handle.fn();
+                }
+              }
+            };
+            const queries = [];
+            let finishSelection;
+            let selections = 0;
+            const controller = runtime.createOrderComboboxController({
+              schedule: scheduler.set,
+              cancelSchedule: scheduler.clear,
+              search: async (query) => {
+                queries.push(query);
+                return [{order_id: query.toUpperCase()}];
+              },
+              select: () => {
+                selections += 1;
+                return new Promise((resolve) => { finishSelection = resolve; });
+              }
+            });
+
+            controller.input("a");
+            controller.input("ab");
+            controller.input("abc");
+            scheduler.flushAll();
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.deepStrictEqual(queries, ["abc"]);
+            assert.strictEqual(controller.getState().results[0].order_id, "ABC");
+
+            const order = controller.getState().results[0];
+            const keyboardChoice = controller.chooseActive();
+            const mouseChoice = controller.choose(order);
+            assert.strictEqual(await mouseChoice, false);
+            assert.strictEqual(selections, 1);
+            finishSelection();
+            assert.strictEqual(await keyboardChoice, true);
+            assert.strictEqual(await controller.chooseActive(), false);
+            assert.strictEqual(selections, 1);
+            """
+        )
+
     def test_data_requests_cancel_stale_work_and_cache_completed_payloads(self):
         self._run_node(
             """
