@@ -26,6 +26,7 @@ from ..data.db import (
     GraphStore,
     DowntimeStore,
     WorkflowProgressStore,
+    RuleReferenceCacheStore,
     shifts_to_payload,
 )
 from ..data.graph_artifact_store import GraphArtifactStore
@@ -58,6 +59,7 @@ graph_artifact_store = GraphArtifactStore()
 graph_context_service = GraphContextService(graph_artifact_store)
 downtime_store = DowntimeStore()
 workflow_store = WorkflowProgressStore()
+rule_reference_cache_store = RuleReferenceCacheStore()
 _nsga2_tasks: dict = {}
 _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
@@ -329,6 +331,7 @@ class ParetoAskReq(BaseModel):
 class HeuristicReferenceReq(BaseModel):
     rule_names: list[str] = Field(default_factory=list)
     objective_keys: list[str] = Field(default_factory=list)
+    only_cached: bool = False
 
 
 class ExactReferenceReq(BaseModel):
@@ -467,10 +470,15 @@ def _rule_reference_solution(
     rule_name: str,
     objective_keys: list[str] | None = None,
     schedule_limit: int | None = 120,
+    runtime: SimulationRuntime | None = None,
 ) -> dict:
     if rule_name not in BUILTIN_RULES:
         raise HTTPException(400, f"未知规则: {rule_name}")
-    sim = Simulator(current_shop, BUILTIN_RULES[rule_name])
+    # runtime 显式传入时复用（省掉每条规则一次 ShopFloor 深拷贝）；不传保持原行为不变。
+    if runtime is not None:
+        sim = Simulator(current_shop, BUILTIN_RULES[rule_name], runtime=runtime)
+    else:
+        sim = Simulator(current_shop, BUILTIN_RULES[rule_name])
     result = sim.run()
     analytics = build_schedule_analytics(current_shop, result)
     keys = objective_keys or list(OBJECTIVE_SPECS.keys())
@@ -2881,14 +2889,48 @@ def compare(rule_names: list[str] = None):
     return _json_safe({"comparison": results})
 
 
+def _reference_view(full_payload: dict, objective_keys: list[str] | None, schedule_limit: int | None = 120) -> dict:
+    """把缓存里的全量规则参照 payload 裁剪成本次请求的视图：objectives 按请求目标裁剪，
+    schedule 按 schedule_limit 截断。缓存本身永远存全量，视图不回写缓存。"""
+    view = dict(full_payload)
+    all_objectives = full_payload.get("objectives") or {}
+    if objective_keys:
+        view["objectives"] = {key: all_objectives[key] for key in objective_keys if key in all_objectives}
+    else:
+        view["objectives"] = dict(all_objectives)
+    if schedule_limit is not None:
+        view["schedule"] = list(full_payload.get("schedule") or [])[:schedule_limit]
+    return view
+
+
 @app.post("/api/simulate/reference-solutions")
 async def simulate_reference_solutions(req: HeuristicReferenceReq):
     current_shop = _active_shop()
     if not current_shop:
         raise HTTPException(400, "请先生成实例")
     rules = [rule for rule in req.rule_names if rule in BUILTIN_RULES]
-    payload = [_rule_reference_solution(current_shop, rule, req.objective_keys) for rule in rules]
-    return {"solutions": payload}
+    solutions: list[dict] = []
+    cached_rules: list[str] = []
+    missing_rules: list[str] = []
+    to_compute: list[str] = []
+    for rule in rules:
+        cached = rule_reference_cache_store.get(rule)
+        if cached is not None:
+            cached_rules.append(rule)
+            solutions.append(_reference_view(cached, req.objective_keys))
+        elif req.only_cached:
+            missing_rules.append(rule)
+        else:
+            to_compute.append(rule)
+    # 未命中且允许现算：复用一次 runtime 逐条仿真，写入缓存（全量），响应裁剪视图。
+    if to_compute:
+        runtime = _cached_sim_runtime(current_shop)
+        for rule in to_compute:
+            full = _rule_reference_solution(current_shop, rule, objective_keys=None, schedule_limit=None, runtime=runtime)
+            rule_reference_cache_store.put(rule, full)
+            cached_rules.append(rule)
+            solutions.append(_reference_view(full, req.objective_keys))
+    return {"solutions": solutions, "cached_rules": cached_rules, "missing_rules": missing_rules}
 
 # === Exact Reference ===
 @app.get("/api/exact/objectives")

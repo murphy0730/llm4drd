@@ -134,6 +134,9 @@ const app = {
   simElapsedTimer: null,
   simRule: "ATC",
   referenceSolutions: [],
+  // 规则参照方案的加载状态：key = 排序规则 + 目标键，防并发重复；cachedRules/missingRules
+  // 供 chip 标记就绪/未计算；computing 为正在后台仿真的规则（spinner）。
+  referenceSolutionsState: { key: "", loading: false, error: null, cachedRules: [], missingRules: [], computing: [] },
   optimizeTaskId: null,
   optimizeStatus: null,
   optimizeResult: null,
@@ -148,7 +151,6 @@ const app = {
   filters: { orders: "", operations: "", resources: "", downtime: "" },
   reviewSelection: [],
   reviewDetailId: null,
-  heuristicSelection: ["ATC", "EDD"],
   aiConversation: [],
   aiBusy: false,
   aiLastRecommendedId: null,
@@ -189,7 +191,7 @@ const app = {
   // 方案详情甘特图的服务端取数状态：key = taskId::solutionId，切方案即自动失效
   planGantt: { key: null, taskId: null, solutionId: null, orders: [], orderId: null, entries: [], totalOperations: 0, loading: false, error: null },
   // 评审勾选集甘特联动的服务端取数状态：key = taskId::sorted(ids)::orderId；每个勾选方案在选定订单下的排产
-  reviewGantt: { key: null, taskId: null, ids: [], orderId: null, orders: [], schemes: {}, totalOperations: 0, loading: false, error: null },
+  reviewGantt: { key: null, taskId: null, ids: [], orderId: null, orders: [], schemes: {}, totalOperations: 0, failedIds: [], loading: false, error: null },
   // 机器分类利用率对比的服务端取数状态：key = taskId::sorted(solution_ids)，对比集合变化即自动失效
   typeUtilization: { key: null, loading: false, error: null, data: null },
 };
@@ -314,10 +316,11 @@ const api = {
   searchGraphOrder(query) { return this.json(`/graph/orders/search?q=${encodeURIComponent(query)}`); },
   simulate(ruleName) { return this.json("/simulate", "POST", { rule_name: ruleName }); },
   exportSimExcel() { return this.request("/simulate/export-excel"); },
-  simulateReferenceSolutions(ruleNames, objectiveKeys) {
+  simulateReferenceSolutions(ruleNames, objectiveKeys, onlyCached = false) {
     return this.json("/simulate/reference-solutions", "POST", {
       rule_names: ruleNames,
       objective_keys: objectiveKeys,
+      only_cached: onlyCached,
     });
   },
   getOptimizeObjectives() { return this.json("/optimize/objectives"); },
@@ -1954,10 +1957,10 @@ function renderTimeline(entries, options = {}) {
 // —— 图谱视觉编码：配色（token 派生）+ 形状 + 尺寸 三重编码 ——
 // 规划链冷色（订单/任务/工序），资源暖色（机器/工装/人员），与 design-system token 对齐
 const GRAPH_TYPE_COLORS = {
-  order: "#1d53c0",      // --primary-strong
-  task: "#2f6feb",       // --primary
-  operation: "#0e8e7f",  // --info
-  machine: "#c2620a",    // --accent
+  order: "#1d53c0",      // 靛蓝（--primary-strong）
+  task: "#0f6e56",       // 蓝绿——与订单靛蓝拉开色相，避免规划链上下游同蓝易混
+  operation: "#3b6d11",  // 绿——规划链冷色梯度收束在绿，区别于任务的蓝绿
+  machine: "#c2620a",    // --accent 琥珀
   tooling: "#bf3f8c",    // 暖品红
   personnel: "#7048e8",  // 暖紫
   other: "#7a8795",
@@ -2812,21 +2815,24 @@ function renderReviewTypeUtilization() {
         const cells = columns.map((c) => {
           const entry = type.per_solution?.[c.id];
           if (!entry) return "<td>-</td>";
+          const idx = schemeColorIndex(c.id);
           const isBest = best !== null && entry.utilization === best;
           const pct = isBest ? `<strong>${formatPercent(entry.utilization)}</strong>` : formatPercent(entry.utilization);
-          return `<td class="${isBest ? "is-best" : ""}">${pct}<span class="cell-sub">有排产 ${formatInt(entry.used_machines)}/${formatInt(type.machines_total)} 台</span></td>`;
+          const pctWidth = Math.max(0, Math.min(100, Math.round((Number(entry.utilization) || 0) * 100)));
+          return `<td class="${isBest ? "is-best" : ""}">${pct}<span class="cell-sub">${formatInt(entry.used_machines)}/${formatInt(type.machines_total)} 台</span><span class="util-bar"><span class="util-bar-fill" style="width:${pctWidth}%;background:${schemeColorToken(idx)}"></span></span></td>`;
         }).join("");
         return `<tr>
-          <td>${escapeHtml(type.type_name)}（${escapeHtml(type.type_id)}）· 共 ${formatInt(type.machines_total)} 台${type.is_critical ? " · 关键" : ""}</td>
+          <td><strong>${escapeHtml(type.type_name)}</strong>（${escapeHtml(type.type_id)}）<span class="cell-sub">共 ${formatInt(type.machines_total)} 台${type.is_critical ? " · 关键" : ""}</span></td>
           ${cells}
         </tr>`;
       }).join("");
       inner = `
         <div class="table-shell">
-          <table class="data-table">
+          <table class="data-table util-table">
+            <colgroup><col class="util-col-type">${columns.map(() => '<col class="util-col-plan">').join("")}</colgroup>
             <thead><tr><th>机器类型</th>${columns.map((c) => {
               const idx = schemeColorIndex(c.id);
-              return `<th><span class="scheme-dot" style="background:${schemeColorToken(idx)}"></span>${escapeHtml(c.name)}</th>`;
+              return `<th><span class="scheme-dot" style="background:${schemeColorToken(idx)}"></span><span class="util-plan-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span></th>`;
             }).join("")}</tr></thead>
             <tbody>${rows}</tbody>
           </table>
@@ -2838,7 +2844,7 @@ function renderReviewTypeUtilization() {
     <article class="surface-card">
       <div class="card-head">
         <h3>机器分类利用率对比</h3>
-        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗，小字为该类"有排产 / 总台数"。</p>
+        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗，小字为该类"有排产 / 总台数"，色条长度即利用率。</p>
       </div>
       ${inner}
     </article>
@@ -2971,11 +2977,18 @@ function renderReviewGantt(selected) {
       ${selected.map((item, index) => `<span class="legend-item"><span class="legend-swatch scheme-c-${index % SCHEME_COLOR_TOKENS.length}"></span>${escapeHtml(item.name)}</span>`).join("")}
     </div>
   `;
+  const failedNames = asArray(state.failedIds)
+    .map((fid) => selected.find((item) => item.id === fid)?.name)
+    .filter(Boolean);
+  const failedNote = failedNames.length
+    ? `<p class="gantt-note">${escapeHtml(failedNames.join("、"))} 在该订单下无可回放的排产，未在下方甘特显示。</p>`
+    : "";
   return `
     <article class="surface-card">
       ${cardHead}
       ${orderSelector}
       ${legend}
+      ${failedNote}
       <div class="gantt-canvas" id="${escapeHtml(id)}"></div>
     </article>
   `;
@@ -2983,6 +2996,7 @@ function renderReviewGantt(selected) {
 
 function renderReviewLibraryTab() {
   ensureReviewSelection();
+  ensureReferenceSolutions();
   const candidates = getReviewCandidates();
   const selected = getSelectedReviewCandidates();
   const exactCount = candidates.filter((item) => String(item.source || "").includes("exact")).length;
@@ -3012,11 +3026,20 @@ function renderReviewLibraryTab() {
         </div>
         <div>
           <div class="field-inline"><span>添加启发式参照</span></div>
-          <p class="pool-hint">教科书基准锚点：衡量优化器相对经典派工规则的提升。点击规则即载入为候选行并纳入比较与 AI 评审。</p>
+          <p class="pool-hint">教科书基准锚点：衡量优化器相对经典派工规则的提升。已就绪的规则即刻纳入比较与 AI 评审；「未计算」规则首次点击约需 1~2 分钟仿真。</p>
           <div class="chip-row">
             ${CONFIG.HEURISTIC_RULES.map((rule) => {
-              const on = app.heuristicSelection.includes(rule);
-              return `<button type="button" class="chip ${on ? "is-active" : ""}" data-action="toggle-heuristic" data-rule="${escapeHtml(rule)}" title="${escapeHtml(HEURISTIC_RULE_BLURB[rule] || "规则参考方案")}" aria-pressed="${on ? "true" : "false"}">${escapeHtml(rule)}</button>`;
+              const isBaseline = rule === app.optimizeResult?.baseline?.rule_name;
+              const computing = app.referenceSolutionsState.computing.includes(rule);
+              const cached = !isBaseline && ruleIsCached(rule);
+              const cls = isBaseline ? "is-baseline" : computing ? "is-computing" : cached ? "is-ready" : "is-uncached";
+              const badge = isBaseline ? "基线" : computing ? "计算中…" : cached ? "" : "未计算";
+              const title = isBaseline
+                ? "该规则已作为基线方案纳入对比"
+                : computing ? "正在仿真计算…"
+                : cached ? `${HEURISTIC_RULE_BLURB[rule] || "规则参考方案"}（已纳入对比）`
+                : `${HEURISTIC_RULE_BLURB[rule] || "规则参考方案"}（首次计算约需 1~2 分钟）`;
+              return `<button type="button" class="chip ${cls}" data-action="load-heuristic-rule" data-rule="${escapeHtml(rule)}" title="${escapeHtml(title)}" ${isBaseline || computing ? "disabled" : ""}>${escapeHtml(rule)}${badge ? `<span class="chip-badge">${escapeHtml(badge)}</span>` : ""}</button>`;
             }).join("")}
           </div>
         </div>
@@ -4306,20 +4329,91 @@ async function loadCatalogs() {
   }
 }
 
-async function refreshReferenceSolutions() {
-  if (!app.heuristicSelection.length) {
-    app.referenceSolutions = [];
-    return;
-  }
+// 规则参照方案候选池（除基线规则外）；用于 chip 状态标记与自动加载 key。
+function reviewHeuristicRules() {
+  const baselineRule = app.optimizeResult?.baseline?.rule_name;
+  return CONFIG.HEURISTIC_RULES.filter((rule) => rule !== baselineRule);
+}
+
+function referenceSolutionsKey(rules, objectiveKeys) {
+  return `${rules.slice().sort().join(",")}|${asArray(objectiveKeys).slice().sort().join(",")}`;
+}
+
+function ruleIsCached(rule) {
+  return app.referenceSolutionsState.cachedRules.includes(rule)
+    || asArray(app.referenceSolutions).some((item) => item.rule_name === rule);
+}
+
+// 进评审页自动加载：只取缓存命中的规则参照（only_cached=true），不触发任何新仿真。
+// 仿照 ensureTypeUtilization 的 key-based fire-and-forget，key 未变不重复请求。
+function ensureReferenceSolutions() {
+  const rules = reviewHeuristicRules();
+  if (!rules.length) return;
+  const objectiveKeys = app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys;
+  const key = referenceSolutionsKey(rules, objectiveKeys);
+  const state = app.referenceSolutionsState;
+  if (state.key === key && (state.loading || state.cachedRules.length || state.missingRules.length || state.error)) return;
+  if (state.key !== key) loadReferenceSolutionsCached(rules, objectiveKeys, key);
+}
+
+async function loadReferenceSolutionsCached(rules, objectiveKeys, key) {
+  app.referenceSolutionsState = { ...app.referenceSolutionsState, key, loading: true, error: null };
   try {
-    const result = await api.simulateReferenceSolutions(
-      app.heuristicSelection,
-      app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys,
-    );
+    const result = await api.simulateReferenceSolutions(rules, objectiveKeys, true);
+    if (app.referenceSolutionsState.key !== key) return; // 竞态：期间已切规则集/目标，丢弃过期响应
     app.referenceSolutions = asArray(result?.solutions);
+    app.referenceSolutionsState = {
+      key,
+      loading: false,
+      error: null,
+      cachedRules: asArray(result?.cached_rules),
+      missingRules: asArray(result?.missing_rules),
+      computing: [],
+    };
     ensureReviewSelection();
+    await renderCurrentPage();
   } catch (error) {
-    toast(`加载启发式参考方案失败：${error.message}`, "warning");
+    if (app.referenceSolutionsState.key === key) {
+      app.referenceSolutionsState = { ...app.referenceSolutionsState, loading: false, error: error.message || String(error) };
+    }
+  }
+}
+
+// 显式触发未缓存规则的仿真（100s 量级）：chip 进入计算中，算完增量插入对比表，不阻塞页面。
+async function computeReferenceSolution(rule) {
+  const state = app.referenceSolutionsState;
+  if (state.computing.includes(rule)) return;
+  const objectiveKeys = app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys;
+  // 竞态守卫：记录当前规则集/目标键，~100s 后响应回来若已变化则丢弃过期结果（同 loadReferenceSolutionsCached）
+  const guardKey = referenceSolutionsKey(reviewHeuristicRules(), objectiveKeys);
+  app.referenceSolutionsState = { ...state, computing: [...state.computing, rule] };
+  await renderCurrentPage();
+  try {
+    const result = await api.simulateReferenceSolutions([rule], objectiveKeys, false);
+    const stillCurrent = referenceSolutionsKey(reviewHeuristicRules(), app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys) === guardKey;
+    const cur = app.referenceSolutionsState;
+    if (!stillCurrent) {
+      // 期间实例/目标已变，过期结果不并入对比表，仅清理该规则的"计算中"标记
+      app.referenceSolutionsState = { ...cur, computing: cur.computing.filter((item) => item !== rule) };
+      await renderCurrentPage();
+      return;
+    }
+    const merged = new Map(asArray(app.referenceSolutions).map((item) => [item.solution_id, item]));
+    asArray(result?.solutions).forEach((item) => merged.set(item.solution_id, item));
+    app.referenceSolutions = Array.from(merged.values());
+    app.referenceSolutionsState = {
+      ...cur,
+      cachedRules: Array.from(new Set([...cur.cachedRules, ...asArray(result?.cached_rules), rule])),
+      missingRules: cur.missingRules.filter((item) => item !== rule),
+      computing: cur.computing.filter((item) => item !== rule),
+    };
+    ensureReviewSelection();
+    await renderCurrentPage();
+  } catch (error) {
+    const cur = app.referenceSolutionsState;
+    app.referenceSolutionsState = { ...cur, computing: cur.computing.filter((item) => item !== rule) };
+    toast(`计算规则 ${rule} 失败：${error.message || error}`, "warning");
+    await renderCurrentPage();
   }
 }
 
@@ -4556,43 +4650,31 @@ async function loadPlanGantt(taskId, solutionId, orderId = null) {
   await renderCurrentPage();
 }
 
-function ensurePlanGanttData(focused) {
-  const taskId = app.optimizeResult?.task_id;
-  if (!focused || !taskId) return app.planGantt;
-  const key = `${taskId}::${focused.id}`;
-  const state = app.planGantt;
-  if (state.key === key && (state.loading || state.entries.length || state.error)) return state;
-  if (state.key !== key) loadPlanGantt(taskId, focused.id, null); // fire-and-forget
-  return app.planGantt;
-}
-
-// 勾选集甘特联动的服务端取数：每个勾选方案在选定订单下的排产。key 仅按 (taskId, ids) 记，
-// 切订单不换 key，由订单下拉直接重取；无排产回放能力的方案（如部分参照）allSettled 后静默跳过。
-function reviewGanttKey(taskId, ids) {
-  return `${taskId}::${[...ids].sort().join(",")}`;
-}
-
+// 勾选集甘特联动的服务端取数：每个勾选方案在选定订单下的排产。key 仅按 (taskId, ids) 记
+// （与利用率对比同键，复用 typeUtilizationKey），切订单不换 key，由订单下拉直接重取；
+// 取排产失败的方案（如无排产回放能力的参照）记入 failedIds，渲染时提示，不静默吞掉。
 async function loadReviewGantt(taskId, ids, orderId = null) {
-  const key = reviewGanttKey(taskId, ids);
+  const key = typeUtilizationKey(taskId, ids);
   const keepOrders = app.reviewGantt.key === key ? app.reviewGantt.orders : [];
-  app.reviewGantt = { key, taskId, ids, orderId, orders: keepOrders, schemes: {}, totalOperations: 0, loading: true, error: null };
+  app.reviewGantt = { key, taskId, ids, orderId, orders: keepOrders, schemes: {}, totalOperations: 0, failedIds: [], loading: true, error: null };
   await renderCurrentPage();
   try {
     const results = await Promise.all(ids.map((id) =>
       api.getOptimizeSolutionSchedule(taskId, id, orderId).then((r) => ({ id, r }), (error) => ({ id, error }))));
     if (app.reviewGantt.key !== key) return; // 竞态：期间已切勾选集，丢弃过期响应
     const schemes = {};
+    const failedIds = [];
     let orders = keepOrders;
     let resolvedOrder = orderId;
     let total = 0;
     results.forEach(({ id, r }) => {
-      if (!r) return;
+      if (!r) { failedIds.push(id); return; }
       schemes[id] = asArray(r.entries);
       if (!orders.length) orders = asArray(r.orders);
       if (!resolvedOrder) resolvedOrder = r.order_id || null;
       total = Math.max(total, Number(r.total_operations || 0));
     });
-    app.reviewGantt = { key, taskId, ids, orderId: resolvedOrder, orders, schemes, totalOperations: total, loading: false, error: null };
+    app.reviewGantt = { key, taskId, ids, orderId: resolvedOrder, orders, schemes, totalOperations: total, failedIds, loading: false, error: null };
   } catch (error) {
     if (app.reviewGantt.key === key) app.reviewGantt = { ...app.reviewGantt, loading: false, error: error.message || String(error) };
   }
@@ -4603,7 +4685,7 @@ function ensureReviewGanttData(selected) {
   const taskId = app.optimizeResult?.task_id;
   const ids = asArray(selected).map((item) => item.id).filter(Boolean);
   if (!taskId || !ids.length) return app.reviewGantt;
-  const key = reviewGanttKey(taskId, ids);
+  const key = typeUtilizationKey(taskId, ids);
   const state = app.reviewGantt;
   if (state.key === key && (state.loading || Object.keys(state.schemes).length || state.error)) return state;
   if (state.key !== key) loadReviewGantt(taskId, ids, null); // fire-and-forget
@@ -5285,15 +5367,15 @@ async function handleAction(action, target) {
     toast(`已恢复建议预算 ${app.optimizeForm.timeLimitS} 秒。`, "success");
     return;
   }
-  if (action === "toggle-heuristic") {
+  if (action === "load-heuristic-rule") {
     const rule = target.dataset.rule;
-    if (rule) {
-      app.heuristicSelection = app.heuristicSelection.includes(rule)
-        ? app.heuristicSelection.filter((item) => item !== rule)
-        : [...app.heuristicSelection, rule];
+    if (!rule) return;
+    if (rule === app.optimizeResult?.baseline?.rule_name) {
+      toast(`规则 ${rule} 已作为基线方案纳入对比。`, "info");
+      return;
     }
-    await refreshReferenceSolutions();
-    return renderCurrentPage();
+    if (ruleIsCached(rule) || app.referenceSolutionsState.computing.includes(rule)) return; // 已在池中或计算中
+    return computeReferenceSolution(rule);
   }
   if (action === "toggle-candidate") {
     const id = target.dataset.id;

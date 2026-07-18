@@ -294,6 +294,13 @@ def init_db(db_path: str = DB_PATH):
                 payload TEXT NOT NULL,
                 updated_at REAL DEFAULT (strftime('%s','now'))
             );
+            CREATE TABLE IF NOT EXISTS rule_reference_cache (
+                inst_version INTEGER NOT NULL,
+                rule_name    TEXT NOT NULL,
+                payload      TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (inst_version, rule_name)
+            );
             CREATE INDEX IF NOT EXISTS idx_rules_type ON rules(problem_type, objective);
             CREATE INDEX IF NOT EXISTS idx_rules_active ON rules(is_active);
             CREATE INDEX IF NOT EXISTS idx_results_rule ON schedule_results(rule_id);
@@ -397,6 +404,69 @@ class WorkflowProgressStore:
         except (TypeError, ValueError):
             logger.warning("workflow_progress[%s] 内容损坏，已忽略", step)
             return None
+
+
+class RuleReferenceCacheStore:
+    """规则参照方案的两级缓存（内存 dict + SQLite）。
+
+    缓存键 = (inst_version, rule_name)。规则参照方案是"当前实例 + 规则名"的纯函数，
+    实例一旦被改动 _bump_instance_version() 会让版本号递增，读取时用当前版本号取行，
+    版本对不上就当作未命中，与 WorkflowProgressStore 同源失效，不产生脏数据。
+
+    写入方法不调用 _bump_instance_version()：缓存不是实例数据，递增版本号会把刚写入
+    的缓存连同 _active_shop() 缓存一起作废。存的是全量 payload（schedule 不截断、目标
+    值覆盖全部 OBJECTIVE_SPECS），响应时再按请求裁剪，避免缓存被截断版本污染。
+    """
+
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+        self._mem: dict[tuple[int, str], dict] = {}
+
+    @staticmethod
+    def _current_version(conn) -> int:
+        row = conn.execute("SELECT version FROM inst_version WHERE id=1").fetchone()
+        return int(row["version"]) if row else 0
+
+    def _prune_old(self, version: int) -> None:
+        # 只保留当前版本的内存条目：旧版本一旦被 _bump_instance_version() 作废就再也读不到，
+        # 留在 _mem 里只会随实例编辑次数无界累积（每条含全量 schedule，可达 MB 级）。
+        stale = [key for key in self._mem if key[0] != version]
+        for key in stale:
+            del self._mem[key]
+
+    def get(self, rule_name: str) -> Optional[dict]:
+        with get_db(self.db_path) as conn:
+            version = self._current_version(conn)
+            self._prune_old(version)
+            key = (version, rule_name)
+            if key in self._mem:
+                return self._mem[key]
+            row = conn.execute(
+                "SELECT payload FROM rule_reference_cache WHERE inst_version=? AND rule_name=?",
+                (version, rule_name),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            logger.warning("rule_reference_cache[%s] 内容损坏，已忽略", rule_name)
+            return None
+        self._mem[key] = payload
+        return payload
+
+    def put(self, rule_name: str, payload: dict) -> None:
+        with get_db(self.db_path) as conn:
+            version = self._current_version(conn)
+            conn.execute(
+                "INSERT INTO rule_reference_cache (inst_version, rule_name, payload, created_at) "
+                "VALUES (?,?,?,strftime('%s','now')) "
+                "ON CONFLICT(inst_version, rule_name) DO UPDATE SET "
+                "payload=excluded.payload, created_at=excluded.created_at",
+                (version, rule_name, json.dumps(payload, ensure_ascii=False)),
+            )
+        self._prune_old(version)
+        self._mem[(version, rule_name)] = payload
 
 
 class DowntimeStore:
