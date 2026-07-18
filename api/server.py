@@ -40,6 +40,11 @@ from ..knowledge.context_service import (
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
 from ..scheduling.online import OnlineSchedulerV3
 from ..core.time_utils import datetime_to_offset_hours
+from .review_read import (
+    ReviewReadCache,
+    build_review_solution_index,
+    search_order_facets,
+)
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="LLM4DRD智能调度平台", version="3.0")
@@ -76,6 +81,7 @@ _sim_lock = threading.Lock()
 _sim_runtime_cache: Optional[tuple[str, SimulationRuntime]] = None
 # (实例版本号, ShopFloor)，见 _active_shop()。
 _active_shop_cache: Optional[tuple[int, ShopFloor]] = None
+review_read_cache = ReviewReadCache(max_entries=24)
 
 
 def _sim_runtime_cache_key(current_shop: ShopFloor) -> str:
@@ -3297,6 +3303,90 @@ def _hybrid_result_payload(task_id: str, task: dict) -> dict:
     }
 
 
+def _requested_solution_ids(raw: str) -> list[str]:
+    return list(dict.fromkeys(
+        part.strip() for part in str(raw or "").split(",") if part.strip()
+    ))[:4]
+
+
+def _review_index(
+    current_shop: ShopFloor,
+    task_id: str,
+    task: dict,
+    solution_id: str,
+    timings: dict[str, float],
+):
+    version = get_instance_version(inst_store.db_path)
+    review_read_cache.retain_version(version)
+    resolve_started = time.perf_counter()
+    solution = _resolve_export_solution(current_shop, task, solution_id)
+    timings["resolve_solution_ms"] += (time.perf_counter() - resolve_started) * 1000
+    resolved_id = str(solution.get("solution_id") or solution_id)
+    key = (version, task_id, resolved_id)
+
+    def build():
+        build_started = time.perf_counter()
+        result = build_review_solution_index(
+            current_shop,
+            resolved_id,
+            solution.get("schedule") or [],
+        )
+        timings["build_index_ms"] += (time.perf_counter() - build_started) * 1000
+        return result
+
+    return review_read_cache.get_or_build(key, build)
+
+
+def _review_utilization_payload(
+    current_shop: ShopFloor,
+    solution_ids: list[str],
+    indexes: dict,
+) -> dict:
+    types = []
+    for type_id in sorted(current_shop.machine_types):
+        machine_type = current_shop.machine_types[type_id]
+        per_solution = {
+            solution_id: indexes[solution_id].machine_type_utilization[type_id]
+            for solution_id in solution_ids
+            if solution_id in indexes
+            and type_id in indexes[solution_id].machine_type_utilization
+        }
+        types.append({
+            "type_id": type_id,
+            "type_name": machine_type.name,
+            "machines_total": len(current_shop.get_machines_for_type(type_id)),
+            "is_critical": machine_type.is_critical,
+            "per_solution": per_solution,
+        })
+    return {
+        "solutions": [
+            solution_id for solution_id in solution_ids if solution_id in indexes
+        ],
+        "types": types,
+    }
+
+
+def _json_response_with_timing(
+    payload: dict,
+    started: float,
+    label: str,
+    fields: dict,
+    timings: dict[str, float],
+) -> Response:
+    serialize_started = time.perf_counter()
+    body = json.dumps(
+        _json_safe(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    timings["serialize_ms"] = (time.perf_counter() - serialize_started) * 1000
+    timings["total_ms"] = (time.perf_counter() - started) * 1000
+    logging.info("%s %s timings=%s", label, fields, {
+        key: round(value, 3) for key, value in timings.items()
+    })
+    return Response(content=body, media_type="application/json")
+
+
 @app.get("/api/optimize/hybrid/result/{task_id}")
 async def optimize_hybrid_result(task_id: str):
     task = _hybrid_tasks.get(task_id)
@@ -3392,6 +3482,137 @@ async def optimize_machine_type_utilization(task_id: str, solution_ids: str):
         "solutions": order,
         "types": types,
     })
+
+
+@app.get("/api/optimize/hybrid/result/{task_id}/review-data")
+def optimize_review_data(
+    task_id: str,
+    solution_ids: str,
+    order_id: Optional[str] = None,
+    include_utilization: bool = True,
+):
+    started = time.perf_counter()
+    resolved_task_id, task = _resolve_hybrid_task(task_id)
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+    requested = _requested_solution_ids(solution_ids)
+    timings = {
+        "resolve_solution_ms": 0.0,
+        "build_index_ms": 0.0,
+        "lookup_order_ms": 0.0,
+        "utilization_ms": 0.0,
+        "serialize_ms": 0.0,
+        "total_ms": 0.0,
+    }
+    indexes, failures = {}, {}
+    for solution_id in requested:
+        try:
+            indexes[solution_id] = _review_index(
+                current_shop,
+                resolved_task_id,
+                task,
+                solution_id,
+                timings,
+            )
+        except HTTPException as exc:
+            failures[solution_id] = str(exc.detail)
+
+    lookup_started = time.perf_counter()
+    order_union = search_order_facets(indexes.values(), "", 50)
+    selected_order = order_id or (
+        order_union[0]["order_id"] if order_union else None
+    )
+    schemes = {
+        solution_id: list(index.entries_by_order.get(selected_order, []))
+        for solution_id, index in indexes.items()
+    }
+    timings["lookup_order_ms"] = (time.perf_counter() - lookup_started) * 1000
+
+    utilization_started = time.perf_counter()
+    utilization = (
+        _review_utilization_payload(current_shop, requested, indexes)
+        if include_utilization
+        else None
+    )
+    timings["utilization_ms"] = (
+        time.perf_counter() - utilization_started
+    ) * 1000
+    payload = {
+        "task_id": resolved_task_id,
+        "order_id": selected_order,
+        "solutions": [
+            solution_id for solution_id in requested if solution_id in indexes
+        ],
+        "schemes": schemes,
+        "type_utilization": utilization,
+        "failed_solution_ids": list(failures),
+        "failure_messages": failures,
+    }
+    return _json_response_with_timing(
+        payload,
+        started,
+        "review-data",
+        {
+            "task_id": resolved_task_id,
+            "solutions": len(requested),
+            "order_id": selected_order,
+        },
+        timings,
+    )
+
+
+@app.get("/api/optimize/hybrid/result/{task_id}/review-orders")
+def optimize_review_orders(
+    task_id: str,
+    solution_ids: str,
+    q: str = "",
+    limit: int = 50,
+):
+    started = time.perf_counter()
+    resolved_task_id, task = _resolve_hybrid_task(task_id)
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+    timings = {
+        "resolve_solution_ms": 0.0,
+        "build_index_ms": 0.0,
+        "lookup_order_ms": 0.0,
+        "utilization_ms": 0.0,
+        "serialize_ms": 0.0,
+        "total_ms": 0.0,
+    }
+    indexes = []
+    for solution_id in _requested_solution_ids(solution_ids):
+        try:
+            indexes.append(_review_index(
+                current_shop,
+                resolved_task_id,
+                task,
+                solution_id,
+                timings,
+            ))
+        except HTTPException:
+            continue
+
+    lookup_started = time.perf_counter()
+    orders = search_order_facets(indexes, q, limit)
+    timings["lookup_order_ms"] = (time.perf_counter() - lookup_started) * 1000
+    payload = {
+        "task_id": resolved_task_id,
+        "query": q,
+        "orders": orders,
+    }
+    return _json_response_with_timing(
+        payload,
+        started,
+        "review-orders",
+        {
+            "task_id": resolved_task_id,
+            "query_length": len(q),
+        },
+        timings,
+    )
 
 
 @app.get("/api/workflow/progress")
