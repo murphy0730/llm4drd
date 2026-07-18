@@ -193,11 +193,23 @@ const app = {
   ganttGroupMode: {},
   // 方案详情甘特图的服务端取数状态：key = taskId::solutionId，切方案即自动失效
   planGantt: { key: null, taskId: null, solutionId: null, orders: [], orderId: null, entries: [], totalOperations: 0, loading: false, error: null },
-  // 评审勾选集甘特联动的服务端取数状态：key = taskId::sorted(ids)::orderId；每个勾选方案在选定订单下的排产
-  reviewGantt: { key: null, taskId: null, ids: [], orderId: null, orders: [], schemes: {}, totalOperations: 0, failedIds: [], loading: false, error: null },
-  // 机器分类利用率对比的服务端取数状态：key = taskId::sorted(solution_ids)，对比集合变化即自动失效
-  typeUtilization: { key: null, loading: false, error: null, data: null },
+  // 评审批量读取状态：选中方案、订单排程和利用率由一个 review-data 请求共同维护。
+  reviewRead: emptyReviewRead(),
 };
+
+function emptyReviewRead() {
+  return {
+    selectionKey: null,
+    scheduleKey: null,
+    orderId: null,
+    schemes: {},
+    utilization: null,
+    failedIds: [],
+    failureMessages: {},
+    loading: false,
+    error: null,
+  };
+}
 
 function defaultGraphView() {
   return {
@@ -339,6 +351,22 @@ const api = {
     const params = new URLSearchParams({ solution_ids: asArray(solutionIds).join(",") });
     return this.json(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/machine-type-utilization?${params.toString()}`);
   },
+  getReviewData(taskId, solutionIds, orderId, includeUtilization, signal) {
+    const params = new URLSearchParams({
+      solution_ids: ReviewRuntime.normalizeIds(solutionIds).join(","),
+      include_utilization: includeUtilization ? "true" : "false",
+    });
+    if (orderId) params.set("order_id", orderId);
+    return this.request(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/review-data?${params}`, { signal });
+  },
+  searchReviewOrders(taskId, solutionIds, query, signal) {
+    const params = new URLSearchParams({
+      solution_ids: ReviewRuntime.normalizeIds(solutionIds).join(","),
+      q: query || "",
+      limit: "50",
+    });
+    return this.request(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/review-orders?${params}`, { signal });
+  },
   exportOptimizeSolution(taskId, solutionId) {
     return this.request("/optimize/hybrid/export-solution", {
       method: "POST",
@@ -355,6 +383,22 @@ const api = {
   aiRecommend(payload) { return this.json("/ai/pareto/recommend", "POST", payload); },
   aiAsk(payload) { return this.json("/ai/pareto/ask", "POST", payload); },
 };
+
+const reviewDataClient = ReviewRuntime.createClient({
+  fetchReviewData: (args, signal) => api.getReviewData(
+    args.taskId,
+    args.ids,
+    args.orderId,
+    args.includeUtilization,
+    signal,
+  ),
+  fetchOrders: (args, signal) => api.searchReviewOrders(
+    args.taskId,
+    args.ids,
+    args.query,
+    signal,
+  ),
+});
 
 function el(id) {
   return document.getElementById(id);
@@ -2843,15 +2887,15 @@ function renderReviewTypeUtilization() {
       </article>
     `;
   }
-  const state = ensureTypeUtilization(columns);
+  const state = app.reviewRead;
 
   let inner;
-  if (state.loading) {
+  if (state.loading && !state.utilization) {
     inner = `<div class="empty-state"><p>正在计算机器分类利用率…</p></div>`;
-  } else if (state.error) {
+  } else if (state.error && !state.utilization) {
     inner = `<div class="empty-state"><p>加载机器分类利用率失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-type-utilization">重试</button></div>`;
   } else {
-    const types = asArray(state.data?.types).filter((type) => Object.keys(type.per_solution || {}).length);
+    const types = asArray(state.utilization?.types).filter((type) => Object.keys(type.per_solution || {}).length);
     if (!types.length) {
       inner = `<div class="empty-state"><p>当前对比方案的排程未覆盖任何机台类型。</p></div>`;
     } else {
@@ -2934,7 +2978,7 @@ function buildReviewGanttData(selected, schemes, canvasId) {
   const horizonEnd = Math.max(...all.map((e) => e.end));
   const viewKey = JSON.stringify({
     canvasId,
-    selectedOrder: app.reviewGantt.orderId || "",
+    selectedOrder: app.reviewRead.orderId || "",
     solutionIds: selected.map((item) => item.id).sort(),
     groupMode: "scheme",
   });
@@ -2988,57 +3032,65 @@ function buildReviewGanttData(selected, schemes, canvasId) {
   };
 }
 
-function renderReviewGantt(selected) {
-  const id = "gantt-review-compare";
-  const cardHead = `<div class="card-head"><h3>勾选方案甘特联动</h3><p>按机器分组，机器行内每个勾选方案独立配色（与对比表、利用率列头一致）；一次聚焦一个订单，切换订单可比较各方案在该订单上的排产差异。</p></div>`;
-  if (!selected.length) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>请在上方对比表勾选方案，以联动甘特对比。</p></div></article>`;
-  }
-  const taskId = app.optimizeResult?.task_id;
-  if (!taskId) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>运行混合优化后，可在此查看勾选方案的排产甘特联动。</p></div></article>`;
-  }
-  const state = ensureReviewGanttData(selected);
-  if (state.loading) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>正在加载勾选方案的排产…</p></div></article>`;
-  }
-  if (state.error) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div></article>`;
-  }
-  const data = buildReviewGanttData(selected, state.schemes, id);
-  if (!data) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p></div></article>`;
-  }
-  app.pendingGantts.set(id, { entries: [], options: { canvasId: id }, data });
-
-  const orders = asArray(state.orders);
-  const selectedOrder = state.orderId;
-  const orderSelector = orders.length ? `
+function reviewGanttControlsHtml() {
+  const selectedOrder = app.reviewRead.orderId;
+  if (!selectedOrder) return "";
+  return `
     <div class="field-inline">
       <span>订单</span>
       <select data-review-gantt-order>
-        ${orders.map((o) => `<option value="${escapeHtml(o.order_id)}" ${o.order_id === selectedOrder ? "selected" : ""}>${escapeHtml(o.order_name && o.order_name !== o.order_id ? `${o.order_id} · ${o.order_name}` : o.order_id)}</option>`).join("")}
+        <option value="${escapeHtml(selectedOrder)}" selected>${escapeHtml(selectedOrder)}</option>
       </select>
     </div>
-  ` : "";
-  const legend = `
-    <div class="legend">
-      ${selected.map((item, index) => `<span class="legend-item"><span class="legend-swatch scheme-c-${index % SCHEME_COLOR_TOKENS.length}"></span>${escapeHtml(item.name)}</span>`).join("")}
-    </div>
   `;
+}
+
+function reviewGanttLegendHtml(selected) {
+  return selected.map((item, index) => `
+    <span class="legend-item"><span class="legend-swatch scheme-c-${index % SCHEME_COLOR_TOKENS.length}"></span>${escapeHtml(item.name)}</span>
+  `).join("");
+}
+
+function currentReviewGanttData(selected) {
+  const taskId = app.optimizeResult?.task_id;
+  const ids = selected.map((item) => item.id).filter(Boolean);
+  const selectionKey = taskId && ids.length ? ReviewRuntime.selectionKey(taskId, ids) : null;
+  if (!selectionKey || app.reviewRead.selectionKey !== selectionKey) return null;
+  return buildReviewGanttData(selected, app.reviewRead.schemes, "gantt-review-compare");
+}
+
+function reviewGanttStatusHtml(selected, data) {
+  const state = app.reviewRead;
+  if (state.loading) return `<p class="gantt-note">正在加载勾选方案的排产…</p>`;
+  if (state.error) {
+    return `<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div>`;
+  }
   const failedNames = asArray(state.failedIds)
-    .map((fid) => selected.find((item) => item.id === fid)?.name)
+    .map((failedId) => selected.find((item) => item.id === failedId)?.name || failedId)
     .filter(Boolean);
   const failedNote = failedNames.length
     ? `<p class="gantt-note">${escapeHtml(failedNames.join("、"))} 在该订单下无可回放的排产，未在下方甘特显示。</p>`
     : "";
+  if (data) return failedNote;
+  return `${failedNote}<p class="gantt-note">所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p>`;
+}
+
+function renderReviewGantt(selected) {
+  const cardHead = `<div class="card-head"><h3>勾选方案甘特联动</h3><p>按机器分组，机器行内每个勾选方案独立配色（与对比表、利用率列头一致）；一次聚焦一个订单，切换订单可比较各方案在该订单上的排产差异。</p></div>`;
+  if (!selected.length) {
+    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>请在上方对比表勾选方案，以联动甘特对比。</p></div></article>`;
+  }
+  if (!app.optimizeResult?.task_id) {
+    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>运行混合优化后，可在此查看勾选方案的排产甘特联动。</p></div></article>`;
+  }
+  const data = currentReviewGanttData(selected);
   return `
     <article class="surface-card">
       ${cardHead}
-      ${orderSelector}
-      ${legend}
-      ${failedNote}
-      <div class="gantt-canvas" id="${escapeHtml(id)}"></div>
+      <div class="review-gantt-controls">${reviewGanttControlsHtml()}</div>
+      <div class="legend review-gantt-legend">${reviewGanttLegendHtml(selected)}</div>
+      <div class="review-gantt-status">${reviewGanttStatusHtml(selected, data)}</div>
+      <div class="gantt-canvas" id="gantt-review-compare"></div>
     </article>
   `;
 }
@@ -3058,7 +3110,7 @@ function renderReviewLibraryTab() {
         <div><span>Pareto</span><strong>${formatInt(paretoCount)}</strong></div>
         <div><span>启发式</span><strong>${formatInt(heuristicCount)}</strong></div>
         <div><span>精确冠军</span><strong>${formatInt(exactCount)}</strong></div>
-        <div><span>已选方案</span><strong>${formatInt(selected.length)}</strong></div>
+        <div><span>已选方案</span><strong id="review-selected-count">${formatInt(selected.length)}</strong></div>
       </div>
     </article>
     <article class="surface-card">
@@ -3094,13 +3146,15 @@ function renderReviewLibraryTab() {
         </div>
       </div>
     </article>
-    ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
-      "暂无方案池",
-      "先运行混合优化，或点击上方启发式规则加载参照方案。",
-      '<button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>',
-    )}
-    ${candidates.length ? renderReviewTypeUtilization() : ""}
-    ${candidates.length ? renderReviewGantt(selected) : ""}
+    <div id="review-comparison-region">
+      ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
+        "暂无方案池",
+        "先运行混合优化，或点击上方启发式规则加载参照方案。",
+        '<button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>',
+      )}
+    </div>
+    <div id="review-utilization-region">${candidates.length ? renderReviewTypeUtilization() : ""}</div>
+    <div id="review-gantt-region">${candidates.length ? renderReviewGantt(selected) : ""}</div>
   `;
 }
 
@@ -3228,10 +3282,95 @@ function renderReviewAiTab() {
   `;
 }
 
+function clearReviewTimeline() {
+  const entry = app.ganttInstances.find((item) => item.canvasId === "gantt-review-compare");
+  if (!entry) return;
+  entry.items.clear();
+  entry.groups.clear();
+  try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
+}
+
+function upsertReviewTimeline(data) {
+  if (!data || typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
+  const canvasId = "gantt-review-compare";
+  const entry = app.ganttInstances.find((item) => item.canvasId === canvasId && item.el?.isConnected);
+  if (!entry) {
+    app.pendingGantts.set(canvasId, { entries: [], options: { canvasId }, data });
+    requestAnimationFrame(() => mountGantts());
+    return;
+  }
+  entry.items.clear();
+  entry.groups.clear();
+  if (data.groups.length) entry.groups.add(data.groups);
+  if (data.items.length) entry.items.add(data.items);
+  entry.data = data;
+  entry.timeline.setOptions({
+    min: data.fullWindow?.start,
+    max: data.fullWindow?.end,
+  });
+  const stored = app.ganttViewWindows[canvasId];
+  const selectedWindow = stored?.viewKey === data.viewKey ? stored.window : data.initialWindow;
+  if (selectedWindow) {
+    entry.timeline.setWindow(selectedWindow.start, selectedWindow.end, { animation: false });
+  }
+  if (data.nowISO) {
+    try {
+      entry.timeline.setCustomTime(data.nowISO, "sched-now");
+    } catch (_) {
+      try { entry.timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) {}
+    }
+  } else {
+    try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
+  }
+}
+
+function refreshReviewDynamicRegions() {
+  const candidates = getReviewCandidates();
+  const selected = getSelectedReviewCandidates();
+  const comparisonRegion = el("review-comparison-region");
+  if (comparisonRegion) {
+    comparisonRegion.innerHTML = candidates.length ? renderReviewCandidateComparison() : "";
+  }
+  const selectedCount = el("review-selected-count");
+  if (selectedCount) selectedCount.textContent = formatInt(selected.length);
+
+  const utilizationRegion = el("review-utilization-region");
+  if (utilizationRegion) {
+    utilizationRegion.innerHTML = candidates.length ? renderReviewTypeUtilization() : "";
+  }
+
+  const ganttRegion = el("review-gantt-region");
+  if (!ganttRegion) return;
+  const existingCanvas = ganttRegion.querySelector("#gantt-review-compare");
+  if (!existingCanvas || !selected.length || !app.optimizeResult?.task_id) {
+    ganttRegion.innerHTML = candidates.length ? renderReviewGantt(selected) : "";
+  } else {
+    const data = currentReviewGanttData(selected);
+    const controls = ganttRegion.querySelector(".review-gantt-controls");
+    const legend = ganttRegion.querySelector(".review-gantt-legend");
+    const status = ganttRegion.querySelector(".review-gantt-status");
+    if (controls) controls.innerHTML = reviewGanttControlsHtml();
+    if (legend) legend.innerHTML = reviewGanttLegendHtml(selected);
+    if (status) status.innerHTML = reviewGanttStatusHtml(selected, data);
+  }
+
+  const data = currentReviewGanttData(selected);
+  if (data) {
+    upsertReviewTimeline(data);
+  } else if (!app.reviewRead.loading) {
+    clearReviewTimeline();
+  }
+  requestAnimationFrame(() => mountGantts());
+}
+
 function renderReview() {
   const container = el("review-content");
   syncTabButtons("data-review-tab", app.reviewTab);
-  if (app.reviewTab === "library") container.innerHTML = renderReviewLibraryTab();
+  if (app.reviewTab === "library") {
+    container.innerHTML = renderReviewLibraryTab();
+    refreshReviewDynamicRegions();
+    ensureReviewData(getSelectedReviewCandidates());
+  }
   if (app.reviewTab === "exact") container.innerHTML = renderReviewExactTab();
   if (app.reviewTab === "ai") container.innerHTML = renderReviewAiTab();
   requestAnimationFrame(() => mountGantts());
@@ -4314,10 +4453,12 @@ function mountGantts() {
     const stored = app.ganttViewWindows[el.id];
     const selectedWindow = stored?.viewKey === data.viewKey ? stored.window : data.initialWindow;
     el.dataset.bound = "1";
+    const items = new vis.DataSet(data.items);
+    const groups = new vis.DataSet(data.groups);
     const timeline = new vis.Timeline(
       el,
-      new vis.DataSet(data.items),
-      new vis.DataSet(data.groups),
+      items,
+      groups,
       {
         editable: false,
         selectable: false,
@@ -4350,13 +4491,14 @@ function mountGantts() {
     if (data.nowISO) {
       try { timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) { /* 忽略现在线注入失败 */ }
     }
+    const entry = { canvasId: el.id, el, timeline, items, groups, data };
     timeline.on("rangechanged", (props) => {
       app.ganttViewWindows[el.id] = {
-        viewKey: data.viewKey,
+        viewKey: entry.data.viewKey,
         window: { start: props.start.toISOString(), end: props.end.toISOString() },
       };
     });
-    app.ganttInstances.push({ canvasId: el.id, el, timeline });
+    app.ganttInstances.push(entry);
   });
 }
 
@@ -4593,6 +4735,9 @@ function setImportProgress(state) {
 }
 
 function resetInstanceDerivedState() {
+  reviewDataClient.reset();
+  app.reviewRead = emptyReviewRead();
+  app.pendingGantts.delete("gantt-review-compare");
   app.ganttViewWindows = {};
   app.graphMeta = null;
   app.graphNodes = [];
@@ -4714,75 +4859,80 @@ async function loadPlanGantt(taskId, solutionId, orderId = null) {
   await renderCurrentPage();
 }
 
-// 勾选集甘特联动的服务端取数：每个勾选方案在选定订单下的排产。key 仅按 (taskId, ids) 记
-// （与利用率对比同键，复用 typeUtilizationKey），切订单不换 key，由订单下拉直接重取；
-// 取排产失败的方案（如无排产回放能力的参照）记入 failedIds，渲染时提示，不静默吞掉。
-async function loadReviewGantt(taskId, ids, orderId = null) {
-  const key = typeUtilizationKey(taskId, ids);
-  const keepOrders = app.reviewGantt.key === key ? app.reviewGantt.orders : [];
-  app.reviewGantt = { key, taskId, ids, orderId, orders: keepOrders, schemes: {}, totalOperations: 0, failedIds: [], loading: true, error: null };
-  await renderCurrentPage();
-  try {
-    const results = await Promise.all(ids.map((id) =>
-      api.getOptimizeSolutionSchedule(taskId, id, orderId).then((r) => ({ id, r }), (error) => ({ id, error }))));
-    if (app.reviewGantt.key !== key) return; // 竞态：期间已切勾选集，丢弃过期响应
-    const schemes = {};
-    const failedIds = [];
-    let orders = keepOrders;
-    let resolvedOrder = orderId;
-    let total = 0;
-    results.forEach(({ id, r }) => {
-      if (!r) { failedIds.push(id); return; }
-      schemes[id] = asArray(r.entries);
-      if (!orders.length) orders = asArray(r.orders);
-      if (!resolvedOrder) resolvedOrder = r.order_id || null;
-      total = Math.max(total, Number(r.total_operations || 0));
-    });
-    app.reviewGantt = { key, taskId, ids, orderId: resolvedOrder, orders, schemes, totalOperations: total, failedIds, loading: false, error: null };
-  } catch (error) {
-    if (app.reviewGantt.key === key) app.reviewGantt = { ...app.reviewGantt, loading: false, error: error.message || String(error) };
-  }
-  await renderCurrentPage();
-}
-
-function ensureReviewGanttData(selected) {
+async function loadReviewData(selected, orderId = null, includeUtilization = true) {
   const taskId = app.optimizeResult?.task_id;
   const ids = asArray(selected).map((item) => item.id).filter(Boolean);
-  if (!taskId || !ids.length) return app.reviewGantt;
-  const key = typeUtilizationKey(taskId, ids);
-  const state = app.reviewGantt;
-  if (state.key === key && (state.loading || Object.keys(state.schemes).length || state.error)) return state;
-  if (state.key !== key) loadReviewGantt(taskId, ids, null); // fire-and-forget
-  return app.reviewGantt;
-}
-
-function typeUtilizationKey(taskId, ids) {
-  return `${taskId}::${[...ids].sort().join(",")}`;
-}
-
-async function loadTypeUtilization(taskId, ids) {
-  const key = typeUtilizationKey(taskId, ids);
-  app.typeUtilization = { key, loading: true, error: null, data: null };
-  await renderCurrentPage();
+  if (!taskId || !ids.length) return;
+  const selectionKey = ReviewRuntime.selectionKey(taskId, ids);
+  const previous = app.reviewRead;
+  const selectionChanged = previous.selectionKey !== selectionKey;
+  if (selectionChanged) app.pendingGantts.delete("gantt-review-compare");
+  app.reviewRead = {
+    ...previous,
+    selectionKey,
+    scheduleKey: ReviewRuntime.scheduleKey(taskId, ids, orderId),
+    orderId: orderId || (selectionChanged ? null : previous.orderId),
+    schemes: selectionChanged ? {} : previous.schemes,
+    utilization: selectionChanged ? null : previous.utilization,
+    failedIds: selectionChanged ? [] : previous.failedIds,
+    failureMessages: selectionChanged ? {} : previous.failureMessages,
+    loading: true,
+    error: null,
+  };
+  refreshReviewDynamicRegions();
   try {
-    const payload = await api.getMachineTypeUtilization(taskId, ids);
-    if (app.typeUtilization.key !== key) return; // 竞态：期间已切对比集合，丢弃过期响应
-    app.typeUtilization = { key, loading: false, error: null, data: payload };
+    const result = await reviewDataClient.loadData({
+      taskId,
+      ids,
+      orderId,
+      includeUtilization,
+    });
+    if (result.cancelled) return;
+    const payload = result.payload;
+    app.reviewRead = {
+      selectionKey,
+      scheduleKey: ReviewRuntime.scheduleKey(taskId, ids, payload.order_id),
+      orderId: payload.order_id,
+      schemes: payload.schemes || {},
+      utilization: payload.type_utilization ?? app.reviewRead.utilization,
+      failedIds: payload.failed_solution_ids || [],
+      failureMessages: payload.failure_messages || {},
+      loading: false,
+      error: null,
+    };
   } catch (error) {
-    if (app.typeUtilization.key === key) app.typeUtilization = { key, loading: false, error: error.message || String(error), data: null };
+    if (app.reviewRead.selectionKey === selectionKey) {
+      app.reviewRead = {
+        ...app.reviewRead,
+        loading: false,
+        error: error.message || String(error),
+      };
+    }
   }
-  await renderCurrentPage();
+  refreshReviewDynamicRegions();
 }
 
-function ensureTypeUtilization(preview) {
+function ensureReviewData(selected) {
   const taskId = app.optimizeResult?.task_id;
-  const ids = asArray(preview).map((item) => item.id).filter(Boolean);
-  if (!taskId || !ids.length) return app.typeUtilization;
-  const key = typeUtilizationKey(taskId, ids);
-  const state = app.typeUtilization;
-  if (state.key === key && (state.loading || state.data || state.error)) return state;
-  if (state.key !== key) loadTypeUtilization(taskId, ids); // fire-and-forget
-  return app.typeUtilization;
+  const ids = asArray(selected).map((item) => item.id).filter(Boolean);
+  if (!taskId || !ids.length) {
+    if (app.reviewRead.selectionKey) {
+      reviewDataClient.reset();
+      app.reviewRead = emptyReviewRead();
+      app.pendingGantts.delete("gantt-review-compare");
+      refreshReviewDynamicRegions();
+    }
+    return app.reviewRead;
+  }
+  const selectionKey = ReviewRuntime.selectionKey(taskId, ids);
+  if (
+    app.reviewRead.selectionKey === selectionKey &&
+    (app.reviewRead.loading || app.reviewRead.scheduleKey)
+  ) {
+    return app.reviewRead;
+  }
+  loadReviewData(selected, null, true);
+  return app.reviewRead;
 }
 
 // 订单过滤：下拉仅覆盖前 200 条订单，其余订单通过搜索按后端解析加载并聚焦该订单簇
@@ -5457,14 +5607,17 @@ async function handleAction(action, target) {
     }
     persistReviewProgress();
     updateShell();
-    return renderCurrentPage();
+    const comparisonRegion = el("review-comparison-region");
+    if (comparisonRegion) comparisonRegion.innerHTML = renderReviewCandidateComparison();
+    const selectedCount = el("review-selected-count");
+    if (selectedCount) selectedCount.textContent = formatInt(app.reviewSelection.length);
+    return ensureReviewData(getSelectedReviewCandidates());
   }
   if (action === "retry-type-utilization") {
-    app.typeUtilization = { key: null, loading: false, error: null, data: null };
-    return renderCurrentPage();
+    return loadReviewData(getSelectedReviewCandidates(), app.reviewRead.orderId, true);
   }
   if (action === "retry-review-gantt") {
-    return loadReviewGantt(app.reviewGantt.taskId, app.reviewGantt.ids, app.reviewGantt.orderId);
+    return loadReviewData(getSelectedReviewCandidates(), app.reviewRead.orderId, true);
   }
   if (action === "generate-exact-single") return handleGenerateExact("single");
   if (action === "generate-exact-weighted") return handleGenerateExact("weighted");
@@ -5673,7 +5826,7 @@ function bindGlobalEvents() {
       return;
     }
     if (target.matches("[data-review-gantt-order]")) {
-      return loadReviewGantt(app.reviewGantt.taskId, app.reviewGantt.ids, target.value);
+      return loadReviewData(getSelectedReviewCandidates(), target.value, false);
     }
     if (target.matches("#workflow-sim-rule")) app.simRule = target.value;
     if (target.matches("#ai-solution-select")) {

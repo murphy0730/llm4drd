@@ -30,6 +30,38 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertIn("groupMode", JS)
         self.assertIn("selected.map((item) => item.id)", JS)
 
+    def test_review_api_accepts_abort_signals(self):
+        self.assertIn("getReviewData(taskId, solutionIds, orderId, includeUtilization, signal)", JS)
+        self.assertIn("searchReviewOrders(taskId, solutionIds, query, signal)", JS)
+        self.assertGreaterEqual(JS.count("{ signal }"), 2)
+
+    def test_review_linkage_is_batched_and_locally_rendered(self):
+        self.assertIn("getReviewData(", JS)
+        self.assertNotIn("Promise.all(ids.map((id) =>", JS)
+        self.assertIn('id="review-comparison-region"', JS)
+        self.assertIn('id="review-utilization-region"', JS)
+        self.assertIn('id="review-gantt-region"', JS)
+        self.assertIn("refreshReviewDynamicRegions()", JS)
+        self.assertIn(".items.clear()", JS)
+        self.assertIn(".groups.clear()", JS)
+
+    def test_review_loads_do_not_render_the_whole_page(self):
+        start = JS.index("async function loadReviewData(")
+        end = JS.index("\nfunction ", start)
+        self.assertNotIn("renderCurrentPage()", JS[start:end])
+
+    def test_review_selection_drops_stale_pending_canvas_without_full_render(self):
+        self.assertIn('app.pendingGantts.delete("gantt-review-compare")', JS)
+        start = JS.index('if (action === "toggle-candidate")')
+        end = JS.index('if (action === "retry-type-utilization")', start)
+        self.assertNotIn("renderCurrentPage()", JS[start:end])
+        self.assertIn("ensureReviewData(getSelectedReviewCandidates())", JS[start:end])
+
+    def test_review_order_change_reuses_utilization(self):
+        start = JS.index('if (target.matches("[data-review-gantt-order]"))')
+        end = JS.index("\n    }", start)
+        self.assertIn("loadReviewData(getSelectedReviewCandidates(), target.value, false)", JS[start:end])
+
 
 if __name__ == "__main__":
     unittest.main()
