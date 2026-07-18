@@ -4213,6 +4213,19 @@ def _machine_type_utilization(current_shop: ShopFloor, schedule: list[dict]) -> 
     }
 
 
+def _has_complete_schedule(solution: dict) -> bool:
+    schedule = solution.get("schedule")
+    if not isinstance(schedule, list):
+        return False
+    expected = (solution.get("summary") or {}).get("total_operations")
+    if expected is None:
+        return bool(schedule)
+    try:
+        return len(schedule) >= int(expected)
+    except (TypeError, ValueError):
+        return False
+
+
 def _resolve_export_solution(current_shop: Optional[ShopFloor], task: dict, solution_id: str) -> dict:
     export_result = task.get("export_result") or task.get("result") or {}
     baseline = export_result.get("baseline")
@@ -4220,24 +4233,21 @@ def _resolve_export_solution(current_shop: Optional[ShopFloor], task: dict, solu
         if not baseline:
             raise HTTPException(404, "未找到基线方案")
         return baseline
-    if solution_id.startswith("RULE:"):
-        if current_shop is None:
-            raise HTTPException(400, "当前没有可用实例")
-        return _rule_reference_solution(
-            current_shop,
-            solution_id.split(":", 1)[1],
-            export_result.get("objective_keys", []),
-            schedule_limit=None,
-        )
-    for item in task.get("reference_solutions", []) or []:
-        if item.get("solution_id") == solution_id:
-            return item
     for item in export_result.get("reference_solutions", []) or []:
         if item.get("solution_id") == solution_id:
             return item
-    for item in export_result.get("solutions", []):
+    for item in export_result.get("solutions", []) or []:
         if item.get("solution_id") == solution_id:
             return item
+    for item in task.get("reference_solutions", []) or []:
+        if item.get("solution_id") == solution_id and _has_complete_schedule(item):
+            return item
+    if solution_id.startswith("RULE:"):
+        rule_name = solution_id.split(":", 1)[1]
+        cached = rule_reference_cache_store.get(rule_name)
+        if cached is not None:
+            return cached
+        raise HTTPException(409, f"规则方案 {rule_name} 尚未计算完整排程，请先计算规则参照")
     raise HTTPException(404, f"未找到方案 {solution_id}")
 
 
