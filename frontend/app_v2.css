@@ -792,6 +792,28 @@ a {
   background: rgba(15, 76, 129, 0.08);
 }
 
+.data-table td.is-best {
+  background: rgba(25, 113, 82, 0.10);
+  color: var(--success);
+}
+
+.data-table td .cell-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.heuristic-select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface, #fff);
+}
+
 .table-shell {
   overflow: auto;
 }

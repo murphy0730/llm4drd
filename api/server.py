@@ -1741,14 +1741,17 @@ def _instance_details(s: ShopFloor, lite: bool = False):
     machines = []
     for machine_id, machine in s.machines.items():
         machine_type = s.machine_types.get(machine.type_id)
-        calendar = _resource_calendar_payload(s, machine)
         # Shift 是不可变值对象，可直接做键；anchor 会影响换算出的 start/end。
+        # 班次日历被 ensure_calendar_capacity 铺到几百天（每台上千个班次），全厂机器
+        # 通常共用同一份。只有首次遇到某份日历才真正构造上千条班次 payload——之前对
+        # 每台机器都构造完整日历再按 key 去重丢弃，大实例上要数十秒、阻塞事件循环，
+        # 前端因此超时误判“没有实例”退回导入页。停机是每台各自的数据，不参与共享。
         calendar_key = (tuple(machine.shifts), getattr(machine, "calendar_anchor_hour", 0.0))
         calendar_id = shift_calendar_ids.get(calendar_key)
         if calendar_id is None:
             calendar_id = f"cal{len(shift_calendar_ids)}"
             shift_calendar_ids[calendar_key] = calendar_id
-            shift_calendars[calendar_id] = calendar["shifts"]
+            shift_calendars[calendar_id] = [_shift_payload(s, machine, shift) for shift in getattr(machine, "shifts", [])]
         machines.append(
             {
                 "id": machine_id,
@@ -1757,7 +1760,18 @@ def _instance_details(s: ShopFloor, lite: bool = False):
                 "type_name": machine_type.name if machine_type else "",
                 "is_critical": machine_type.is_critical if machine_type else False,
                 "shift_calendar_id": calendar_id,
-                "downtimes": calendar["downtimes"],
+                "downtimes": [
+                    {
+                        "id": downtime.id,
+                        "machine_id": downtime.machine_id,
+                        "downtime_type": downtime.downtime_type,
+                        "start": round(downtime.start_time, 3),
+                        "end": round(downtime.end_time, 3),
+                        "start_at": s.time_label(downtime.start_time),
+                        "end_at": s.time_label(downtime.end_time),
+                    }
+                    for downtime in getattr(machine, "downtimes", [])
+                ],
             }
         )
     machine_types = [
@@ -3265,6 +3279,79 @@ async def optimize_hybrid_result(task_id: str):
     return _hybrid_result_payload(task_id, task)
 
 
+@app.get("/api/optimize/hybrid/result/{task_id}/schedule")
+async def optimize_solution_schedule(task_id: str, solution_id: str, order_id: Optional[str] = None):
+    """按订单返回某方案的排程条目：facet(全部订单) + 单个订单的 entries。"""
+    resolved_id, task = _resolve_hybrid_task(task_id)
+    current_shop = _active_shop()
+    solution = _resolve_export_solution(current_shop, task, solution_id)
+    schedule = list(solution.get("schedule") or [])
+
+    facet: dict[str, dict] = {}
+    for entry in schedule:
+        key = str(entry.get("order_id") or "-")
+        bucket = facet.setdefault(key, {"order_id": key, "order_name": entry.get("order_name") or "", "op_count": 0})
+        bucket["op_count"] += 1
+    orders = sorted(facet.values(), key=lambda item: item["order_id"])
+
+    selected_order = order_id or (orders[0]["order_id"] if orders else None)
+    entries = [entry for entry in schedule if str(entry.get("order_id") or "-") == selected_order] if selected_order else []
+
+    return _json_safe({
+        "task_id": resolved_id,
+        "solution_id": solution.get("solution_id", solution_id),
+        "total_operations": len(schedule),
+        "orders": orders,
+        "order_id": selected_order,
+        "entries": entries,
+    })
+
+
+@app.get("/api/optimize/hybrid/result/{task_id}/machine-type-utilization")
+async def optimize_machine_type_utilization(task_id: str, solution_ids: str):
+    """按机器类型对比多个方案的资源利用率：行=机器类型，列=方案。"""
+    resolved_id, task = _resolve_hybrid_task(task_id)
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+
+    requested = [sid.strip() for sid in solution_ids.split(",") if sid.strip()][:8]
+    resolved: dict[str, dict] = {}
+    order: list[str] = []
+    for sid in requested:
+        try:
+            solution = _resolve_export_solution(current_shop, task, sid)
+        except HTTPException:
+            continue  # 单个方案解析失败（未知 id / 无实例）跳过，不拖垮整表
+        resolved_sid = str(solution.get("solution_id", sid))
+        if resolved_sid in resolved:
+            continue
+        resolved[resolved_sid] = _machine_type_utilization(current_shop, list(solution.get("schedule") or []))
+        order.append(resolved_sid)
+
+    types: list[dict] = []
+    for type_id in sorted(current_shop.machine_types):
+        machine_type = current_shop.machine_types[type_id]
+        per_solution = {
+            sid: resolved[sid][type_id]
+            for sid in order
+            if type_id in resolved[sid]
+        }
+        types.append({
+            "type_id": type_id,
+            "type_name": machine_type.name,
+            "machines_total": len(current_shop.get_machines_for_type(type_id)),
+            "is_critical": machine_type.is_critical,
+            "per_solution": per_solution,
+        })
+
+    return _json_safe({
+        "task_id": resolved_id,
+        "solutions": order,
+        "types": types,
+    })
+
+
 @app.get("/api/workflow/progress")
 async def workflow_progress():
     """已完成步骤的结果快照，供前端启动时恢复，而不必重跑整条流程。
@@ -4057,10 +4144,37 @@ def _resolve_candidate_set(current_shop: Optional[ShopFloor], task: dict, result
     return resolved
 
 
+def _machine_type_utilization(current_shop: ShopFloor, schedule: list[dict]) -> dict[str, dict]:
+    """按 type_id 聚合利用率：单机 util = Σ(end-start) / (max(end)-min(start))，类型取有排产机器均值。
+
+    窗口为该机器"最早排产开始 ~ 最晚排产结束"；跨班次工序含班次外间隔（机器仍被占用），
+    与 objectives.machine_active_window_utilization 同口径。零时长窗口按 0 处理。
+    """
+    span: dict[str, list] = {}  # machine_id -> [busy, first_start, last_end]
+    for entry in schedule:
+        machine_id = entry.get("machine_id")
+        start, end = entry.get("start"), entry.get("end")
+        if machine_id not in current_shop.machines or start is None or end is None:
+            continue
+        acc = span.setdefault(machine_id, [0.0, math.inf, -math.inf])
+        acc[0] += max(0.0, float(end) - float(start))
+        acc[1] = min(acc[1], float(start))
+        acc[2] = max(acc[2], float(end))
+    by_type: dict[str, list[float]] = {}
+    for machine_id, (busy, first, last) in span.items():
+        window = last - first
+        util = min(1.0, max(0.0, busy / window)) if window > 1e-9 else 0.0
+        by_type.setdefault(current_shop.machines[machine_id].type_id, []).append(util)
+    return {
+        type_id: {"utilization": round(sum(utils) / len(utils), 4), "used_machines": len(utils)}
+        for type_id, utils in by_type.items()
+    }
+
+
 def _resolve_export_solution(current_shop: Optional[ShopFloor], task: dict, solution_id: str) -> dict:
     export_result = task.get("export_result") or task.get("result") or {}
-    if solution_id == "BASELINE":
-        baseline = export_result.get("baseline")
+    baseline = export_result.get("baseline")
+    if solution_id == "BASELINE" or (baseline and solution_id == baseline.get("solution_id")):
         if not baseline:
             raise HTTPException(404, "未找到基线方案")
         return baseline
