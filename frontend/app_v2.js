@@ -2980,7 +2980,7 @@ function renderReviewCandidateComparison() {
       </td>
     </tr>`;
   }).join("");
-  const headers = ["选", "方案", ...allKeys.map((key) => getObjectiveLabel(key)), "操作"];
+  const headers = ["方案", ...allKeys.map((key) => getObjectiveLabel(key)), "操作"];
   return `
     <article class="surface-card">
       <div class="card-head">
@@ -2990,7 +2990,7 @@ function renderReviewCandidateComparison() {
       ${renderPrimaryObjectiveBadges(primaryKeys)}
       <div class="table-shell">
         <table class="data-table compare-table">
-          <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+          <thead><tr><th class="compare-check"><span class="sr-only">选择方案</span></th>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -3026,14 +3026,12 @@ function renderReviewTypeUtilization() {
         const cells = columns.map((c) => {
           const entry = type.per_solution?.[c.id];
           if (!entry) return "<td>-</td>";
-          const idx = schemeColorIndex(c.id);
           const isBest = best !== null && entry.utilization === best;
           const pct = isBest ? `<strong>${formatPercent(entry.utilization)}</strong>` : formatPercent(entry.utilization);
-          const pctWidth = Math.max(0, Math.min(100, Math.round((Number(entry.utilization) || 0) * 100)));
-          return `<td class="${isBest ? "is-best" : ""}">${pct}<span class="cell-sub">${formatInt(entry.used_machines)}/${formatInt(type.machines_total)} 台</span><span class="util-bar"><span class="util-bar-fill" style="width:${pctWidth}%;background:${schemeColorToken(idx)}"></span></span></td>`;
+          return `<td class="${isBest ? "is-best" : ""}">${pct}</td>`;
         }).join("");
         return `<tr>
-          <td><strong>${escapeHtml(type.type_name)}</strong>（${escapeHtml(type.type_id)}）<span class="cell-sub">共 ${formatInt(type.machines_total)} 台${type.is_critical ? " · 关键" : ""}</span></td>
+          <td><strong>${escapeHtml(type.type_name)}</strong></td>
           ${cells}
         </tr>`;
       }).join("");
@@ -3055,7 +3053,7 @@ function renderReviewTypeUtilization() {
     <article class="surface-card">
       <div class="card-head">
         <h3>机器分类利用率对比</h3>
-        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗，小字为该类"有排产 / 总台数"，色条长度即利用率。</p>
+        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗。</p>
       </div>
       ${inner}
     </article>

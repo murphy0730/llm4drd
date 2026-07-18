@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JS = (ROOT / "frontend" / "app_v2.js").read_text(encoding="utf-8")
+CSS = (ROOT / "frontend" / "app_v2.css").read_text(encoding="utf-8")
 RUNTIME_JS = (ROOT / "frontend" / "review_runtime.js").read_text(encoding="utf-8")
 
 
@@ -104,6 +105,51 @@ class ReviewFrontendContractTests(unittest.TestCase):
         load_end = JS.index("\nfunction ensureReviewData(", load_start)
         self.assertIn("orderId: selectionChanged ? null : previous.orderId", JS[load_start:load_end])
         self.assertIn("scheduleKey: selectionChanged ? null : previous.scheduleKey", JS[load_start:load_end])
+
+    def test_review_tables_use_compact_approved_content(self):
+        comparison_start = JS.index("function renderReviewCandidateComparison")
+        comparison_end = JS.index("function renderReviewTypeUtilization")
+        comparison_source = JS[comparison_start:comparison_end]
+        self.assertIn(
+            '<th class="compare-check"><span class="sr-only">选择方案</span></th>',
+            comparison_source,
+        )
+        self.assertNotIn('const headers = ["选"', comparison_source)
+        self.assertIn('aria-label="勾选 ${escapeHtml(item.name)}"', comparison_source)
+
+        utilization_start = JS.index("function renderReviewTypeUtilization")
+        utilization_end = JS.index("function buildReviewGanttData")
+        utilization_source = JS[utilization_start:utilization_end]
+        for token in (
+            "used_machines",
+            "machines_total",
+            "type_id",
+            "is_critical",
+            "util-bar",
+            "cell-sub",
+        ):
+            self.assertNotIn(token, utilization_source)
+        self.assertIn(
+            "<td><strong>${escapeHtml(type.type_name)}</strong></td>",
+            utilization_source,
+        )
+        self.assertIn("<strong>${formatPercent(entry.utilization)}</strong>", utilization_source)
+        self.assertIn('class="${isBest ? "is-best" : ""}"', utilization_source)
+
+        self.assertIn(".util-col-type { width: 132px; }", CSS)
+        util_css_start = CSS.index(".util-table")
+        util_css = CSS[util_css_start:CSS.index(".table-shell", util_css_start)]
+        self.assertIn("white-space: normal", util_css)
+        self.assertIn("overflow: visible", util_css)
+        self.assertIn("word-break: break-word", util_css)
+        self.assertNotIn("text-overflow: ellipsis", util_css)
+        self.assertNotIn("max-width", util_css)
+        self.assertNotIn(".util-bar", util_css)
+
+        sr_only_start = CSS.index(".sr-only")
+        sr_only_css = CSS[sr_only_start:CSS.index("}", sr_only_start)]
+        self.assertIn("position: absolute", sr_only_css)
+        self.assertIn("clip:", sr_only_css)
 
 
 if __name__ == "__main__":

@@ -811,6 +811,17 @@ a {
   z-index: 2;
   background: var(--surface, #fff);
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .compare-table .compare-check { width: 40px; text-align: center; }
 .compare-table .compare-name strong { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .compare-table .compare-name small { display: block; margin-top: 2px; color: var(--text-faint); font-size: 11px; }
@@ -893,18 +904,15 @@ a {
 
 /* 机器分类利用率表：固定列宽收敛，4 方案对比不出横向滚动 */
 .util-table { table-layout: fixed; }
-.util-col-type { width: 200px; }
-.util-col-plan { width: 120px; }
+.util-col-type { width: 132px; }
 .util-table th, .util-table td { padding: 8px 10px; }
 .util-table .util-plan-name {
-  display: inline-block; max-width: 90px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+  display: inline;
+  overflow: visible;
+  white-space: normal;
+  word-break: break-word;
 }
-.util-table .cell-sub { font-size: 11px; white-space: nowrap; }
 .util-table td:not(:first-child), .util-table th:not(:first-child) { text-align: right; }
-.util-table td:not(:first-child) .cell-sub { text-align: right; }
-.util-bar { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: rgba(15, 76, 129, 0.10); overflow: hidden; }
-.util-bar-fill { display: block; height: 100%; border-radius: 2px; }
 
 .table-shell {
   overflow: auto;
