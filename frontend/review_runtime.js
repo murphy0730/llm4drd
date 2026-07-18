@@ -49,8 +49,31 @@
     return `${selectionKey(taskId, ids)}::${orderId || ""}`;
   }
 
-  function rankOrders(orders, query, limit = 50) {
+  function rankOrders(orders, query, limit = 50, context = {}) {
     const needle = String(query || "").trim().toLowerCase();
+    const maxResults = Math.max(1, Math.min(Number(limit) || 50, 50));
+    const pinned = [context.current, ...(context.recent || [])].filter(Boolean);
+    const unique = (items) => {
+      const seen = new Set();
+      return items.filter((item) => {
+        const id = String(item?.order_id || "");
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+    };
+    if (!needle) {
+      const pinnedOrders = unique(pinned);
+      const pinnedIds = new Set(pinnedOrders.map((item) => String(item.order_id)));
+      const remaining = unique(orders || [])
+        .filter((item) => !pinnedIds.has(String(item.order_id)))
+        .sort((a, b) =>
+          String(a.order_id).localeCompare(String(b.order_id), "zh-CN", {
+            numeric: true,
+          })
+        );
+      return [...pinnedOrders, ...remaining].slice(0, maxResults);
+    }
     const bucket = (item) => {
       const id = String(item.order_id || "").toLowerCase();
       const name = String(item.order_name || "").toLowerCase();
@@ -60,7 +83,7 @@
       if (name.includes(needle)) return 3;
       return 4;
     };
-    return (orders || [])
+    return unique([...pinned, ...(orders || [])])
       .filter((item) => bucket(item) < 4)
       .slice()
       .sort(
@@ -70,12 +93,14 @@
             numeric: true,
           })
       )
-      .slice(0, Math.max(1, Math.min(Number(limit) || 50, 50)));
+      .slice(0, maxResults);
   }
 
   function createOrderComboboxController({
     search,
     select,
+    current = null,
+    recent = [],
     delay = 200,
     limit = 50,
     schedule = (fn, ms) => setTimeout(fn, ms),
@@ -148,7 +173,7 @@
       }
       requestController = null;
       const results = Array.isArray(matches)
-        ? matches.slice(0, Math.max(1, Math.min(Number(limit) || 50, 50)))
+        ? rankOrders(matches, query, limit, { current, recent })
         : [];
       state = {
         results,
@@ -168,6 +193,19 @@
         () => runSearch(query, requestedGeneration),
         delay
       );
+    }
+
+    function open() {
+      if (
+        disposed ||
+        state.open ||
+        timer !== null ||
+        requestController !== null
+      ) {
+        return false;
+      }
+      input("");
+      return true;
     }
 
     function move(delta) {
@@ -219,6 +257,7 @@
 
     return {
       input,
+      open,
       close,
       move,
       choose,
@@ -247,13 +286,38 @@
     return false;
   }
 
-  function createClient({ fetchReviewData, fetchOrders }) {
+  function createClient({
+    fetchReviewData,
+    fetchOrders,
+    // Review payloads are larger, so retain only a small working set. Order
+    // searches are lightweight but still bounded across long-running sessions.
+    dataCacheLimit = 12,
+    orderCacheLimit = 100,
+  }) {
     const dataCache = new Map();
     const orderCache = new Map();
+    const normalizedDataLimit = Math.max(1, Number(dataCacheLimit) || 12);
+    const normalizedOrderLimit = Math.max(1, Number(orderCacheLimit) || 100);
     let dataController = null;
     let orderController = null;
     let dataGeneration = 0;
     let orderGeneration = 0;
+
+    function readCache(cache, key) {
+      if (!cache.has(key)) return undefined;
+      const value = cache.get(key);
+      cache.delete(key);
+      cache.set(key, value);
+      return value;
+    }
+
+    function writeCache(cache, key, value, cacheLimit) {
+      if (cache.has(key)) cache.delete(key);
+      cache.set(key, value);
+      while (cache.size > cacheLimit) {
+        cache.delete(cache.keys().next().value);
+      }
+    }
 
     async function loadData(args) {
       const key = `${scheduleKey(
@@ -265,14 +329,14 @@
       if (dataController) dataController.abort();
       dataController = null;
       if (dataCache.has(key)) {
-        return { payload: dataCache.get(key), fromCache: true };
+        return { payload: readCache(dataCache, key), fromCache: true };
       }
       const controller = new AbortController();
       dataController = controller;
       try {
         const payload = await fetchReviewData(args, controller.signal);
         if (generation !== dataGeneration) return { cancelled: true };
-        dataCache.set(key, payload);
+        writeCache(dataCache, key, payload, normalizedDataLimit);
         return { payload, fromCache: false };
       } catch (error) {
         if (error?.name === "AbortError" || generation !== dataGeneration) {
@@ -294,7 +358,7 @@
       orderController = null;
       if (externalSignal?.aborted) return { cancelled: true };
       if (orderCache.has(key)) {
-        return { orders: orderCache.get(key), fromCache: true };
+        return { orders: readCache(orderCache, key), fromCache: true };
       }
       const controller = new AbortController();
       orderController = controller;
@@ -310,7 +374,7 @@
           return { cancelled: true };
         }
         const orders = payload.orders || [];
-        orderCache.set(key, orders);
+        writeCache(orderCache, key, orders, normalizedOrderLimit);
         return { orders, fromCache: false };
       } catch (error) {
         if (
@@ -339,7 +403,16 @@
       orderCache.clear();
     }
 
-    return { loadData, searchOrders, reset };
+    function cacheStats() {
+      return {
+        dataSize: dataCache.size,
+        orderSize: orderCache.size,
+        dataKeys: Array.from(dataCache.keys()),
+        orderKeys: Array.from(orderCache.keys()),
+      };
+    }
+
+    return { loadData, searchOrders, reset, cacheStats };
   }
 
   return {

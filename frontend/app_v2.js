@@ -19,6 +19,7 @@ const CONFIG = {
 
 const ORDER_SEARCH_DEBOUNCE_MS = 200;
 const ORDER_SEARCH_LIMIT = 50;
+const ORDER_RECENT_LIMIT = 8;
 
 const GRAPH_NODE_ORDER = ["order", "task", "operation", "machine", "tooling", "personnel"];
 const GRAPH_TYPE_LABELS = {
@@ -200,6 +201,7 @@ const app = {
   reviewRead: emptyReviewRead(),
   orderComboboxSources: new Map(),
   orderComboboxMounts: new Map(),
+  orderComboboxRecent: new Map(),
 };
 
 function emptyReviewRead() {
@@ -443,7 +445,19 @@ function orderComboboxLabel(order) {
   return [order.order_id, order.order_name].filter(Boolean).join(" · ");
 }
 
+function rememberOrderComboboxSelection(id, order) {
+  if (!id || !order?.order_id) return;
+  const recent = [
+    order,
+    ...asArray(app.orderComboboxRecent.get(id)),
+  ].filter((item, index, items) =>
+    items.findIndex((candidate) => candidate.order_id === item.order_id) === index
+  ).slice(0, ORDER_RECENT_LIMIT);
+  app.orderComboboxRecent.set(id, recent);
+}
+
 function renderOrderCombobox(config) {
+  rememberOrderComboboxSelection(config.id, config.selected);
   app.orderComboboxSources.set(config.id, config);
   const listId = `${config.id}-list`;
   return `
@@ -494,8 +508,11 @@ function mountOrderComboboxes() {
 
     controller = ReviewRuntime.createOrderComboboxController({
       search: source.search,
+      current: source.selected,
+      recent: app.orderComboboxRecent.get(source.id) || [],
       select: async (order) => {
         input.value = orderComboboxLabel(order);
+        rememberOrderComboboxSelection(source.id, order);
         await source.select(order);
       },
       delay: ORDER_SEARCH_DEBOUNCE_MS,
@@ -510,6 +527,12 @@ function mountOrderComboboxes() {
 
     input.addEventListener("input", () => {
       controller.input(input.value);
+    });
+    input.addEventListener("focus", () => {
+      controller.open();
+    });
+    input.addEventListener("click", () => {
+      controller.open();
     });
   });
 }
@@ -3194,12 +3217,15 @@ function reviewGanttStatusHtml(selected, data) {
   if (state.error) {
     return `<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div>`;
   }
-  const failedNames = asArray(state.failedIds)
-    .map((failedId) => selected.find((item) => item.id === failedId)?.name || failedId)
-    .filter(Boolean);
-  const failedNote = failedNames.length
-    ? `<p class="gantt-note">${escapeHtml(failedNames.join("、"))} 在该订单下无可回放的排产，未在下方甘特显示。</p>`
-    : "";
+  const failedNotes = asArray(state.failedIds).map((failedId) => {
+    const failedName = selected.find((item) => item.id === failedId)?.name || failedId;
+    const failureMessage = state.failureMessages?.[failedId];
+    if (failureMessage) {
+      return `<p class="gantt-note"><strong>${escapeHtml(failedName)}</strong>：${escapeHtml(failureMessage)}</p>`;
+    }
+    return `<p class="gantt-note">${escapeHtml(failedName)} 在该订单下无可回放的排产，未在下方甘特显示。</p>`;
+  });
+  const failedNote = failedNotes.join("");
   if (data) return failedNote;
   return `${failedNote}<p class="gantt-note">所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p>`;
 }
@@ -4868,6 +4894,7 @@ function setImportProgress(state) {
 function resetInstanceDerivedState() {
   invalidateReviewReadRequest();
   reviewDataClient.reset();
+  app.orderComboboxRecent.clear();
   app.reviewRead = emptyReviewRead();
   app.pendingGantts.delete("gantt-review-compare");
   app.ganttViewWindows = {};

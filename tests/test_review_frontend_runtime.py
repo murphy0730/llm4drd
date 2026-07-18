@@ -111,6 +111,89 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
+    def test_empty_order_query_prioritizes_current_then_recent_without_duplicates(self):
+        self._run_node(
+            """
+            const current = {order_id: "O-3", order_name: "当前"};
+            const recent = [
+              {order_id: "O-2", order_name: "最近"},
+              {order_id: "O-3", order_name: "重复当前"},
+              {order_id: "O-1", order_name: "较早"}
+            ];
+            const ranked = runtime.rankOrders([
+              {order_id: "O-4", order_name: "第四"},
+              {order_id: "O-2", order_name: "重复最近"},
+              {order_id: "O-1", order_name: "重复较早"},
+              {order_id: "O-5", order_name: "第五"}
+            ], "", 50, {current, recent});
+            assert.deepStrictEqual(
+              ranked.map((item) => item.order_id),
+              ["O-3", "O-2", "O-1", "O-4", "O-5"]
+            );
+            assert.strictEqual(
+              new Set(ranked.map((item) => item.order_id)).size,
+              ranked.length
+            );
+            """
+        )
+
+    def test_combobox_focus_and_click_share_one_empty_query_and_mouse_selects(self):
+        self._run_node(
+            """
+            const timers = [];
+            const scheduler = {
+              set(fn) {
+                const handle = {fn, cancelled: false};
+                timers.push(handle);
+                return handle;
+              },
+              clear(handle) {
+                if (handle) handle.cancelled = true;
+              },
+              flushAll() {
+                while (timers.length) {
+                  const handle = timers.shift();
+                  if (!handle.cancelled) handle.fn();
+                }
+              }
+            };
+            const queries = [];
+            const selections = [];
+            const controller = runtime.createOrderComboboxController({
+              schedule: scheduler.set,
+              cancelSchedule: scheduler.clear,
+              current: {order_id: "O-2", order_name: "当前"},
+              recent: [{order_id: "O-1", order_name: "最近"}],
+              search: async (query, signal) => {
+                assert.strictEqual(signal.aborted, false);
+                queries.push(query);
+                return [
+                  {order_id: "O-3", order_name: "第三"},
+                  {order_id: "O-2", order_name: "重复当前"}
+                ];
+              },
+              select: async (order) => selections.push(order.order_id)
+            });
+
+            // Browser focus followed by click must not schedule duplicate searches.
+            assert.strictEqual(controller.open(), true);
+            assert.strictEqual(controller.open(), false);
+            assert.strictEqual(timers.length, 1);
+            scheduler.flushAll();
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.deepStrictEqual(queries, [""]);
+            assert.deepStrictEqual(
+              controller.getState().results.map((item) => item.order_id),
+              ["O-2", "O-1", "O-3"]
+            );
+
+            const mouseOrder = controller.getState().results[2];
+            assert.strictEqual(await controller.choose(mouseOrder), true);
+            assert.deepStrictEqual(selections, ["O-3"]);
+            """
+        )
+
     def test_combobox_new_input_invalidates_old_response_before_debounce_runs(self):
         self._run_node(
             """
@@ -557,6 +640,58 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             });
             assert.strictEqual(afterReset.fromCache, false);
             assert.strictEqual(calls, 2);
+            """
+        )
+
+    def test_client_caches_are_bounded_lru_and_resettable(self):
+        self._run_node(
+            """
+            let dataCalls = 0;
+            let orderCalls = 0;
+            const client = runtime.createClient({
+              dataCacheLimit: 2,
+              orderCacheLimit: 2,
+              fetchReviewData: async (args) => {
+                dataCalls += 1;
+                return {order_id: args.orderId, schemes: {}};
+              },
+              fetchOrders: async (args) => {
+                orderCalls += 1;
+                return {orders: [{order_id: args.query}]};
+              }
+            });
+            const dataArgs = (orderId) => ({
+              taskId: "t1", ids: ["S-1"], orderId, includeUtilization: false
+            });
+            const orderArgs = (query) => ({
+              taskId: "t1", ids: ["S-1"], query
+            });
+
+            await client.loadData(dataArgs("A"));
+            await client.loadData(dataArgs("B"));
+            assert.strictEqual((await client.loadData(dataArgs("A"))).fromCache, true);
+            await client.loadData(dataArgs("C"));
+            assert.deepStrictEqual(client.cacheStats().dataKeys.map((key) => key.split("::")[2]), ["A", "C"]);
+            assert.strictEqual((await client.loadData(dataArgs("B"))).fromCache, false);
+            assert.strictEqual(dataCalls, 4);
+            assert.strictEqual(client.cacheStats().dataSize, 2);
+
+            await client.searchOrders(orderArgs("a"));
+            await client.searchOrders(orderArgs("b"));
+            assert.strictEqual((await client.searchOrders(orderArgs("a"))).fromCache, true);
+            await client.searchOrders(orderArgs("c"));
+            assert.deepStrictEqual(client.cacheStats().orderKeys.map((key) => key.split("::")[2]), ["a", "c"]);
+            assert.strictEqual((await client.searchOrders(orderArgs("b"))).fromCache, false);
+            assert.strictEqual(orderCalls, 4);
+            assert.strictEqual(client.cacheStats().orderSize, 2);
+
+            client.reset();
+            assert.deepStrictEqual(client.cacheStats(), {
+              dataSize: 0,
+              orderSize: 0,
+              dataKeys: [],
+              orderKeys: []
+            });
             """
         )
 

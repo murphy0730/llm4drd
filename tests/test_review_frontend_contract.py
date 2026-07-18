@@ -90,6 +90,29 @@ class ReviewFrontendContractTests(unittest.TestCase):
         review_end = JS.index("\nfunction renderReview()", review_start)
         self.assertIn("mountOrderComboboxes()", JS[review_start:review_end])
 
+    def test_combobox_focus_click_and_recent_order_contract(self):
+        mount_start = JS.index("function mountOrderComboboxes()")
+        mount_end = JS.index("\nfunction formatNumber", mount_start)
+        mount_source = JS[mount_start:mount_end]
+        self.assertIn('input.addEventListener("focus"', mount_source)
+        self.assertIn('input.addEventListener("click"', mount_source)
+        self.assertGreaterEqual(mount_source.count("controller.open()"), 2)
+        self.assertIn("orderComboboxRecent", JS)
+        reset_start = JS.index("function resetInstanceDerivedState()")
+        reset_end = JS.index("\nfunction ", reset_start)
+        self.assertIn("app.orderComboboxRecent.clear()", JS[reset_start:reset_end])
+
+    def test_review_gantt_preserves_escaped_backend_failure_messages(self):
+        start = JS.index("function reviewGanttStatusHtml(")
+        end = JS.index("\nfunction renderReviewGantt(", start)
+        source = JS[start:end]
+        self.assertIn("state.failureMessages", source)
+        self.assertIn("failedId", source)
+        self.assertIn("escapeHtml(failureMessage)", source)
+        self.assertIn("在该订单下无可回放", source)
+        self.assertNotIn("escapeHtml(failedNames.join", source)
+        self.assertIn("if (data) return failedNote;", source)
+
     def test_review_commits_are_guarded_by_request_generation_and_schedule(self):
         self.assertIn("let reviewReadRequestGeneration = 0", JS)
         self.assertIn("function isCurrentReviewReadRequest(", JS)
