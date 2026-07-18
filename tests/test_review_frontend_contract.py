@@ -62,6 +62,22 @@ class ReviewFrontendContractTests(unittest.TestCase):
         end = JS.index("\n    }", start)
         self.assertIn("loadReviewData(getSelectedReviewCandidates(), target.value, false)", JS[start:end])
 
+    def test_review_commits_are_guarded_by_request_generation_and_schedule(self):
+        self.assertIn("let reviewReadRequestGeneration = 0", JS)
+        self.assertIn("function isCurrentReviewReadRequest(", JS)
+        start = JS.index("async function loadReviewData(")
+        end = JS.index("\nfunction ensureReviewData(", start)
+        self.assertGreaterEqual(JS[start:end].count("isCurrentReviewReadRequest("), 2)
+
+    def test_pending_order_does_not_relabel_or_upsert_committed_schemes(self):
+        start = JS.index("function currentReviewGanttData(")
+        end = JS.index("\nfunction reviewGanttStatusHtml(", start)
+        self.assertIn("if (app.reviewRead.loading) return null;", JS[start:end])
+        load_start = JS.index("async function loadReviewData(")
+        load_end = JS.index("\nfunction ensureReviewData(", load_start)
+        self.assertIn("orderId: selectionChanged ? null : previous.orderId", JS[load_start:load_end])
+        self.assertIn("scheduleKey: selectionChanged ? null : previous.scheduleKey", JS[load_start:load_end])
+
 
 if __name__ == "__main__":
     unittest.main()

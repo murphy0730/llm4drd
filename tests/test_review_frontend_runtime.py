@@ -197,6 +197,93 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
+    def test_cached_read_invalidates_a_different_inflight_read(self):
+        self._run_node(
+            """
+            let calls = 0;
+            let finishFirstB;
+            const client = runtime.createClient({
+              fetchReviewData: (args) => {
+                calls += 1;
+                if (args.orderId === "B" && !finishFirstB) {
+                  return new Promise((resolve) => { finishFirstB = resolve; });
+                }
+                return Promise.resolve({order_id: args.orderId, schemes: {}});
+              },
+              fetchOrders: async () => ({orders: []})
+            });
+            await client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "A", includeUtilization: false
+            });
+            const pendingB = client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "B", includeUtilization: false
+            });
+            const cachedA = await client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "A", includeUtilization: false
+            });
+            assert.strictEqual(cachedA.fromCache, true);
+            finishFirstB({order_id: "B", schemes: {}});
+            assert.deepStrictEqual(await pendingB, {cancelled: true});
+            const freshB = await client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "B", includeUtilization: false
+            });
+            assert.strictEqual(freshB.payload.order_id, "B");
+            assert.strictEqual(calls, 3);
+            """
+        )
+
+    def test_late_same_selection_order_read_cannot_overwrite_newer_order(self):
+        self._run_node(
+            """
+            const finishes = {};
+            const client = runtime.createClient({
+              fetchReviewData: (args) => new Promise((resolve) => {
+                finishes[args.orderId] = resolve;
+              }),
+              fetchOrders: async () => ({orders: []})
+            });
+            const first = client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "O-1", includeUtilization: false
+            });
+            const second = client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "O-2", includeUtilization: false
+            });
+            finishes["O-2"]({order_id: "O-2", schemes: {}});
+            assert.strictEqual((await second).payload.order_id, "O-2");
+            finishes["O-1"]({order_id: "O-1", schemes: {}});
+            assert.deepStrictEqual(await first, {cancelled: true});
+            """
+        )
+
+    def test_reset_invalidates_late_data_completion_and_its_cache(self):
+        self._run_node(
+            """
+            let calls = 0;
+            let finishFirst;
+            const client = runtime.createClient({
+              fetchReviewData: () => {
+                calls += 1;
+                if (calls === 1) {
+                  return new Promise((resolve) => { finishFirst = resolve; });
+                }
+                return Promise.resolve({order_id: "O-1", schemes: {}});
+              },
+              fetchOrders: async () => ({orders: []})
+            });
+            const pending = client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "O-1", includeUtilization: false
+            });
+            client.reset();
+            finishFirst({order_id: "O-1", schemes: {}});
+            assert.deepStrictEqual(await pending, {cancelled: true});
+            const afterReset = await client.loadData({
+              taskId: "t1", ids: ["S-1"], orderId: "O-1", includeUtilization: false
+            });
+            assert.strictEqual(afterReset.fromCache, false);
+            assert.strictEqual(calls, 2);
+            """
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

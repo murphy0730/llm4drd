@@ -78,6 +78,8 @@
     const orderCache = new Map();
     let dataController = null;
     let orderController = null;
+    let dataGeneration = 0;
+    let orderGeneration = 0;
 
     async function loadData(args) {
       const key = `${scheduleKey(
@@ -85,18 +87,26 @@
         args.ids,
         args.orderId
       )}::${args.includeUtilization ? "u1" : "u0"}`;
+      const generation = ++dataGeneration;
+      if (dataController) dataController.abort();
+      dataController = null;
       if (dataCache.has(key)) {
         return { payload: dataCache.get(key), fromCache: true };
       }
-      if (dataController) dataController.abort();
-      dataController = new AbortController();
+      const controller = new AbortController();
+      dataController = controller;
       try {
-        const payload = await fetchReviewData(args, dataController.signal);
+        const payload = await fetchReviewData(args, controller.signal);
+        if (generation !== dataGeneration) return { cancelled: true };
         dataCache.set(key, payload);
         return { payload, fromCache: false };
       } catch (error) {
-        if (error?.name === "AbortError") return { cancelled: true };
+        if (error?.name === "AbortError" || generation !== dataGeneration) {
+          return { cancelled: true };
+        }
         throw error;
+      } finally {
+        if (generation === dataGeneration) dataController = null;
       }
     }
 
@@ -105,25 +115,37 @@
         args.taskId,
         args.ids
       )}::${String(args.query || "").trim().toLowerCase()}`;
+      const generation = ++orderGeneration;
+      if (orderController) orderController.abort();
+      orderController = null;
       if (orderCache.has(key)) {
         return { orders: orderCache.get(key), fromCache: true };
       }
-      if (orderController) orderController.abort();
-      orderController = new AbortController();
+      const controller = new AbortController();
+      orderController = controller;
       try {
-        const payload = await fetchOrders(args, orderController.signal);
+        const payload = await fetchOrders(args, controller.signal);
+        if (generation !== orderGeneration) return { cancelled: true };
         const orders = payload.orders || [];
         orderCache.set(key, orders);
         return { orders, fromCache: false };
       } catch (error) {
-        if (error?.name === "AbortError") return { cancelled: true };
+        if (error?.name === "AbortError" || generation !== orderGeneration) {
+          return { cancelled: true };
+        }
         throw error;
+      } finally {
+        if (generation === orderGeneration) orderController = null;
       }
     }
 
     function reset() {
+      dataGeneration += 1;
+      orderGeneration += 1;
       if (dataController) dataController.abort();
       if (orderController) orderController.abort();
+      dataController = null;
+      orderController = null;
       dataCache.clear();
       orderCache.clear();
     }

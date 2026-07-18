@@ -400,6 +400,22 @@ const reviewDataClient = ReviewRuntime.createClient({
   ),
 });
 
+let reviewReadRequestGeneration = 0;
+let pendingReviewScheduleKey = null;
+
+function invalidateReviewReadRequest() {
+  reviewReadRequestGeneration += 1;
+  pendingReviewScheduleKey = null;
+}
+
+function isCurrentReviewReadRequest(generation, selectionKey, scheduleKey) {
+  return (
+    generation === reviewReadRequestGeneration &&
+    selectionKey === app.reviewRead.selectionKey &&
+    scheduleKey === pendingReviewScheduleKey
+  );
+}
+
 function el(id) {
   return document.getElementById(id);
 }
@@ -3052,6 +3068,7 @@ function reviewGanttLegendHtml(selected) {
 }
 
 function currentReviewGanttData(selected) {
+  if (app.reviewRead.loading) return null;
   const taskId = app.optimizeResult?.task_id;
   const ids = selected.map((item) => item.id).filter(Boolean);
   const selectionKey = taskId && ids.length ? ReviewRuntime.selectionKey(taskId, ids) : null;
@@ -4735,6 +4752,7 @@ function setImportProgress(state) {
 }
 
 function resetInstanceDerivedState() {
+  invalidateReviewReadRequest();
   reviewDataClient.reset();
   app.reviewRead = emptyReviewRead();
   app.pendingGantts.delete("gantt-review-compare");
@@ -4864,14 +4882,17 @@ async function loadReviewData(selected, orderId = null, includeUtilization = tru
   const ids = asArray(selected).map((item) => item.id).filter(Boolean);
   if (!taskId || !ids.length) return;
   const selectionKey = ReviewRuntime.selectionKey(taskId, ids);
+  const requestedScheduleKey = ReviewRuntime.scheduleKey(taskId, ids, orderId);
+  const requestGeneration = ++reviewReadRequestGeneration;
+  pendingReviewScheduleKey = requestedScheduleKey;
   const previous = app.reviewRead;
   const selectionChanged = previous.selectionKey !== selectionKey;
   if (selectionChanged) app.pendingGantts.delete("gantt-review-compare");
   app.reviewRead = {
     ...previous,
     selectionKey,
-    scheduleKey: ReviewRuntime.scheduleKey(taskId, ids, orderId),
-    orderId: orderId || (selectionChanged ? null : previous.orderId),
+    scheduleKey: selectionChanged ? null : previous.scheduleKey,
+    orderId: selectionChanged ? null : previous.orderId,
     schemes: selectionChanged ? {} : previous.schemes,
     utilization: selectionChanged ? null : previous.utilization,
     failedIds: selectionChanged ? [] : previous.failedIds,
@@ -4879,6 +4900,7 @@ async function loadReviewData(selected, orderId = null, includeUtilization = tru
     loading: true,
     error: null,
   };
+  if (selectionChanged) clearReviewTimeline();
   refreshReviewDynamicRegions();
   try {
     const result = await reviewDataClient.loadData({
@@ -4888,6 +4910,7 @@ async function loadReviewData(selected, orderId = null, includeUtilization = tru
       includeUtilization,
     });
     if (result.cancelled) return;
+    if (!isCurrentReviewReadRequest(requestGeneration, selectionKey, requestedScheduleKey)) return;
     const payload = result.payload;
     app.reviewRead = {
       selectionKey,
@@ -4900,13 +4923,15 @@ async function loadReviewData(selected, orderId = null, includeUtilization = tru
       loading: false,
       error: null,
     };
+    pendingReviewScheduleKey = null;
   } catch (error) {
-    if (app.reviewRead.selectionKey === selectionKey) {
+    if (isCurrentReviewReadRequest(requestGeneration, selectionKey, requestedScheduleKey)) {
       app.reviewRead = {
         ...app.reviewRead,
         loading: false,
         error: error.message || String(error),
       };
+      pendingReviewScheduleKey = null;
     }
   }
   refreshReviewDynamicRegions();
@@ -4917,6 +4942,7 @@ function ensureReviewData(selected) {
   const ids = asArray(selected).map((item) => item.id).filter(Boolean);
   if (!taskId || !ids.length) {
     if (app.reviewRead.selectionKey) {
+      invalidateReviewReadRequest();
       reviewDataClient.reset();
       app.reviewRead = emptyReviewRead();
       app.pendingGantts.delete("gantt-review-compare");
