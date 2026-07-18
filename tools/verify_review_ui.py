@@ -30,6 +30,33 @@ LONG_SCHEME_NAMES = (
     "人员负荷均衡和关键工序风险控制方案（第四候选）",
 )
 PERCENT_RE = re.compile(r"^-?\d+(?:\.\d+)?%$|^-$")
+EXPLICIT_CANCELLATION_RE = re.compile(
+    r"(?:"
+    r"net::err_aborted"
+    r"|aborterror"
+    r"|\b(?:request|fetch|operation)\b.{0,80}"
+    r"\b(?:aborted|cancelled|canceled)\b"
+    r"|\b(?:aborted|cancelled|canceled)\b.{0,80}"
+    r"\b(?:request|fetch|operation)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_cancelled_request_lifecycle(
+    *,
+    outcome: str | None,
+    failure: str | None,
+    identity_matched: bool,
+    route_released_at_terminal: bool,
+) -> bool:
+    normalized_failure = " ".join(str(failure or "").split()).casefold()
+    return (
+        outcome == "failed"
+        and identity_matched
+        and not route_released_at_terminal
+        and bool(EXPLICIT_CANCELLATION_RE.search(normalized_failure))
+    )
 
 
 @dataclass
@@ -465,6 +492,8 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 "outcome": None,
                 "failure": None,
                 "identityMatched": False,
+                "routeReleasedAtTerminal": None,
+                "transportCancellation": False,
             }
 
             def is_delayed_first(request) -> bool:
@@ -487,6 +516,19 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 first_lifecycle["outcome"] = outcome
                 first_lifecycle["failure"] = (
                     request.failure if outcome == "failed" else None
+                )
+                first_lifecycle["routeReleasedAtTerminal"] = bool(
+                    first_lifecycle["routeReleased"]
+                )
+                first_lifecycle["transportCancellation"] = (
+                    is_cancelled_request_lifecycle(
+                        outcome=first_lifecycle["outcome"],
+                        failure=first_lifecycle["failure"],
+                        identity_matched=first_lifecycle["identityMatched"],
+                        route_released_at_terminal=first_lifecycle[
+                            "routeReleasedAtTerminal"
+                        ],
+                    )
                 )
                 first_lifecycle["completedAt"] = time.perf_counter()
                 first_lifecycle_done.set()
@@ -554,7 +596,9 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 first_intercepted.is_set()
                 and first_lifecycle_done.is_set()
                 and first_lifecycle["identityMatched"]
-                and first_lifecycle["outcome"] in {"finished", "failed"}
+                and first_lifecycle["outcome"] == "failed"
+                and first_lifecycle["transportCancellation"]
+                and first_lifecycle["routeReleasedAtTerminal"] is False
                 and final_state["orderId"] == "ORD-GAMMA-300"
                 and "ORD-GAMMA-300" in final_state["inputValue"]
                 and not console_errors
@@ -565,6 +609,12 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 rapid_ok,
                 (
                     f'final={final_state["orderId"]}, '
+                    f'identity={first_lifecycle["identityMatched"]}, '
+                    f'outcome={first_lifecycle["outcome"]}, '
+                    f'failure={first_lifecycle["failure"]}, '
+                    f'cancelled={first_lifecycle["transportCancellation"]}, '
+                    f'routeReleasedAtTerminal='
+                    f'{first_lifecycle["routeReleasedAtTerminal"]}, '
                     f"elapsed={rapid_elapsed_ms:.1f}ms, "
                     f"errors={len(console_errors) + len(page_errors)}"
                 ),
