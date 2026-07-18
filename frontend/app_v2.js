@@ -505,20 +505,7 @@ function mountOrderComboboxes() {
     app.orderComboboxMounts.set(container, controller);
 
     input.addEventListener("keydown", async (event) => {
-      if (event.key === "Escape") {
-        controller.close();
-        return;
-      }
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        const delta = event.key === "ArrowDown" ? 1 : -1;
-        controller.move(delta);
-        return;
-      }
-      if (event.key === "Enter") {
-        event.preventDefault();
-        await controller.chooseActive();
-      }
+      await ReviewRuntime.handleOrderComboboxKey(controller, event);
     });
 
     input.addEventListener("input", () => {
@@ -3178,8 +3165,8 @@ function reviewGanttControlsHtml() {
       ${renderOrderCombobox({
         id: "gantt-review-compare-order",
         selected: { order_id: selectedOrder, order_name: "" },
-        search: async (query) => {
-          const result = await reviewDataClient.searchOrders({ taskId, ids, query });
+        search: async (query, signal) => {
+          const result = await reviewDataClient.searchOrders({ taskId, ids, query }, signal);
           return result.cancelled ? [] : result.orders;
         },
         select: (order) => loadReviewData(getSelectedReviewCandidates(), order.order_id, false),

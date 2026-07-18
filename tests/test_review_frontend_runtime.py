@@ -283,6 +283,67 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
+    def test_combobox_escape_key_prevents_browser_default_and_stays_closed(self):
+        self._run_node(
+            """
+            const timers = [];
+            const scheduler = {
+              set(fn) {
+                const handle = {fn, cancelled: false};
+                timers.push(handle);
+                return handle;
+              },
+              clear(handle) {
+                if (handle) handle.cancelled = true;
+              },
+              flushAll() {
+                while (timers.length) {
+                  const handle = timers.shift();
+                  if (!handle.cancelled) handle.fn();
+                }
+              }
+            };
+            let calls = 0;
+            let finish;
+            let signal;
+            const controller = runtime.createOrderComboboxController({
+              schedule: scheduler.set,
+              cancelSchedule: scheduler.clear,
+              search: (_query, currentSignal) => {
+                calls += 1;
+                signal = currentSignal;
+                return new Promise((resolve) => { finish = resolve; });
+              },
+              select: async () => {}
+            });
+            controller.input("active");
+            scheduler.flushAll();
+
+            const event = {
+              key: "Escape",
+              defaultPrevented: false,
+              preventDefault() { this.defaultPrevented = true; }
+            };
+            assert.strictEqual(
+              await runtime.handleOrderComboboxKey(controller, event),
+              true
+            );
+            assert.strictEqual(event.defaultPrevented, true);
+            assert.strictEqual(signal.aborted, true);
+
+            // Simulate the search-input browser default: it would clear the input
+            // and emit a new input event only when preventDefault was omitted.
+            if (!event.defaultPrevented) controller.input("");
+            scheduler.flushAll();
+            finish([{order_id: "STALE"}]);
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.strictEqual(calls, 1);
+            assert.strictEqual(controller.getState().open, false);
+            assert.deepStrictEqual(controller.getState().results, []);
+            """
+        )
+
     def test_data_requests_cancel_stale_work_and_cache_completed_payloads(self):
         self._run_node(
             """
@@ -366,6 +427,49 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             assert.strictEqual(cached.fromCache, true);
             assert.strictEqual(orderCalls, 2);
             assert.strictEqual(dataCalls, 1);
+            """
+        )
+
+    def test_order_search_external_abort_reaches_fetch_and_preserves_later_cache(self):
+        self._run_node(
+            """
+            let calls = 0;
+            let injectedSignal;
+            const client = runtime.createClient({
+              fetchReviewData: async () => ({schemes: {}}),
+              fetchOrders: (_args, signal) => {
+                calls += 1;
+                injectedSignal = signal;
+                if (calls > 1) {
+                  return Promise.resolve({orders: [{order_id: "O-NEW"}]});
+                }
+                return new Promise((_resolve, reject) => {
+                  signal.addEventListener("abort", () => {
+                    reject(new DOMException("aborted", "AbortError"));
+                  });
+                });
+              }
+            });
+            const external = new AbortController();
+            const pending = client.searchOrders(
+              {taskId: "t1", ids: ["S-1"], query: "old"},
+              external.signal
+            );
+            assert.strictEqual(injectedSignal.aborted, false);
+            external.abort();
+            assert.strictEqual(injectedSignal.aborted, true);
+            assert.deepStrictEqual(await pending, {cancelled: true});
+
+            const fresh = await client.searchOrders({
+              taskId: "t1", ids: ["S-1"], query: "new"
+            });
+            assert.strictEqual(fresh.orders[0].order_id, "O-NEW");
+            assert.strictEqual(fresh.fromCache, false);
+            const cached = await client.searchOrders({
+              taskId: "t1", ids: ["S-1"], query: " new "
+            });
+            assert.strictEqual(cached.fromCache, true);
+            assert.strictEqual(calls, 2);
             """
         )
 

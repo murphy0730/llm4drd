@@ -228,6 +228,25 @@
     };
   }
 
+  async function handleOrderComboboxKey(controller, event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      controller.close();
+      return true;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      controller.move(event.key === "ArrowDown" ? 1 : -1);
+      return true;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      await controller.chooseActive();
+      return true;
+    }
+    return false;
+  }
+
   function createClient({ fetchReviewData, fetchOrders }) {
     const dataCache = new Map();
     const orderCache = new Map();
@@ -265,7 +284,7 @@
       }
     }
 
-    async function searchOrders(args) {
+    async function searchOrders(args, externalSignal) {
       const key = `${selectionKey(
         args.taskId,
         args.ids
@@ -273,23 +292,38 @@
       const generation = ++orderGeneration;
       if (orderController) orderController.abort();
       orderController = null;
+      if (externalSignal?.aborted) return { cancelled: true };
       if (orderCache.has(key)) {
         return { orders: orderCache.get(key), fromCache: true };
       }
       const controller = new AbortController();
       orderController = controller;
+      const abortFromExternal = () => controller.abort();
+      externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
       try {
         const payload = await fetchOrders(args, controller.signal);
-        if (generation !== orderGeneration) return { cancelled: true };
+        if (
+          controller.signal.aborted ||
+          externalSignal?.aborted ||
+          generation !== orderGeneration
+        ) {
+          return { cancelled: true };
+        }
         const orders = payload.orders || [];
         orderCache.set(key, orders);
         return { orders, fromCache: false };
       } catch (error) {
-        if (error?.name === "AbortError" || generation !== orderGeneration) {
+        if (
+          error?.name === "AbortError" ||
+          controller.signal.aborted ||
+          externalSignal?.aborted ||
+          generation !== orderGeneration
+        ) {
           return { cancelled: true };
         }
         throw error;
       } finally {
+        externalSignal?.removeEventListener("abort", abortFromExternal);
         if (generation === orderGeneration) orderController = null;
       }
     }
@@ -315,6 +349,7 @@
     scheduleKey,
     rankOrders,
     createOrderComboboxController,
+    handleOrderComboboxKey,
     createClient,
   };
 });

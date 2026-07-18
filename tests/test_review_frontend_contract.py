@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JS = (ROOT / "frontend" / "app_v2.js").read_text(encoding="utf-8")
+RUNTIME_JS = (ROOT / "frontend" / "review_runtime.js").read_text(encoding="utf-8")
 
 
 class ReviewFrontendContractTests(unittest.TestCase):
@@ -64,19 +65,18 @@ class ReviewFrontendContractTests(unittest.TestCase):
             "aria-expanded",
             "ORDER_SEARCH_DEBOUNCE_MS = 200",
             "ORDER_SEARCH_LIMIT = 50",
-            '"ArrowDown"',
-            '"ArrowUp"',
-            '"Enter"',
-            '"Escape"',
         ):
             self.assertIn(token, JS)
+        for key in ('"ArrowDown"', '"ArrowUp"', '"Enter"', '"Escape"'):
+            self.assertIn(key, RUNTIME_JS)
         self.assertNotIn("data-review-gantt-order", JS)
         self.assertNotIn("data-gantt-order-select", JS)
 
     def test_combobox_selection_paths_preserve_gantt_loading_contracts(self):
         self.assertIn("ReviewRuntime.rankOrders(", JS)
         self.assertIn("ReviewRuntime.createOrderComboboxController(", JS)
-        self.assertIn("reviewDataClient.searchOrders(", JS)
+        self.assertIn("ReviewRuntime.handleOrderComboboxKey(controller, event)", JS)
+        self.assertIn("reviewDataClient.searchOrders({ taskId, ids, query }, signal)", JS)
         self.assertIn("api.searchReviewOrders(taskId, [solutionId], query, signal)", JS)
         self.assertIn("loadReviewData(getSelectedReviewCandidates(), order.order_id, false)", JS)
         self.assertIn("loadPlanGantt(taskId, solutionId, order.order_id)", JS)
