@@ -2,7 +2,7 @@
 import os, csv, hashlib, io, json, inspect, logging, math, time, uuid, threading, traceback
 from datetime import datetime
 from typing import Optional, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse, Response
@@ -345,6 +345,15 @@ class ExactReferenceReq(BaseModel):
 class ExportSolutionReq(BaseModel):
     task_id: Optional[str] = None
     solution_id: str
+
+
+class SimExportReq(BaseModel):
+    """前端回传的排产明细（仿真结果或某个评审方案的排程），用于生成导出 Excel。"""
+    gantt: list[dict] = Field(default_factory=list)
+    metrics: dict = Field(default_factory=dict)
+    rule: Optional[str] = None
+    diagnosis: Optional[str] = None
+    diagnosis_detail: Optional[Any] = None
 
 
 class ReviewProgressReq(BaseModel):
@@ -2142,7 +2151,9 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
             ws_diag.append(["未完成工序数", len(unscheduled)])
             ws_diag.append(["工序ID", "任务ID", "工序类型", "状态"])
             for op in unscheduled:
-                ws_diag.append([op.id, op.task_id, op.process_type, getattr(op, "status", "")])
+                status = getattr(op, "status", "")
+                status = getattr(status, "value", status)  # OpStatus 枚举 openpyxl 无法直接写入
+                ws_diag.append([op.id, op.task_id, op.process_type, status])
     if ws_diag.max_row == 1 and ws_diag.cell(1, 1).value is None:
         ws_diag.append(["无", "本次仿真结果完整，无诊断信息"])
 
@@ -2157,18 +2168,38 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
 
 
 @app.post("/api/simulate/export-excel")
-async def export_sim_excel():
-    """导出最近一次仿真结果为 Excel（供用户下载）。"""
+async def export_sim_excel(req: Optional[SimExportReq] = Body(None)):
+    """导出仿真/方案排产结果为 Excel（供用户下载）。
+
+    优先使用前端回传的排产明细（req.gantt）——避免进程重启、切换实例导致快照被过滤、
+    或走非 /api/simulate 路径时后端 last_sim_payload 失效/为空造成的导出 400；
+    未回传时回退到最近一次仿真结果 last_sim_payload。
+    """
     current_shop = _active_shop()
-    if last_sim_payload is None:
+    if req is not None and req.gantt:
+        payload = {
+            "gantt": req.gantt,
+            "metrics": req.metrics or {},
+            "rule": req.rule or "sim",
+            "diagnosis": req.diagnosis,
+            "diagnosis_detail": req.diagnosis_detail,
+        }
+    elif last_sim_payload is not None:
+        payload = last_sim_payload
+    else:
         raise HTTPException(400, "尚未运行仿真，无法导出。请先在仿真与洞察中运行一次规则仿真。")
+    if not payload.get("gantt"):
+        raise HTTPException(400, "本次排产没有可导出的排程明细。")
     try:
-        data = _build_sim_export_excel(last_sim_payload, current_shop)
+        data = _build_sim_export_excel(payload, current_shop)
     except Exception as exc:  # noqa: BLE001
         logging.exception("sim export excel failed")
         raise HTTPException(500, f"导出 Excel 失败：{exc}")
-    rule = last_sim_payload.get("rule") or "sim"
-    filename = f"sim_result_{rule}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    rule = payload.get("rule") or "sim"
+    # Content-Disposition 头只能是 latin-1；rule 可能是中文方案名（如「方案1」），
+    # 转成 ASCII 安全串避免编码报错（浏览器实际下载名由前端 downloadBlob 指定）。
+    safe_rule = "".join(c if (c.isascii() and (c.isalnum() or c in "_-.")) else "_" for c in str(rule))[:40] or "sim"
+    filename = f"sim_result_{safe_rule}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4359,6 +4390,9 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
     for key, value in (solution.get("summary") or {}).items():
         if isinstance(value, list):
             ws_summary.append([key, ", ".join(str(item) for item in value)])
+        elif isinstance(value, dict):
+            # 基线方案 summary 含 per-order 字典（如各订单延误），openpyxl 无法直接写入
+            ws_summary.append([key, "; ".join(f"{k}={v}" for k, v in value.items())])
         else:
             ws_summary.append([key, value])
     ws_summary.append([])

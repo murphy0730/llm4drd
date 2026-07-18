@@ -315,7 +315,15 @@ const api = {
   getGraphOrder(orderId) { return this.json(`/graph/order/${encodeURIComponent(orderId)}`); },
   searchGraphOrder(query) { return this.json(`/graph/orders/search?q=${encodeURIComponent(query)}`); },
   simulate(ruleName) { return this.json("/simulate", "POST", { rule_name: ruleName }); },
-  exportSimExcel() { return this.request("/simulate/export-excel"); },
+  exportSimExcel(payload = null) {
+    // 回传前端已持有的排产明细（app.simResult 或某方案的 schedule），后端据此生成 Excel，
+    // 避免依赖易失效的后端 last_sim_payload。payload 为空时后端回退到最近一次仿真结果。
+    return this.request("/simulate/export-excel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+  },
   simulateReferenceSolutions(ruleNames, objectiveKeys, onlyCached = false) {
     return this.json("/simulate/reference-solutions", "POST", {
       rule_names: ruleNames,
@@ -5154,15 +5162,34 @@ async function handleExportSolution(solutionId) {
     toast("请先选择一个方案。", "warning");
     return;
   }
-  if (!app.optimizeTaskId) {
-    toast("当前导出依赖优化任务上下文，请先运行优化。", "warning");
-    return;
-  }
+  // 文件名用方案显示名（如「方案1」「基线方案 · ATC」），替换掉不合法的文件名字符。
+  const filename = `${String(candidate.name || candidate.id || "solution").replace(/[\\/:*?"<>|]+/g, "_")}_排产.xlsx`;
+  // 混合优化任务上下文：对比表与甘特都用 app.optimizeResult.task_id 拉取排产，导出端点与其共用
+  // _resolve_export_solution，故凡甘特能渲染的候选（基线/启发式参照/pareto/references）都能导出。
+  const taskId = app.optimizeResult?.task_id || app.optimizeTaskId;
+  // 精确冠军参考不在 hybrid task 内、但自带 schedule；无 taskId 时也退回客户端明细导出。
+  const canUseTask = taskId && candidate.source !== "exact_reference";
+  const exportFromSchedule = async () => {
+    if (!candidate.schedule?.length) throw new Error("该方案暂无排产明细可导出。");
+    return api.exportSimExcel({ gantt: candidate.schedule, rule: candidate.name, metrics: candidate.metrics || {} });
+  };
   try {
-    const blob = await api.exportOptimizeSolution(app.optimizeTaskId, candidate.id);
-    downloadBlob(blob, `${candidate.id || "solution"}.xlsx`);
+    const blob = canUseTask
+      ? await api.exportOptimizeSolution(taskId, candidate.id)
+      : await exportFromSchedule();
+    downloadBlob(blob, filename);
     toast("方案导出成功。", "success");
   } catch (error) {
+    // 优化任务解析失败时，若候选自带排产明细，退回客户端明细导出兜底。
+    if (canUseTask && candidate.schedule?.length) {
+      try {
+        downloadBlob(await exportFromSchedule(), filename);
+        toast("方案导出成功。", "success");
+        return;
+      } catch (_) {
+        // 兜底也失败则落到下方统一提示
+      }
+    }
     toast(`导出失败：${error.message}`, "warning");
   }
 }
@@ -5347,8 +5374,12 @@ async function handleAction(action, target) {
     return;
   }
   if (action === "export-sim-excel") {
+    if (!app.simResult?.gantt?.length) {
+      toast("当前没有可导出的仿真排程，请先运行一次规则仿真。", "warning");
+      return;
+    }
     try {
-      const blob = await api.exportSimExcel();
+      const blob = await api.exportSimExcel(app.simResult);
       downloadBlob(blob, `sim_result_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`);
       toast("仿真结果 Excel 已开始下载。", "success");
     } catch (error) {
