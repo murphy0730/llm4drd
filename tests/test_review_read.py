@@ -1,4 +1,6 @@
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from llm4drd.api.review_read import (
     ReviewReadCache,
@@ -16,6 +18,19 @@ class CountingSchedule(list):
     def __iter__(self):
         self.iterations += 1
         return super().__iter__()
+
+
+class TrackingEvent:
+    def __init__(self):
+        self._event = threading.Event()
+        self.wait_started = threading.Event()
+
+    def wait(self, timeout=None):
+        self.wait_started.set()
+        return self._event.wait(timeout)
+
+    def set(self):
+        self._event.set()
 
 
 class ReviewReadIndexTests(unittest.TestCase):
@@ -47,6 +62,106 @@ class ReviewReadIndexTests(unittest.TestCase):
         cache.get_or_build((1, "t", "c"), lambda: build("c"))
         self.assertEqual(builds, ["a", "b", "c"])
         self.assertNotIn((1, "t", "a"), cache.keys())
+
+    def test_cache_same_key_concurrent_reads_build_once(self):
+        cache = ReviewReadCache(max_entries=2)
+        key = (1, "t", "a")
+        build_started = threading.Event()
+        release_build = threading.Event()
+        build_count = 0
+        build_count_lock = threading.Lock()
+        value = object()
+
+        def build():
+            nonlocal build_count
+            with build_count_lock:
+                build_count += 1
+            build_started.set()
+            release_build.wait()
+            return value
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(cache.get_or_build, key, build)
+            self.assertTrue(build_started.wait(timeout=1))
+            tracked_event = TrackingEvent()
+            with cache._lock:
+                cache._in_flight[key].event = tracked_event
+            second = executor.submit(cache.get_or_build, key, build)
+            self.assertTrue(tracked_event.wait_started.wait(timeout=1))
+            release_build.set()
+            futures = [first, second]
+            results = [future.result(timeout=1) for future in futures]
+
+        self.assertEqual(build_count, 1)
+        self.assertIs(results[0], value)
+        self.assertIs(results[1], value)
+
+    def test_cache_different_keys_build_concurrently(self):
+        cache = ReviewReadCache(max_entries=2)
+        build_barrier = threading.Barrier(2)
+
+        def build(value):
+            build_barrier.wait(timeout=1)
+            return value
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(cache.get_or_build, (1, "t", "a"), lambda: build("a"))
+            second = executor.submit(cache.get_or_build, (1, "t", "b"), lambda: build("b"))
+            self.assertEqual(first.result(timeout=2), "a")
+            self.assertEqual(second.result(timeout=2), "b")
+
+    def test_cache_failed_build_wakes_waiters_and_allows_retry(self):
+        cache = ReviewReadCache(max_entries=2)
+        key = (1, "t", "a")
+        build_started = threading.Event()
+        release_build = threading.Event()
+        build_count = 0
+        build_count_lock = threading.Lock()
+        failure = ValueError("cannot build")
+
+        def fail():
+            nonlocal build_count
+            with build_count_lock:
+                build_count += 1
+            build_started.set()
+            release_build.wait()
+            raise failure
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(cache.get_or_build, key, fail)
+            self.assertTrue(build_started.wait(timeout=1))
+            tracked_event = TrackingEvent()
+            with cache._lock:
+                cache._in_flight[key].event = tracked_event
+            second = executor.submit(cache.get_or_build, key, fail)
+            self.assertTrue(tracked_event.wait_started.wait(timeout=1))
+            release_build.set()
+            futures = [first, second]
+            errors = []
+            for future in futures:
+                with self.assertRaises(ValueError) as raised:
+                    future.result(timeout=1)
+                errors.append(raised.exception)
+
+        self.assertEqual(build_count, 1)
+        self.assertIs(errors[0], failure)
+        self.assertIs(errors[1], failure)
+        self.assertEqual(
+            cache.get_or_build(key, lambda: "recovered"),
+            "recovered",
+        )
+
+    def test_cache_reentrant_same_key_fails_without_deadlock_and_can_retry(self):
+        cache = ReviewReadCache(max_entries=2)
+        key = (1, "t", "a")
+
+        with self.assertRaisesRegex(RuntimeError, "reentrant"):
+            cache.get_or_build(
+                key,
+                lambda: cache.get_or_build(key, lambda: "nested"),
+            )
+
+        self.assertEqual(cache.get_or_build(key, lambda: "recovered"), "recovered")
 
     def test_search_ranks_id_before_name_and_limits(self):
         shop = make_graph_context_shop()

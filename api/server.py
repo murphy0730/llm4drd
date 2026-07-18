@@ -3582,26 +3582,46 @@ def optimize_review_orders(
         "serialize_ms": 0.0,
         "total_ms": 0.0,
     }
-    indexes = []
-    for solution_id in _requested_solution_ids(solution_ids):
+    requested = _requested_solution_ids(solution_ids)
+    indexes = {}
+    failures = {}
+    failure_exceptions = {}
+    for solution_id in requested:
         try:
-            indexes.append(_review_index(
+            indexes[solution_id] = _review_index(
                 current_shop,
                 resolved_task_id,
                 task,
                 solution_id,
                 timings,
-            ))
-        except HTTPException:
-            continue
+            )
+        except HTTPException as exc:
+            failures[solution_id] = str(exc.detail)
+            failure_exceptions[solution_id] = exc
+
+    if requested and not indexes:
+        selected_failure = next(
+            (
+                failure_exceptions[solution_id]
+                for solution_id in requested
+                if failure_exceptions[solution_id].status_code == 409
+            ),
+            failure_exceptions[requested[0]],
+        )
+        raise selected_failure
 
     lookup_started = time.perf_counter()
-    orders = search_order_facets(indexes, q, limit)
+    orders = search_order_facets(indexes.values(), q, limit)
     timings["lookup_order_ms"] = (time.perf_counter() - lookup_started) * 1000
     payload = {
         "task_id": resolved_task_id,
         "query": q,
+        "solutions": [
+            solution_id for solution_id in requested if solution_id in indexes
+        ],
         "orders": orders,
+        "failed_solution_ids": list(failures),
+        "failure_messages": failures,
     }
     return _json_response_with_timing(
         payload,

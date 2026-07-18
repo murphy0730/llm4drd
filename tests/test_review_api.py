@@ -5,6 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 from llm4drd.api import server
 from llm4drd.api.review_read import ReviewReadCache
 from llm4drd.data.db import (
@@ -97,6 +99,48 @@ class ReviewApiTests(unittest.TestCase):
     def test_search_returns_ranked_union(self):
         response = server.optimize_review_orders("t1", "S-1,S-2", "001", 50)
         self.assertEqual(json.loads(response.body)["orders"][0]["order_id"], "O-001")
+
+    def test_order_search_reports_partial_uncached_rule_failure(self):
+        with patch.object(
+            server,
+            "_rule_reference_solution",
+            side_effect=AssertionError("must not simulate"),
+        ):
+            response = server.optimize_review_orders(
+                "t1", "S-1,RULE:NEVER-CACHED", "001", 50
+            )
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["solutions"], ["S-1"])
+        self.assertEqual(payload["failed_solution_ids"], ["RULE:NEVER-CACHED"])
+        self.assertIn(
+            "尚未计算完整排程",
+            payload["failure_messages"]["RULE:NEVER-CACHED"],
+        )
+        self.assertEqual(payload["orders"][0]["order_id"], "O-001")
+
+    def test_order_search_all_uncached_rule_failures_return_409_without_simulation(self):
+        with (
+            patch.object(
+                server,
+                "_rule_reference_solution",
+                side_effect=AssertionError("must not simulate"),
+            ),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            server.optimize_review_orders(
+                "t1", "RULE:NEVER-CACHED,RULE:ALSO-MISSING", "", 50
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("尚未计算完整排程", str(raised.exception.detail))
+
+    def test_order_search_all_unknown_solutions_return_404(self):
+        with self.assertRaises(HTTPException) as raised:
+            server.optimize_review_orders("t1", "UNKNOWN-1,UNKNOWN-2", "", 50)
+
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertIn("未找到方案", str(raised.exception.detail))
 
     def test_solution_ids_are_deduplicated_and_capped_at_four(self):
         response = server.optimize_review_data(

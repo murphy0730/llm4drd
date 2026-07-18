@@ -4,7 +4,7 @@ import math
 import re
 import threading
 from collections import OrderedDict, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, TypeVar
 
 from ..core.models import ShopFloor
@@ -20,30 +20,72 @@ class ReviewSolutionIndex:
 
 
 T = TypeVar("T")
+_MISSING = object()
+
+
+@dataclass
+class _InFlightBuild:
+    owner_ident: int
+    event: threading.Event = field(default_factory=threading.Event)
+    result: object = _MISSING
+    error: BaseException | None = None
 
 
 class ReviewReadCache:
     def __init__(self, max_entries: int = 24):
         self.max_entries = max(1, int(max_entries))
         self._items: OrderedDict[tuple[int, str, str], T] = OrderedDict()
+        self._in_flight: dict[tuple[int, str, str], _InFlightBuild] = {}
         self._lock = threading.RLock()
 
     def get_or_build(self, key: tuple[int, str, str], builder: Callable[[], T]) -> T:
+        current_ident = threading.get_ident()
         with self._lock:
-            cached = self._items.get(key)
-            if cached is not None:
+            cached = self._items.get(key, _MISSING)
+            if cached is not _MISSING:
                 self._items.move_to_end(key)
                 return cached
-        built = builder()
+            flight = self._in_flight.get(key)
+            if flight is not None:
+                if flight.owner_ident == current_ident:
+                    raise RuntimeError(f"reentrant cache build for key {key!r}")
+                owns_build = False
+            else:
+                flight = _InFlightBuild(owner_ident=current_ident)
+                self._in_flight[key] = flight
+                owns_build = True
+
+        if not owns_build:
+            flight.event.wait()
+            if flight.error is not None:
+                raise flight.error
+            return flight.result  # type: ignore[return-value]
+
+        try:
+            built = builder()
+        except BaseException as exc:
+            with self._lock:
+                flight.error = exc
+                if self._in_flight.get(key) is flight:
+                    del self._in_flight[key]
+                flight.event.set()
+            raise
+
         with self._lock:
-            cached = self._items.get(key)
-            if cached is not None:
+            cached = self._items.get(key, _MISSING)
+            if cached is not _MISSING:
                 self._items.move_to_end(key)
-                return cached
-            self._items[key] = built
-            while len(self._items) > self.max_entries:
-                self._items.popitem(last=False)
-            return built
+                result = cached
+            else:
+                self._items[key] = built
+                while len(self._items) > self.max_entries:
+                    self._items.popitem(last=False)
+                result = built
+            flight.result = result
+            if self._in_flight.get(key) is flight:
+                del self._in_flight[key]
+            flight.event.set()
+            return result
 
     def retain_version(self, version: int) -> None:
         with self._lock:
