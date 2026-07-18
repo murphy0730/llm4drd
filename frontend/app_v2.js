@@ -180,6 +180,9 @@ const app = {
   },
   pendingGantts: new Map(),
   ganttInstances: [],
+  // 用户手动调整的可视时间范围：canvasId -> { viewKey, window }。
+  // 方案、订单或分组变化时 viewKey 变化并恢复默认窗口；机器筛选和分页沿用当前范围。
+  ganttViewWindows: {},
   // 甘特图订单筛选：canvasId -> 选中的订单 id（"__all__" 表示全部，仅小实例提供）
   ganttOrderFilter: {},
   // 甘特图机器筛选与分页：canvasId -> { type, downtimeOnly, query, page }
@@ -1479,6 +1482,22 @@ function ganttOffsetToISO(offset, base) {
   return new Date(new Date(base).getTime() + Number(offset) * 3600 * 1000).toISOString();
 }
 
+function ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey) {
+  const fullWindow = {
+    start: ganttOffsetToISO(horizonStart, base),
+    end: ganttOffsetToISO(horizonEnd, base),
+  };
+  const effectiveNow = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd
+    ? ganttOffsetToISO(nowOffset, base)
+    : fullWindow.start;
+  return {
+    fullWindow,
+    initialWindow: ReviewRuntime.computeInitialWindow(fullWindow.start, fullWindow.end, effectiveNow),
+    nowISO: effectiveNow,
+    viewKey,
+  };
+}
+
 const GANTT_MACHINE_FILTER_DEFAULT = Object.freeze({ type: "__all__", downtimeOnly: false, query: "", page: 1 });
 const GANTT_ENTRY_FILTER_DEFAULT = Object.freeze({ status: "__all__", query: "", from: "", to: "" });
 
@@ -1550,6 +1569,12 @@ function buildGanttData(entries, options = {}) {
   const hasRealBase = Boolean(planStartAt);
   const base = hasRealBase ? planStartAt.toISOString() : GANTT_FALLBACK_BASE;
   const groupMode = options.groupMode === "order" ? "order" : "machine";
+  const viewKey = JSON.stringify({
+    canvasId: options.canvasId || "",
+    selectedOrder: options.selectedOrder || "",
+    solutionIds: asArray(options.solutionIds).map(String).sort(),
+    groupMode,
+  });
 
   const normalized = asArray(entries)
     .map((item) => ({
@@ -1592,11 +1617,6 @@ function buildGanttData(entries, options = {}) {
   const ganttItemTitle = (item) => `${item.statusLabel} · ${item.opId}\n订单:${item.orderId} 任务:${item.taskId}\n机器:${item.machineName}（${machineTypeName(item.machineId)}）\n${hasRealBase ? `${formatDateTime(ganttOffsetToISO(item.start, base))} ~ ${formatDateTime(ganttOffsetToISO(item.end, base))}` : `相对 ${item.start}h ~ ${item.end}h`}`;
   const overlayClass = (ov) => (ov.className.includes("unplanned") ? "unplanned" : ov.className.includes("planned") ? "planned" : "offshift");
   const nowOffset = ganttProgressNowOffset(normalized);
-  // "现在"线常驻：无进度数据时落在排程起点（全部未来排产的语义起点）
-  const nowISOFor = (horizonStart, horizonEnd) => {
-    const effective = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd ? nowOffset : horizonStart;
-    return ganttOffsetToISO(effective, base);
-  };
 
   // —— 模式一：按订单层级（订单 ▸ 任务令 ▸ 工序行，工序行标机器），按工序行分页 ——
   if (groupMode === "order") {
@@ -1621,7 +1641,17 @@ function buildGanttData(entries, options = {}) {
       page, pageCount, pageSize, typeOptions, filter: machineFilter,
     };
     if (!visible.length) {
-      return { groups: [], items: [], hasRealBase, machineFacet: facet, window: null, nowISO: null, mode: "order" };
+      return {
+        groups: [],
+        items: [],
+        hasRealBase,
+        machineFacet: facet,
+        fullWindow: null,
+        initialWindow: null,
+        nowISO: null,
+        viewKey,
+        mode: "order",
+      };
     }
     const horizonStart = Math.min(...visible.map((i) => i.start));
     const horizonEnd = Math.max(...visible.map((i) => i.end));
@@ -1698,14 +1728,12 @@ function buildGanttData(entries, options = {}) {
       });
     });
 
-    const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
     return {
       groups,
       items,
       hasRealBase,
       machineFacet: facet,
-      window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
-      nowISO: nowISOFor(horizonStart, horizonEnd),
+      ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
       mode: "order",
     };
   }
@@ -1734,7 +1762,17 @@ function buildGanttData(entries, options = {}) {
 
   if (!visible.length) {
     // 筛选/翻页后本页无条目（如关键字无命中）：保留 facet 供工具条渲染
-    return { groups, items: [], hasRealBase, machineFacet, window: null, nowISO: null, mode: "machine" };
+    return {
+      groups,
+      items: [],
+      hasRealBase,
+      machineFacet,
+      fullWindow: null,
+      initialWindow: null,
+      nowISO: null,
+      viewKey,
+      mode: "machine",
+    };
   }
 
   const horizonStart = Math.min(...visible.map((i) => i.start));
@@ -1770,14 +1808,12 @@ function buildGanttData(entries, options = {}) {
     });
   });
 
-  const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
   return {
     groups,
     items,
     hasRealBase,
     machineFacet,
-    window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
-    nowISO: nowISOFor(horizonStart, horizonEnd),
+    ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
     mode: "machine",
   };
 }
@@ -1847,7 +1883,13 @@ function renderTimeline(entries, options = {}) {
   const storedMode = app.ganttGroupMode[id];
   const groupMode = allowOrderMode ? (storedMode === "machine" ? "machine" : "order") : "machine";
 
-  const data = buildGanttData(visibleEntries, { ...options, canvasId: id, groupMode });
+  const data = buildGanttData(visibleEntries, {
+    ...options,
+    canvasId: id,
+    groupMode,
+    selectedOrder,
+    solutionIds: asArray(options.solutionIds),
+  });
   if (!data) {
     return renderEmptyState("暂无甘特数据", "当前方案还没有可显示的资源排程。");
   }
@@ -2541,7 +2583,11 @@ function renderWorkflowStep3() {
   `;
 
   const simulationDetail = app.simResult ? `
-    ${renderTimeline(app.simResult.gantt, { title: `规则仿真甘特图 · ${app.simRule}`, canvasId: "gantt-sim" })}
+    ${renderTimeline(app.simResult.gantt, {
+      title: `规则仿真甘特图 · ${app.simRule}`,
+      canvasId: "gantt-sim",
+      solutionIds: [app.simResult.solution_id || `RULE:${app.simRule}`],
+    })}
     <article class="surface-card">
       <div class="card-head"><h3>仿真明细预览</h3><p>核查开始/结束时间、状态、订单和资源分配是否符合业务直觉。</p></div>
       ${renderSimpleTable(
@@ -2886,6 +2932,12 @@ function buildReviewGanttData(selected, schemes, canvasId) {
 
   const horizonStart = Math.min(...all.map((e) => e.start));
   const horizonEnd = Math.max(...all.map((e) => e.end));
+  const viewKey = JSON.stringify({
+    canvasId,
+    selectedOrder: app.reviewGantt.orderId || "",
+    solutionIds: selected.map((item) => item.id).sort(),
+    groupMode: "scheme",
+  });
 
   const groups = [];
   const items = [];
@@ -2925,16 +2977,13 @@ function buildReviewGanttData(selected, schemes, canvasId) {
     });
   });
 
-  const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
   const nowOffset = ganttProgressNowOffset(all);
-  const nowEffective = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd ? nowOffset : horizonStart;
   return {
     groups,
     items,
     hasRealBase,
     machineFacet: null,
-    window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
-    nowISO: ganttOffsetToISO(nowEffective, base),
+    ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
     mode: "scheme",
   };
 }
@@ -3096,7 +3145,11 @@ function renderReviewExactTab() {
           { label: "求解信息", value: escapeHtml(app.exactReference.exact_info?.solver_status || app.exactReference.evaluationMode || "-") },
         ])}
       </article>
-      ${renderTimeline(app.exactReference.schedule, { title: "精确冠军参考甘特图", canvasId: "gantt-exact" })}
+      ${renderTimeline(app.exactReference.schedule, {
+        title: "精确冠军参考甘特图",
+        canvasId: "gantt-exact",
+        solutionIds: [app.exactReference.solution_id || "EXACT"],
+      })}
     ` : ""}
   `;
 }
@@ -4258,6 +4311,8 @@ function mountGantts() {
     // renderTimeline 已构建过 data（暂存在 payload），大实例下避免重复归一化/遮罩计算
     const data = payload.data || buildGanttData(payload.entries, payload.options);
     if (!data) return;
+    const stored = app.ganttViewWindows[el.id];
+    const selectedWindow = stored?.viewKey === data.viewKey ? stored.window : data.initialWindow;
     el.dataset.bound = "1";
     const timeline = new vis.Timeline(
       el,
@@ -4278,9 +4333,11 @@ function mountGantts() {
         // 关闭内置真实当前时间线（相对小时基准下无意义），"现在"线由 data.nowISO 按进度分界注入
         showCurrentTime: false,
         groupOrder: (a, b) => (a.seq || 0) - (b.seq || 0),
-        // 筛选无命中时 window 为 null，交给 vis 自适应空视图
-        start: data.window ? data.window.start : undefined,
-        end: data.window ? data.window.end : undefined,
+        // 无数据时范围为空，交给 vis 自适应空视图。
+        start: selectedWindow ? selectedWindow.start : undefined,
+        end: selectedWindow ? selectedWindow.end : undefined,
+        min: data.fullWindow ? data.fullWindow.start : undefined,
+        max: data.fullWindow ? data.fullWindow.end : undefined,
         showTooltips: true,
         // 内置 moment 只打包了 de/en/ja/ru/uk 语料且全局 locale 被 uk 覆盖，
         // 因此各刻度一律用与语言无关的数字格式，不能依赖 ddd / MMMM。
@@ -4293,6 +4350,12 @@ function mountGantts() {
     if (data.nowISO) {
       try { timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) { /* 忽略现在线注入失败 */ }
     }
+    timeline.on("rangechanged", (props) => {
+      app.ganttViewWindows[el.id] = {
+        viewKey: data.viewKey,
+        window: { start: props.start.toISOString(), end: props.end.toISOString() },
+      };
+    });
     app.ganttInstances.push({ canvasId: el.id, el, timeline });
   });
 }
@@ -4530,6 +4593,7 @@ function setImportProgress(state) {
 }
 
 function resetInstanceDerivedState() {
+  app.ganttViewWindows = {};
   app.graphMeta = null;
   app.graphNodes = [];
   app.graphEdges = [];
