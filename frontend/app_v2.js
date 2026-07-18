@@ -17,6 +17,9 @@ const CONFIG = {
   GANTT_ORDER_PAGE_SIZE: 60,
 };
 
+const ORDER_SEARCH_DEBOUNCE_MS = 200;
+const ORDER_SEARCH_LIMIT = 50;
+
 const GRAPH_NODE_ORDER = ["order", "task", "operation", "machine", "tooling", "personnel"];
 const GRAPH_TYPE_LABELS = {
   order: "订单",
@@ -195,6 +198,7 @@ const app = {
   planGantt: { key: null, taskId: null, solutionId: null, orders: [], orderId: null, entries: [], totalOperations: 0, loading: false, error: null },
   // 评审批量读取状态：选中方案、订单排程和利用率由一个 review-data 请求共同维护。
   reviewRead: emptyReviewRead(),
+  orderComboboxSources: new Map(),
 };
 
 function emptyReviewRead() {
@@ -430,6 +434,117 @@ function escapeHtml(value) {
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function orderComboboxLabel(order) {
+  if (!order) return "";
+  if (order.order_id === "__all__") return order.order_name || "全部订单";
+  return [order.order_id, order.order_name].filter(Boolean).join(" · ");
+}
+
+function renderOrderCombobox(config) {
+  app.orderComboboxSources.set(config.id, config);
+  const listId = `${config.id}-list`;
+  return `
+    <div class="order-combobox" data-order-combobox="${escapeHtml(config.id)}">
+      <input type="search" role="combobox" aria-autocomplete="list"
+        aria-expanded="false" aria-controls="${escapeHtml(listId)}"
+        value="${escapeHtml(orderComboboxLabel(config.selected))}" placeholder="输入订单号模糊搜索">
+      <div class="order-combobox-list" id="${escapeHtml(listId)}"
+        role="listbox" hidden></div>
+    </div>
+  `;
+}
+
+function mountOrderComboboxes() {
+  document.querySelectorAll(".page.active [data-order-combobox]:not([data-order-combobox-bound='1'])").forEach((container) => {
+    const source = app.orderComboboxSources.get(container.dataset.orderCombobox);
+    const input = container.querySelector('[role="combobox"]');
+    const list = container.querySelector('[role="listbox"]');
+    if (!source || !input || !list) return;
+    container.dataset.orderComboboxBound = "1";
+
+    let timer = null;
+    let results = [];
+    let activeIndex = -1;
+    let searchGeneration = 0;
+    let selecting = false;
+
+    const close = () => {
+      list.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    };
+
+    const choose = async (order) => {
+      if (!order || selecting) return;
+      selecting = true;
+      input.value = orderComboboxLabel(order);
+      close();
+      try {
+        await source.select(order);
+      } finally {
+        selecting = false;
+      }
+    };
+
+    const renderResults = () => {
+      list.innerHTML = results.map((order, index) => {
+        const optionId = `${source.id}-option-${index}`;
+        const active = index === activeIndex;
+        return `<button type="button" id="${escapeHtml(optionId)}" class="order-combobox-option${active ? " is-active" : ""}" role="option" aria-selected="${active ? "true" : "false"}" data-order-result="${index}">${escapeHtml(orderComboboxLabel(order))}</button>`;
+      }).join("");
+      if (activeIndex >= 0) {
+        input.setAttribute("aria-activedescendant", `${source.id}-option-${activeIndex}`);
+        list.querySelector(".is-active")?.scrollIntoView({ block: "nearest" });
+      } else {
+        input.removeAttribute("aria-activedescendant");
+      }
+      list.querySelectorAll("[data-order-result]").forEach((option) => {
+        option.addEventListener("click", () => choose(results[Number(option.dataset.orderResult)]));
+      });
+    };
+
+    const search = async () => {
+      const generation = ++searchGeneration;
+      try {
+        const matches = await source.search(input.value);
+        if (generation !== searchGeneration || !container.isConnected) return;
+        results = asArray(matches).slice(0, ORDER_SEARCH_LIMIT);
+      } catch (_) {
+        if (generation !== searchGeneration || !container.isConnected) return;
+        results = [];
+      }
+      activeIndex = results.length ? 0 : -1;
+      renderResults();
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    };
+
+    input.addEventListener("keydown", async (event) => {
+      if (event.key === "Escape") {
+        close();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (!results.length) return;
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        activeIndex = Math.max(0, Math.min(results.length - 1, activeIndex + delta));
+        renderResults();
+        return;
+      }
+      if (event.key === "Enter" && results[activeIndex]) {
+        event.preventDefault();
+        await choose(results[activeIndex]);
+      }
+    });
+
+    input.addEventListener("input", () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(search, ORDER_SEARCH_DEBOUNCE_MS);
+    });
+  });
 }
 
 function formatNumber(value, digits = 1) {
@@ -1957,16 +2072,39 @@ function renderTimeline(entries, options = {}) {
   app.pendingGantts.set(id, { entries: visibleEntries, options: { ...options, canvasId: id, groupMode }, data });
 
   const selectedOrderColor = selectedOrder === "__all__" ? null : orderColorFor(selectedOrder);
+  const orderSearchItems = orderOptions.map((orderId) => ({
+    order_id: orderId,
+    order_name: orderNames.get(orderId) || "",
+  }));
+  if (allowAll) {
+    orderSearchItems.unshift({
+      order_id: "__all__",
+      order_name: `全部订单（${formatInt(allEntries.length)} 道工序）`,
+    });
+  }
+  const selectedOrderItem = orderSearchItems.find((order) => order.order_id === selectedOrder) || null;
+  const orderComboboxId = `${id}-order`;
+  const taskId = serverOrders?.taskId || app.planGantt.taskId;
+  const solutionId = serverOrders?.solutionId || app.planGantt.solutionId;
   const orderSelector = orderOptions.length > 1 || !allowAll ? `
     <div class="field-inline">
       <span>订单</span>
-      <select data-gantt-order-select data-canvas="${escapeHtml(id)}" ${serverMode ? 'data-gantt-server-order="1"' : ""}>
-        ${allowAll ? `<option value="__all__" ${selectedOrder === "__all__" ? "selected" : ""}>全部订单（${formatInt(allEntries.length)} 道工序）</option>` : ""}
-        ${orderOptions.map((orderId) => {
-          const name = orderNames.get(orderId);
-          return `<option value="${escapeHtml(orderId)}" ${orderId === selectedOrder ? "selected" : ""}>${escapeHtml(name && name !== orderId ? `${orderId} · ${name}` : orderId)}</option>`;
-        }).join("")}
-      </select>
+      ${renderOrderCombobox({
+        id: orderComboboxId,
+        selected: selectedOrderItem,
+        search: serverMode
+          ? async (query) => {
+            const payload = await api.searchReviewOrders(taskId, [solutionId], query);
+            return asArray(payload?.orders);
+          }
+          : (query) => ReviewRuntime.rankOrders(orderSearchItems, query, ORDER_SEARCH_LIMIT),
+        select: serverMode
+          ? (order) => loadPlanGantt(taskId, solutionId, order.order_id)
+          : (order) => {
+            app.ganttOrderFilter[id] = order.order_id;
+            return renderCurrentPage();
+          },
+      })}
       <span>分组</span>
       <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
         <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
@@ -3051,12 +3189,21 @@ function buildReviewGanttData(selected, schemes, canvasId) {
 function reviewGanttControlsHtml() {
   const selectedOrder = app.reviewRead.orderId;
   if (!selectedOrder) return "";
+  const selected = getSelectedReviewCandidates();
+  const taskId = app.optimizeResult?.task_id;
+  const ids = selected.map((item) => item.id).filter(Boolean);
   return `
     <div class="field-inline">
       <span>订单</span>
-      <select data-review-gantt-order>
-        <option value="${escapeHtml(selectedOrder)}" selected>${escapeHtml(selectedOrder)}</option>
-      </select>
+      ${renderOrderCombobox({
+        id: "gantt-review-compare-order",
+        selected: { order_id: selectedOrder, order_name: "" },
+        search: async (query) => {
+          const result = await reviewDataClient.searchOrders({ taskId, ids, query });
+          return result.cancelled ? [] : result.orders;
+        },
+        select: (order) => loadReviewData(getSelectedReviewCandidates(), order.order_id, false),
+      })}
     </div>
   `;
 }
@@ -3377,6 +3524,7 @@ function refreshReviewDynamicRegions() {
   } else if (!app.reviewRead.loading) {
     clearReviewTimeline();
   }
+  mountOrderComboboxes();
   requestAnimationFrame(() => mountGantts());
 }
 
@@ -4450,6 +4598,7 @@ function selectedGraphOrderOption() {
 }
 
 function mountGantts() {
+  mountOrderComboboxes();
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
   const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
   // Destroy orphaned instances: canvas id no longer in the active DOM, or the id exists but
@@ -5785,13 +5934,6 @@ function bindGlobalEvents() {
       updateOptimizeBudgetHint();
       return;
     }
-    if (target.matches("[data-gantt-order-select]")) {
-      if (target.matches("[data-gantt-server-order]")) {
-        return loadPlanGantt(app.planGantt.taskId, app.planGantt.solutionId, target.value);
-      }
-      app.ganttOrderFilter[target.dataset.canvas] = target.value;
-      return renderCurrentPage();
-    }
     if (target.matches("[data-gantt-group-mode]")) {
       app.ganttGroupMode[target.dataset.canvas] = target.value;
       return renderCurrentPage();
@@ -5850,9 +5992,6 @@ function bindGlobalEvents() {
       const value = String(target.value || "").trim();
       if (value) await searchGraphOrderAndRender(value);
       return;
-    }
-    if (target.matches("[data-review-gantt-order]")) {
-      return loadReviewData(getSelectedReviewCandidates(), target.value, false);
     }
     if (target.matches("#workflow-sim-rule")) app.simRule = target.value;
     if (target.matches("#ai-solution-select")) {

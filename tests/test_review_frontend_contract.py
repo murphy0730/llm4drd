@@ -57,10 +57,36 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertNotIn("renderCurrentPage()", JS[start:end])
         self.assertIn("ensureReviewData(getSelectedReviewCandidates())", JS[start:end])
 
-    def test_review_order_change_reuses_utilization(self):
-        start = JS.index('if (target.matches("[data-review-gantt-order]"))')
-        end = JS.index("\n    }", start)
-        self.assertIn("loadReviewData(getSelectedReviewCandidates(), target.value, false)", JS[start:end])
+    def test_order_selectors_use_accessible_fuzzy_combobox(self):
+        for token in (
+            'role="combobox"',
+            'role="listbox"',
+            "aria-expanded",
+            "ORDER_SEARCH_DEBOUNCE_MS = 200",
+            "ORDER_SEARCH_LIMIT = 50",
+            '"ArrowDown"',
+            '"ArrowUp"',
+            '"Enter"',
+            '"Escape"',
+        ):
+            self.assertIn(token, JS)
+        self.assertNotIn("data-review-gantt-order", JS)
+        self.assertNotIn("data-gantt-order-select", JS)
+
+    def test_combobox_selection_paths_preserve_gantt_loading_contracts(self):
+        self.assertIn("ReviewRuntime.rankOrders(", JS)
+        self.assertIn("reviewDataClient.searchOrders(", JS)
+        self.assertIn("api.searchReviewOrders(", JS)
+        self.assertIn("loadReviewData(getSelectedReviewCandidates(), order.order_id, false)", JS)
+        self.assertIn("loadPlanGantt(taskId, solutionId, order.order_id)", JS)
+
+    def test_comboboxes_mount_after_timeline_and_review_region_rendering(self):
+        gantt_start = JS.index("function mountGantts()")
+        gantt_end = JS.index("\nasync function renderCurrentPage(", gantt_start)
+        self.assertIn("mountOrderComboboxes()", JS[gantt_start:gantt_end])
+        review_start = JS.index("function refreshReviewDynamicRegions()")
+        review_end = JS.index("\nfunction renderReview()", review_start)
+        self.assertIn("mountOrderComboboxes()", JS[review_start:review_end])
 
     def test_review_commits_are_guarded_by_request_generation_and_schedule(self):
         self.assertIn("let reviewReadRequestGeneration = 0", JS)
