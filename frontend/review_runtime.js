@@ -147,6 +147,57 @@
     return `${failedNote}<p class="gantt-note">所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p>`;
   }
 
+  function createRecentOrderStore({
+    contextLimit = 24,
+    itemLimit = 8,
+  } = {}) {
+    const normalizeLimit = (value, fallback) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+      return Math.min(1000, Math.max(1, Math.floor(numeric)));
+    };
+    const maxContexts = normalizeLimit(contextLimit, 24);
+    const maxItems = normalizeLimit(itemLimit, 8);
+    const contexts = new Map();
+
+    function read(key) {
+      if (!key || !contexts.has(key)) return [];
+      const orders = contexts.get(key);
+      contexts.delete(key);
+      contexts.set(key, orders);
+      return orders.slice();
+    }
+
+    function record(key, order) {
+      if (!key || !order?.order_id) return;
+      const orderId = String(order.order_id);
+      const existing = contexts.get(key) || [];
+      const orders = [
+        order,
+        ...existing.filter((item) => String(item.order_id) !== orderId),
+      ].slice(0, maxItems);
+      if (contexts.has(key)) contexts.delete(key);
+      contexts.set(key, orders);
+      while (contexts.size > maxContexts) {
+        contexts.delete(contexts.keys().next().value);
+      }
+    }
+
+    function reset() {
+      contexts.clear();
+    }
+
+    function stats() {
+      return {
+        size: contexts.size,
+        keys: Array.from(contexts.keys()),
+        itemSizes: Array.from(contexts.values(), (orders) => orders.length),
+      };
+    }
+
+    return { read, record, reset, stats };
+  }
+
   function createOrderComboboxController({
     search,
     select,
@@ -483,6 +534,7 @@
     rankOrders,
     bindOrderComboboxOpen,
     renderReviewFailureNotes,
+    createRecentOrderStore,
     createOrderComboboxController,
     handleOrderComboboxKey,
     createClient,

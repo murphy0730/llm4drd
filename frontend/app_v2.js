@@ -201,7 +201,10 @@ const app = {
   reviewRead: emptyReviewRead(),
   orderComboboxSources: new Map(),
   orderComboboxMounts: new Map(),
-  orderComboboxRecent: new Map(),
+  orderComboboxRecent: ReviewRuntime.createRecentOrderStore({
+    contextLimit: 24,
+    itemLimit: ORDER_RECENT_LIMIT,
+  }),
 };
 
 function emptyReviewRead() {
@@ -446,14 +449,7 @@ function orderComboboxLabel(order) {
 }
 
 function rememberOrderComboboxSelection(recentKey, order) {
-  if (!recentKey || !order?.order_id) return;
-  const recent = [
-    order,
-    ...asArray(app.orderComboboxRecent.get(recentKey)),
-  ].filter((item, index, items) =>
-    items.findIndex((candidate) => candidate.order_id === item.order_id) === index
-  ).slice(0, ORDER_RECENT_LIMIT);
-  app.orderComboboxRecent.set(recentKey, recent);
+  app.orderComboboxRecent.record(recentKey, order);
 }
 
 function renderOrderCombobox(config) {
@@ -510,7 +506,7 @@ function mountOrderComboboxes() {
     controller = ReviewRuntime.createOrderComboboxController({
       search: source.search,
       current: source.selected,
-      recent: app.orderComboboxRecent.get(source.recentKey) || [],
+      recent: app.orderComboboxRecent.read(source.recentKey),
       select: async (order) => {
         input.value = orderComboboxLabel(order);
         rememberOrderComboboxSelection(source.recentKey, order);
@@ -4889,7 +4885,7 @@ function setImportProgress(state) {
 function resetInstanceDerivedState() {
   invalidateReviewReadRequest();
   reviewDataClient.reset();
-  app.orderComboboxRecent.clear();
+  app.orderComboboxRecent.reset();
   app.reviewRead = emptyReviewRead();
   app.pendingGantts.delete("gantt-review-compare");
   app.ganttViewWindows = {};

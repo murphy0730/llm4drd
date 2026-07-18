@@ -95,10 +95,17 @@ class ReviewFrontendContractTests(unittest.TestCase):
         mount_end = JS.index("\nfunction formatNumber", mount_start)
         mount_source = JS[mount_start:mount_end]
         self.assertIn("ReviewRuntime.bindOrderComboboxOpen(input, controller)", mount_source)
-        self.assertIn("orderComboboxRecent", JS)
+        self.assertIn(
+            "orderComboboxRecent: ReviewRuntime.createRecentOrderStore({",
+            JS,
+        )
+        self.assertIn("contextLimit: 24", JS)
+        self.assertIn("itemLimit: ORDER_RECENT_LIMIT", JS)
+        self.assertIn("app.orderComboboxRecent.record(recentKey, order)", JS)
+        self.assertIn("app.orderComboboxRecent.read(source.recentKey)", mount_source)
         reset_start = JS.index("function resetInstanceDerivedState()")
         reset_end = JS.index("\nfunction ", reset_start)
-        self.assertIn("app.orderComboboxRecent.clear()", JS[reset_start:reset_end])
+        self.assertIn("app.orderComboboxRecent.reset()", JS[reset_start:reset_end])
 
     def test_order_combobox_recent_keys_cover_all_three_data_contexts(self):
         for context in (

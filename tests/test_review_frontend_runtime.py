@@ -156,6 +156,52 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
+    def test_recent_order_store_is_bounded_lru_deduped_and_resettable(self):
+        self._run_node(
+            """
+            const store = runtime.createRecentOrderStore({
+              contextLimit: 2,
+              itemLimit: 3
+            });
+            assert.deepStrictEqual(store.read("missing"), []);
+            assert.deepStrictEqual(store.stats(), {
+              size: 0,
+              keys: [],
+              itemSizes: []
+            });
+            store.record("ignored", null);
+            assert.strictEqual(store.stats().size, 0);
+
+            store.record("ctx-a", {order_id: "A-1", order_name: "旧"});
+            store.record("ctx-a", {order_id: "A-2", order_name: "二"});
+            store.record("ctx-a", {order_id: "A-1", order_name: "新"});
+            store.record("ctx-a", {order_id: "A-3", order_name: "三"});
+            store.record("ctx-a", {order_id: "A-4", order_name: "四"});
+            assert.deepStrictEqual(
+              store.read("ctx-a").map((item) => [item.order_id, item.order_name]),
+              [["A-4", "四"], ["A-3", "三"], ["A-1", "新"]]
+            );
+
+            store.record("ctx-b", {order_id: "B-1"});
+            store.read("ctx-a"); // Refresh ctx-a so ctx-b becomes oldest.
+            store.record("ctx-c", {order_id: "C-1"});
+            assert.deepStrictEqual(store.stats(), {
+              size: 2,
+              keys: ["ctx-a", "ctx-c"],
+              itemSizes: [3, 1]
+            });
+            assert.deepStrictEqual(store.read("ctx-b"), []);
+            assert.strictEqual(store.stats().size, 2);
+
+            store.reset();
+            assert.deepStrictEqual(store.stats(), {
+              size: 0,
+              keys: [],
+              itemSizes: []
+            });
+            """
+        )
+
     def test_real_focus_and_click_events_use_shared_binding_without_double_search(self):
         self._run_node(
             """
