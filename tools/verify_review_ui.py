@@ -23,6 +23,12 @@ from llm4drd.tests.shop_fixtures import make_graph_context_shop
 
 REVIEW_DATA_PATH = "/review-data"
 ORDER_IDS = ("ORD-ALPHA-100", "ORD-BETA-200", "ORD-GAMMA-300")
+LONG_SCHEME_NAMES = (
+    "关键设备交期平衡与换型损失控制方案（第一候选）",
+    "多资源协同和主订单准交保障优化方案（第二候选）",
+    "瓶颈机群优先与在制品压降联合方案（第三候选）",
+    "人员负荷均衡和关键工序风险控制方案（第四候选）",
+)
 PERCENT_RE = re.compile(r"^-?\d+(?:\.\d+)?%$|^-$")
 
 
@@ -59,8 +65,7 @@ def prepare_fixture_database(db_path: Path) -> None:
     init_db(str(db_path))
     InstanceStore(str(db_path)).save_from_shopfloor(shop)
 
-    solutions = []
-    export_solutions = []
+    reference_solutions = []
     for index in range(4):
         solution_id = f"VERIFY-S-{index + 1}"
         objectives = {
@@ -82,15 +87,16 @@ def prepare_fixture_database(db_path: Path) -> None:
         }
         candidate = {
             "solution_id": solution_id,
-            "source": "pareto",
+            "rule_name": LONG_SCHEME_NAMES[index],
+            "source": "reference",
             "feasible": True,
             "evaluation_mode": "exact",
             "objectives": objectives,
             "metrics": objectives,
             "summary": summary,
+            "schedule": _schedule(index),
         }
-        solutions.append(candidate)
-        export_solutions.append({**candidate, "schedule": _schedule(index)})
+        reference_solutions.append(candidate)
 
     task_id = "review-ui-verification"
     task = {
@@ -102,14 +108,14 @@ def prepare_fixture_database(db_path: Path) -> None:
                 "makespan",
                 "avg_net_available_utilization",
             ],
-            "solutions": solutions,
+            "solutions": [],
             "archive_size": 4,
             "found_solution_count": 4,
             "generations_completed": 1,
             "elapsed_s": 0.1,
         },
-        "export_result": {"solutions": export_solutions},
-        "reference_solutions": [],
+        "export_result": {"solutions": [], "reference_solutions": reference_solutions},
+        "reference_solutions": reference_solutions,
     }
     workflow = WorkflowProgressStore(str(db_path))
     workflow.save("validation", {
@@ -122,8 +128,8 @@ def prepare_fixture_database(db_path: Path) -> None:
     })
     workflow.save("optimization", {"task_id": task_id, "task": task})
     workflow.save("review", {
-        "selection": [item["solution_id"] for item in solutions],
-        "detail_id": solutions[0]["solution_id"],
+        "selection": [item["solution_id"] for item in reference_solutions],
+        "detail_id": reference_solutions[0]["solution_id"],
         "ai_recommended_id": None,
     })
 
@@ -206,7 +212,7 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
         if channel:
             launch_options["channel"] = channel
         browser = await playwright.chromium.launch(**launch_options)
-        page = await browser.new_page(viewport={"width": 1680, "height": 1050})
+        page = await browser.new_page(viewport={"width": 1180, "height": 900})
         page.on(
             "console",
             lambda message: console_errors.append(message.text)
@@ -275,29 +281,79 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 header_evidence,
             ))
 
-            utilization = await page.locator(
+            utilization_table = page.locator(
                 "#review-utilization-region .util-table"
-            ).evaluate(
+            )
+            await utilization_table.scroll_into_view_if_needed()
+            utilization = await utilization_table.evaluate(
                 """table => {
+                    const shell = table.closest(".table-shell");
+                    shell.scrollLeft = shell.scrollWidth;
                     const headers = Array.from(table.querySelectorAll("thead th"));
                     const cells = Array.from(
                         table.querySelectorAll("tbody tr td:not(:first-child)")
                     ).map(cell => cell.innerText.trim());
-                    const headerEvidence = headers.map(header => {
+                    const inside = (inner, outer) => (
+                        inner.left >= outer.left - 1 &&
+                        inner.right <= outer.right + 1 &&
+                        inner.top >= outer.top - 1 &&
+                        inner.bottom <= outer.bottom + 1
+                    );
+                    const intersects = (inner, outer) => (
+                        inner.right > outer.left + 1 &&
+                        inner.left < outer.right - 1 &&
+                        inner.bottom > outer.top + 1 &&
+                        inner.top < outer.bottom - 1
+                    );
+                    const headerEvidence = headers.slice(1).map(header => {
                         const rect = header.getBoundingClientRect();
                         const name = header.querySelector(".util-plan-name");
+                        const nameRect = name.getBoundingClientRect();
+                        const lineRects = Array.from(name.getClientRects())
+                            .filter(line => line.width > 0 && line.height > 0);
                         return {
                             text: header.innerText.trim(),
                             width: rect.width,
+                            height: rect.height,
                             scrollWidth: header.scrollWidth,
                             clientWidth: header.clientWidth,
+                            scrollHeight: header.scrollHeight,
+                            clientHeight: header.clientHeight,
+                            lineCount: lineRects.length,
+                            textBoundsInsideHeader: inside(nameRect, rect),
                             titleMatches: !name || name.title === name.textContent.trim(),
+                        };
+                    });
+                    const shellRect = shell.getBoundingClientRect();
+                    const laterHeaderRects = headers.slice(-2).map(header => {
+                        const rect = header.getBoundingClientRect();
+                        return {
+                            text: header.innerText.trim(),
+                            fullyVisible: inside(rect, shellRect),
+                            intersects: intersects(rect, shellRect),
+                        };
+                    });
+                    const laterCellRects = Array.from(
+                        table.querySelectorAll("tbody tr")
+                    ).flatMap(row => Array.from(row.cells).slice(-2)).map(cell => {
+                        const rect = cell.getBoundingClientRect();
+                        return {
+                            text: cell.innerText.trim(),
+                            fullyVisible: inside(rect, shellRect),
+                            intersects: intersects(rect, shellRect),
                         };
                     });
                     return {
                         headerEvidence,
+                        laterHeaderRects,
+                        laterCellRects,
                         cells,
                         machineTypeWidth: headers[0]?.getBoundingClientRect().width || 0,
+                        shell: {
+                            clientWidth: shell.clientWidth,
+                            scrollWidth: shell.scrollWidth,
+                            scrollLeft: shell.scrollLeft,
+                        },
                     };
                 }"""
             )
@@ -312,16 +368,31 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
             ))
             headers_ok = bool(utilization["headerEvidence"]) and all(
                 item["scrollWidth"] <= item["clientWidth"] + 1
+                and item["scrollHeight"] <= item["clientHeight"] + 1
+                and item["height"] >= 44
+                and item["lineCount"] >= 2
+                and item["textBoundsInsideHeader"]
                 and item["titleMatches"]
+                and len(item["text"]) >= 20
                 for item in utilization["headerEvidence"]
+            ) and all(
+                item["fullyVisible"] for item in utilization["laterHeaderRects"]
+            ) and all(
+                item["fullyVisible"] for item in utilization["laterCellRects"]
             )
             checks.append(Check(
                 "utilization_headers_unclipped",
                 headers_ok,
-                f'machine type width={utilization["machineTypeWidth"]:.1f}px',
+                (
+                    f'machine type width={utilization["machineTypeWidth"]:.1f}px, '
+                    f'viewport=1180px, plans={len(utilization["headerEvidence"])}'
+                ),
                 {
                     "headers": utilization["headerEvidence"],
+                    "laterHeaders": utilization["laterHeaderRects"],
+                    "laterCells": utilization["laterCellRects"],
                     "machineTypeWidth": utilization["machineTypeWidth"],
+                    "tableScrollViewport": utilization["shell"],
                 },
             ))
 
@@ -374,32 +445,87 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
             ))
 
             first_delayed = True
+            first_intercepted = asyncio.Event()
+            first_lifecycle_done = asyncio.Event()
+            first_lifecycle = {
+                "url": None,
+                "routeReleased": False,
+                "routeReleaseError": None,
+                "outcome": None,
+                "failure": None,
+            }
+
+            def is_delayed_first(request) -> bool:
+                query = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(request.url).query
+                )
+                return (
+                    urllib.parse.urlparse(request.url).path.endswith(REVIEW_DATA_PATH)
+                    and query.get("order_id") == ["ORD-ALPHA-100"]
+                )
+
+            def record_first_lifecycle(request, outcome: str) -> None:
+                if (
+                    first_lifecycle["outcome"] is not None
+                    or not is_delayed_first(request)
+                ):
+                    return
+                first_lifecycle["outcome"] = outcome
+                first_lifecycle["failure"] = (
+                    request.failure if outcome == "failed" else None
+                )
+                first_lifecycle["completedAt"] = time.perf_counter()
+                first_lifecycle_done.set()
+
+            page.on(
+                "requestfinished",
+                lambda request: record_first_lifecycle(request, "finished"),
+            )
+            page.on(
+                "requestfailed",
+                lambda request: record_first_lifecycle(request, "failed"),
+            )
 
             async def delay_first_order(route, request):
                 nonlocal first_delayed
-                query = urllib.parse.parse_qs(urllib.parse.urlparse(request.url).query)
-                if (
-                    first_delayed
-                    and query.get("order_id") == ["ORD-ALPHA-100"]
-                ):
+                if first_delayed and is_delayed_first(request):
                     first_delayed = False
+                    first_lifecycle["url"] = request.url
+                    first_lifecycle["interceptedAt"] = time.perf_counter()
+                    first_intercepted.set()
                     await asyncio.sleep(0.75)
                 try:
                     await route.continue_()
-                except Exception:
-                    # A second selection intentionally aborts the delayed request.
-                    pass
+                    if is_delayed_first(request):
+                        first_lifecycle["routeReleased"] = True
+                except Exception as error:  # noqa: BLE001
+                    if is_delayed_first(request):
+                        first_lifecycle["routeReleaseError"] = (
+                            f"{type(error).__name__}: {error}"
+                        )
 
             await page.route("**/review-data?*", delay_first_order)
             console_errors.clear()
             page_errors.clear()
             rapid_started = time.perf_counter()
             await _select_order_with_keyboard(page, "ALPHA")
-            await page.wait_for_function(
-                "() => app.reviewRead.loading === true",
-                timeout=5_000,
+            await asyncio.wait_for(
+                first_intercepted.wait(),
+                timeout=5,
             )
             await _choose_order(page, "GAMMA", "ORD-GAMMA-300")
+            await asyncio.wait_for(
+                first_lifecycle_done.wait(),
+                timeout=5,
+            )
+            await page.wait_for_function(
+                """() => (
+                    app.reviewRead.orderId === "ORD-GAMMA-300" &&
+                    !app.reviewRead.loading
+                )""",
+                timeout=5_000,
+            )
+            await page.wait_for_timeout(100)
             rapid_elapsed_ms = (time.perf_counter() - rapid_started) * 1000
             final_state = await page.evaluate(
                 """() => ({
@@ -410,7 +536,10 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 })"""
             )
             rapid_ok = (
-                final_state["orderId"] == "ORD-GAMMA-300"
+                first_intercepted.is_set()
+                and first_lifecycle_done.is_set()
+                and first_lifecycle["outcome"] in {"finished", "failed"}
+                and final_state["orderId"] == "ORD-GAMMA-300"
                 and "ORD-GAMMA-300" in final_state["inputValue"]
                 and not console_errors
                 and not page_errors
@@ -426,6 +555,23 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 {
                     **final_state,
                     "elapsedMs": round(rapid_elapsed_ms, 3),
+                    "firstRequestLifecycle": {
+                        **first_lifecycle,
+                        "interceptedAt": round(
+                            (
+                                first_lifecycle.get("interceptedAt", rapid_started)
+                                - rapid_started
+                            ) * 1000,
+                            3,
+                        ),
+                        "completedAt": round(
+                            (
+                                first_lifecycle.get("completedAt", rapid_started)
+                                - rapid_started
+                            ) * 1000,
+                            3,
+                        ),
+                    },
                     "consoleErrors": console_errors,
                     "pageErrors": page_errors,
                 },
