@@ -804,15 +804,107 @@ a {
   color: var(--text-faint);
 }
 
-.heuristic-select {
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--text);
+/* 方案对比表：勾选列 / 方案名副标题 / 操作列 / 勾选行方案色高亮 */
+.compare-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   background: var(--surface, #fff);
 }
+.compare-table .compare-check { width: 40px; text-align: center; }
+.compare-table .compare-name strong { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.compare-table .compare-name small { display: block; margin-top: 2px; color: var(--text-faint); font-size: 11px; }
+.compare-table .compare-ops { white-space: nowrap; }
+.compare-table tbody tr.is-selected { box-shadow: inset 3px 0 0 var(--scheme-color, var(--primary)); }
+.compare-table tbody tr.scheme-c-0 { --scheme-color: var(--primary); }
+.compare-table tbody tr.scheme-c-1 { --scheme-color: var(--accent); }
+.compare-table tbody tr.scheme-c-2 { --scheme-color: var(--success); }
+.compare-table tbody tr.scheme-c-3 { --scheme-color: var(--info); }
+.compare-table tbody tr.is-selected { background: color-mix(in srgb, var(--scheme-color) 8%, transparent); }
+
+.op-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.op-btn:hover { border-color: var(--primary); color: var(--primary); background: rgba(15, 76, 129, 0.06); }
+
+/* 勾选集稳定色板：色点（对比表方案名、利用率列头、甘特图例通用） */
+.scheme-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.scheme-dot.scheme-c-0 { background: var(--primary); }
+.scheme-dot.scheme-c-1 { background: var(--accent); }
+.scheme-dot.scheme-c-2 { background: var(--success); }
+.scheme-dot.scheme-c-3 { background: var(--info); }
+.legend-swatch.scheme-c-0 { background: var(--primary); }
+.legend-swatch.scheme-c-1 { background: var(--accent); }
+.legend-swatch.scheme-c-2 { background: var(--success); }
+.legend-swatch.scheme-c-3 { background: var(--info); }
+
+/* 方案池：启发式规则 chip 选择器 */
+.pool-hint { margin: 6px 0 10px; color: var(--text-soft); font-size: 12px; }
+.gantt-note { margin: 4px 0 8px; color: var(--warning, var(--accent)); font-size: 12px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.chip:hover:not([disabled]) { border-color: var(--primary); color: var(--primary); }
+.chip[disabled] { cursor: default; }
+.chip .chip-badge { font-size: 10px; font-weight: 700; opacity: 0.85; }
+/* 已就绪：缓存命中，即刻纳入对比 */
+.chip.is-ready { border-color: transparent; background: rgba(25, 113, 82, 0.12); color: var(--success); }
+.chip.is-ready::before { content: "✓"; font-size: 11px; }
+/* 未计算：首次点击触发仿真 */
+.chip.is-uncached { border-style: dashed; color: var(--text-faint); }
+.chip.is-uncached .chip-badge { color: var(--text-faint); }
+.chip.is-uncached::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); }
+/* 计算中：spinner */
+.chip.is-computing { color: var(--accent); border-color: var(--accent-soft); }
+.chip.is-computing::before {
+  content: ""; width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid var(--accent-soft); border-top-color: var(--accent);
+  animation: chip-spin 0.7s linear infinite;
+}
+@keyframes chip-spin { to { transform: rotate(360deg); } }
+/* 基线：已作为基线方案行，chip 仅作提示不可再加载 */
+.chip.is-baseline { color: var(--text-faint); background: var(--surface-strong, #f4f6f9); }
+.chip.is-baseline .chip-badge { color: var(--text-faint); }
+
+/* 机器分类利用率表：固定列宽收敛，4 方案对比不出横向滚动 */
+.util-table { table-layout: fixed; }
+.util-col-type { width: 200px; }
+.util-col-plan { width: 120px; }
+.util-table th, .util-table td { padding: 8px 10px; }
+.util-table .util-plan-name {
+  display: inline-block; max-width: 90px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+.util-table .cell-sub { font-size: 11px; white-space: nowrap; }
+.util-table td:not(:first-child), .util-table th:not(:first-child) { text-align: right; }
+.util-table td:not(:first-child) .cell-sub { text-align: right; }
+.util-bar { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: rgba(15, 76, 129, 0.10); overflow: hidden; }
+.util-bar-fill { display: block; height: 100%; border-radius: 2px; }
 
 .table-shell {
   overflow: auto;
@@ -2094,6 +2186,11 @@ a {
 .gantt-canvas .vis-item.status-completed { background: linear-gradient(135deg, #7e8da0, #566779); }
 .gantt-canvas .vis-item.status-processing { background: linear-gradient(135deg, var(--accent-soft), var(--accent)); }
 .gantt-canvas .vis-item.status-future { background: linear-gradient(135deg, var(--primary), #3479b4); }
+/* 勾选集甘特联动：条块按方案色板（与对比表 / 利用率列头一致） */
+.gantt-canvas .vis-item.scheme-c-0 { background: var(--primary); }
+.gantt-canvas .vis-item.scheme-c-1 { background: var(--accent); }
+.gantt-canvas .vis-item.scheme-c-2 { background: var(--success); }
+.gantt-canvas .vis-item.scheme-c-3 { background: var(--info); }
 .gantt-canvas .vis-item .vis-item-content { padding: 2px 6px; font-weight: 700; }
 
 /* 背景遮罩：复用现有斜纹 */
