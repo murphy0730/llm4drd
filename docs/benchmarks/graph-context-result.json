@@ -1,7 +1,7 @@
 {
   "acceptance": {
     "failures": [
-      "500: SQLite warm initialization speedup 1.82x < 2.00x"
+      "500: SQLite warm initialization speedup 1.81x < 2.00x"
     ],
     "passed": false,
     "speedup_sizes": [
@@ -10,17 +10,17 @@
     ]
   },
   "baseline_reference": {
-    "commit_hash": "44755d657a821290f5557a252a06e18f760cada1",
-    "generated_at": "2026-07-16T12:42:20.424278+00:00"
+    "commit_hash": "7804fa49217255ad2abd85814571593568c7cfdd",
+    "generated_at": "2026-07-16T11:40:33.200170+00:00"
   },
   "environment": {
-    "commit_hash": "44755d657a821290f5557a252a06e18f760cada1",
+    "commit_hash": "7804fa49217255ad2abd85814571593568c7cfdd",
     "cpu_count": 10,
     "platform": "macOS-26.3-arm64-arm-64bit-Mach-O",
     "processor": "arm",
     "python_version": "3.14.3"
   },
-  "generated_at": "2026-07-16T12:53:51.510563+00:00",
+  "generated_at": "2026-07-16T11:44:12.456825+00:00",
   "mode": "compare",
   "parameters": {
     "runs": 7,
@@ -36,344 +36,344 @@
     "2500": {
       "active_end_to_end": {
         "elapsed_seconds_samples": [
-          3.806401667,
-          3.788611041,
-          3.796634416,
-          3.796724334,
-          3.784982958,
-          3.808486041,
-          3.879225042
+          4.10104025,
+          3.903899709,
+          3.952934,
+          4.053590291,
+          4.163293417,
+          3.933099666,
+          3.901658458
         ],
-        "median_elapsed_seconds": 3.796724334,
-        "median_peak_memory_bytes": 44747930,
+        "median_elapsed_seconds": 3.952934,
+        "median_peak_memory_bytes": 44744274,
         "peak_memory_bytes_samples": [
-          44747930,
-          44747930,
-          44747930,
-          44747930,
-          44747930,
-          44747930,
-          44747930
+          44744274,
+          44744274,
+          44744274,
+          44744274,
+          44744274,
+          44744274,
+          44744274
         ],
         "signature_samples": [
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba"
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550"
         ]
       },
       "cold_build_and_sqlite_write": {
         "elapsed_seconds_samples": [
-          0.208425958,
-          0.211427416,
-          0.211122083,
-          0.211313917,
-          0.210877125,
-          0.210619209,
-          0.209539292
+          0.233475375,
+          0.214198041,
+          0.226082166,
+          0.212855875,
+          0.214857791,
+          0.213764667,
+          0.213193458
         ],
-        "median_elapsed_seconds": 0.210877125,
-        "median_peak_memory_bytes": 20432568,
+        "median_elapsed_seconds": 0.214198041,
+        "median_peak_memory_bytes": 20332518,
         "peak_memory_bytes_samples": [
-          20432568,
-          20432568,
-          20432568,
-          20432568,
-          20432568,
-          20432568,
-          20432568
+          20332518,
+          20332518,
+          20332518,
+          20332518,
+          20332518,
+          20332518,
+          20332518
         ]
       },
       "derived": {
-        "l1_warm_initialization_speedup": 2.9293,
+        "l1_warm_initialization_speedup": 3.0105,
         "peak_memory_ratio": 0.8244,
-        "runtime_regression_percent": -2.3532,
+        "runtime_regression_percent": -3.4204,
         "signatures_equal": true,
-        "sqlite_warm_initialization_speedup": 2.1705
+        "sqlite_warm_initialization_speedup": 2.2504
       },
       "l1_hit_and_optimizer_initialization": {
         "elapsed_seconds_samples": [
-          0.030641,
-          0.031140709,
-          0.03094625,
-          0.031476083,
-          0.031207459,
-          0.03094575,
-          0.031269791
+          0.032396458,
+          0.031282292,
+          0.031601375,
+          0.031582458,
+          0.031017375,
+          0.031455334,
+          0.033123125
         ],
-        "median_elapsed_seconds": 0.031140709,
-        "median_peak_memory_bytes": 8264666,
+        "median_elapsed_seconds": 0.031582458,
+        "median_peak_memory_bytes": 8164666,
         "peak_memory_bytes_samples": [
-          8264666,
-          8264666,
-          8264666,
-          8264666,
-          8264666,
-          8264666,
-          8264666
+          8164666,
+          8164666,
+          8164666,
+          8164666,
+          8164666,
+          8164666,
+          8164666
         ]
       },
       "legacy_end_to_end": {
         "elapsed_seconds_samples": [
-          3.870138916,
-          3.909927417,
-          3.868331416,
-          3.895795917,
-          3.942170666,
-          3.888220709,
-          3.859325
+          4.199491125,
+          4.124191458,
+          4.045150084,
+          4.090840042,
+          4.092926583,
+          4.301442042,
+          4.034568958
         ],
-        "median_elapsed_seconds": 3.888220709,
-        "median_peak_memory_bytes": 54277520,
+        "median_elapsed_seconds": 4.092926583,
+        "median_peak_memory_bytes": 54274032,
         "peak_memory_bytes_samples": [
-          54277520,
-          54277470,
-          54277520,
-          54277520,
-          54277520,
-          54277520,
-          54277420
+          54274032,
+          54274032,
+          54274032,
+          54274032,
+          54274032,
+          54273982,
+          54274032
         ],
         "signature_samples": [
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba",
-          "c92a845a6aa4063903640212a33182e5a7df898fda096e4aab8fe34f13de56ba"
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550",
+          "f922a662c3d71a8176641cbc1fad1392859facc9b5cd40d7824f6281858ba550"
         ]
       },
       "legacy_initialization": {
         "elapsed_seconds_samples": [
-          0.090660708,
-          0.09207325,
-          0.091220375,
-          0.090610833,
-          0.091016208,
-          0.091457083,
-          0.091946625
+          0.091689709,
+          0.096692292,
+          0.09463625,
+          0.098663709,
+          0.095078875,
+          0.095069,
+          0.095519083
         ],
-        "median_elapsed_seconds": 0.091220375,
-        "median_peak_memory_bytes": 19501184,
+        "median_elapsed_seconds": 0.095078875,
+        "median_peak_memory_bytes": 19342574,
         "peak_memory_bytes_samples": [
-          19501184,
-          19501184,
-          19501184,
-          19501184,
-          19501184,
-          19501184,
-          19501184
+          19342574,
+          19342574,
+          19342574,
+          19342574,
+          19342574,
+          19342574,
+          19342574
         ]
       },
       "operation_count": 2500,
       "sqlite_load_and_optimizer_initialization": {
         "elapsed_seconds_samples": [
-          0.041568167,
-          0.042653625,
-          0.041571208,
-          0.042274,
-          0.042026958,
-          0.041770167,
-          0.042178833
+          0.042199,
+          0.042381625,
+          0.042785584,
+          0.043050625,
+          0.04111375,
+          0.042249791,
+          0.04210575
         ],
-        "median_elapsed_seconds": 0.042026958,
-        "median_peak_memory_bytes": 8266626,
+        "median_elapsed_seconds": 0.042249791,
+        "median_peak_memory_bytes": 8166626,
         "peak_memory_bytes_samples": [
-          8266626,
-          8266626,
-          8266626,
-          8266626,
-          8266626,
-          8266626,
-          8266626
+          8166626,
+          8166626,
+          8166626,
+          8166626,
+          8166626,
+          8166626,
+          8166626
         ]
       }
     },
     "500": {
       "active_end_to_end": {
         "elapsed_seconds_samples": [
-          0.451192209,
-          0.4526325,
-          0.455367667,
-          0.454526834,
-          0.455176458,
-          0.451346625,
-          0.455524625
+          0.468446125,
+          0.491260875,
+          0.480225834,
+          0.466800083,
+          0.467010625,
+          0.465382125,
+          0.474674542
         ],
-        "median_elapsed_seconds": 0.454526834,
-        "median_peak_memory_bytes": 9395520,
+        "median_elapsed_seconds": 0.468446125,
+        "median_peak_memory_bytes": 9395788,
         "peak_memory_bytes_samples": [
-          9395520,
-          9395370,
-          9395520,
-          9395320,
-          9395620,
-          9395620,
-          9395770
+          9395488,
+          9395388,
+          9395388,
+          9395888,
+          9395788,
+          9395838,
+          9395788
         ],
         "signature_samples": [
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28"
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3"
         ]
       },
       "cold_build_and_sqlite_write": {
         "elapsed_seconds_samples": [
-          0.042383167,
-          0.042499625,
-          0.042187958,
-          0.04242075,
-          0.042212333,
-          0.042895334,
-          0.042091875
+          0.0431655,
+          0.04311175,
+          0.051216584,
+          0.042536833,
+          0.042985375,
+          0.043253042,
+          0.042624958
         ],
-        "median_elapsed_seconds": 0.042383167,
-        "median_peak_memory_bytes": 4276981,
+        "median_elapsed_seconds": 0.04311175,
+        "median_peak_memory_bytes": 4257273,
         "peak_memory_bytes_samples": [
-          4277121,
-          4276905,
-          4276981,
-          4277123,
-          4276823,
-          4276973,
-          4277123
+          4257271,
+          4257305,
+          4257081,
+          4257423,
+          4257273,
+          4257273,
+          4257523
         ]
       },
       "derived": {
-        "l1_warm_initialization_speedup": 2.4091,
+        "l1_warm_initialization_speedup": 2.423,
         "peak_memory_ratio": 0.8252,
-        "runtime_regression_percent": -2.5535,
+        "runtime_regression_percent": -3.6335,
         "signatures_equal": true,
-        "sqlite_warm_initialization_speedup": 1.8233
+        "sqlite_warm_initialization_speedup": 1.8067
       },
       "l1_hit_and_optimizer_initialization": {
         "elapsed_seconds_samples": [
-          0.007764084,
-          0.008005083,
-          0.007762958,
-          0.007752209,
-          0.007640834,
-          0.007672583,
-          0.007724667
+          0.00824475,
+          0.007674458,
+          0.007627042,
+          0.007774042,
+          0.007745625,
+          0.007830791,
+          0.007821
         ],
-        "median_elapsed_seconds": 0.007752209,
-        "median_peak_memory_bytes": 1925118,
+        "median_elapsed_seconds": 0.007774042,
+        "median_peak_memory_bytes": 1905118,
         "peak_memory_bytes_samples": [
-          1925118,
-          1925118,
-          1925118,
-          1925118,
-          1925118,
-          1925118,
-          1925118
+          1905118,
+          1905118,
+          1905118,
+          1905118,
+          1905118,
+          1905118,
+          1905118
         ]
       },
       "legacy_end_to_end": {
         "elapsed_seconds_samples": [
-          0.467053041,
-          0.467385125,
-          0.466437292,
-          0.466080042,
-          0.46456175,
-          0.46598725,
-          0.469237583
+          0.5944375,
+          0.481306709,
+          0.51038375,
+          0.492700083,
+          0.474054792,
+          0.486108709,
+          0.481016042
         ],
-        "median_elapsed_seconds": 0.466437292,
-        "median_peak_memory_bytes": 11385878,
+        "median_elapsed_seconds": 0.486108709,
+        "median_peak_memory_bytes": 11386286,
         "peak_memory_bytes_samples": [
-          11385878,
-          11385778,
-          11385878,
-          11385828,
-          11385678,
-          11385928,
-          11385878
+          11386486,
+          11386136,
+          11386386,
+          11386286,
+          11386236,
+          11386286,
+          11386386
         ],
         "signature_samples": [
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28",
-          "cba75b8e4e533e095af3d9be411184154d80bd426e2d70c61ced9a3e1672ef28"
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3",
+          "3a42efb003c12987f50d62591acd603830a8a92d76434dea6b88f2b9a7b23be3"
         ]
       },
       "legacy_initialization": {
         "elapsed_seconds_samples": [
-          0.018966417,
-          0.018456167,
-          0.01869525,
-          0.018700333,
-          0.018675875,
-          0.018111708,
-          0.018406083
+          0.018822125,
+          0.019633875,
+          0.018836375,
+          0.018915542,
+          0.018683791,
+          0.018806958,
+          0.019335458
         ],
-        "median_elapsed_seconds": 0.018675875,
-        "median_peak_memory_bytes": 4242186,
+        "median_elapsed_seconds": 0.018836375,
+        "median_peak_memory_bytes": 4210786,
         "peak_memory_bytes_samples": [
-          4242036,
-          4242286,
-          4242536,
-          4242336,
-          4241436,
-          4241936,
-          4242186
+          4210786,
+          4211286,
+          4211536,
+          4210586,
+          4210536,
+          4210736,
+          4211186
         ]
       },
       "operation_count": 500,
       "sqlite_load_and_optimizer_initialization": {
         "elapsed_seconds_samples": [
-          0.010287458,
-          0.010287167,
-          0.010299625,
-          0.0101695,
-          0.010242958,
-          0.010158625,
-          0.010237292
+          0.010250041,
+          0.010426125,
+          0.010518167,
+          0.010391041,
+          0.010368125,
+          0.0104825,
+          0.01148575
         ],
-        "median_elapsed_seconds": 0.010242958,
-        "median_peak_memory_bytes": 1927078,
+        "median_elapsed_seconds": 0.010426125,
+        "median_peak_memory_bytes": 1907078,
         "peak_memory_bytes_samples": [
-          1927078,
-          1927078,
-          1927078,
-          1927078,
-          1927078,
-          1927078,
-          1927078
+          1907078,
+          1907078,
+          1907078,
+          1907078,
+          1907078,
+          1907078,
+          1907078
         ]
       }
     },
     "80": {
       "active_end_to_end": {
         "elapsed_seconds_samples": [
-          0.075250333,
-          0.075144459,
-          0.074399708,
-          0.075439416,
-          0.075521875,
-          0.074638875,
-          0.074362291
+          0.076955458,
+          0.090882541,
+          0.0753905,
+          0.076020709,
+          0.075533583,
+          0.079428,
+          0.076819375
         ],
-        "median_elapsed_seconds": 0.075144459,
-        "median_peak_memory_bytes": 1827070,
+        "median_elapsed_seconds": 0.076819375,
+        "median_peak_memory_bytes": 1826970,
         "peak_memory_bytes_samples": [
-          1827320,
-          1827420,
-          1827870,
-          1825570,
-          1826870,
-          1827070,
-          1824820
+          1826820,
+          1827620,
+          1828220,
+          1826220,
+          1826420,
+          1826970,
+          1828270
         ],
         "signature_samples": [
           "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
@@ -387,75 +387,75 @@
       },
       "cold_build_and_sqlite_write": {
         "elapsed_seconds_samples": [
-          0.01017925,
-          0.01020075,
-          0.010448333,
-          0.010120042,
-          0.010333625,
-          0.010142791,
-          0.010477583
+          0.010528459,
+          0.010361541,
+          0.010799208,
+          0.01048275,
+          0.010455792,
+          0.01061,
+          0.010550416
         ],
-        "median_elapsed_seconds": 0.01020075,
-        "median_peak_memory_bytes": 1026431,
+        "median_elapsed_seconds": 0.010528459,
+        "median_peak_memory_bytes": 1023293,
         "peak_memory_bytes_samples": [
-          1026873,
-          1026753,
-          1026393,
-          1026631,
-          1026235,
-          1026431,
-          1026019
+          1024073,
+          1022303,
+          1023293,
+          1023231,
+          1023485,
+          1023381,
+          1022169
         ]
       },
       "derived": {
-        "l1_warm_initialization_speedup": 1.5808,
-        "peak_memory_ratio": 0.8273,
-        "runtime_regression_percent": -0.9696,
+        "l1_warm_initialization_speedup": 1.6057,
+        "peak_memory_ratio": 0.8274,
+        "runtime_regression_percent": -1.1093,
         "signatures_equal": true,
-        "sqlite_warm_initialization_speedup": 1.188
+        "sqlite_warm_initialization_speedup": 1.1875
       },
       "l1_hit_and_optimizer_initialization": {
         "elapsed_seconds_samples": [
-          0.002999458,
-          0.002972958,
-          0.002997625,
-          0.00291025,
-          0.002892834,
-          0.002887583,
-          0.002900292
+          0.002950625,
+          0.00308075,
+          0.003268042,
+          0.002935625,
+          0.003064875,
+          0.002939334,
+          0.002982166
         ],
-        "median_elapsed_seconds": 0.00291025,
-        "median_peak_memory_bytes": 594034,
+        "median_elapsed_seconds": 0.002982166,
+        "median_peak_memory_bytes": 590834,
         "peak_memory_bytes_samples": [
-          594034,
-          594034,
-          594034,
-          594034,
-          594034,
-          594034,
-          594034
+          590834,
+          590834,
+          590834,
+          590834,
+          590834,
+          590784,
+          590834
         ]
       },
       "legacy_end_to_end": {
         "elapsed_seconds_samples": [
-          0.075880208,
-          0.076499125,
-          0.075470542,
-          0.076126334,
-          0.07547875,
-          0.07684175,
-          0.075731917
+          0.077408209,
+          0.077367167,
+          0.099131167,
+          0.077681083,
+          0.078333125,
+          0.078229667,
+          0.077449167
         ],
-        "median_elapsed_seconds": 0.075880208,
-        "median_peak_memory_bytes": 2208360,
+        "median_elapsed_seconds": 0.077681083,
+        "median_peak_memory_bytes": 2208120,
         "peak_memory_bytes_samples": [
-          2207446,
-          2207798,
-          2208934,
-          2208360,
-          2208644,
-          2207586,
-          2209036
+          2208456,
+          2208158,
+          2207644,
+          2208120,
+          2208004,
+          2208546,
+          2208096
         ],
         "signature_samples": [
           "a01ea8979377310b76595a64fe02d759980d370b29c4dd3d621e1cd30c0d433d",
@@ -469,47 +469,47 @@
       },
       "legacy_initialization": {
         "elapsed_seconds_samples": [
-          0.004540375,
-          0.004577042,
-          0.004632375,
-          0.004583084,
-          0.004600666,
-          0.004606584,
-          0.004706666
+          0.00466,
+          0.004886458,
+          0.004923166,
+          0.004740916,
+          0.004788542,
+          0.004693375,
+          0.004832041
         ],
-        "median_elapsed_seconds": 0.004600666,
-        "median_peak_memory_bytes": 1009192,
+        "median_elapsed_seconds": 0.004788542,
+        "median_peak_memory_bytes": 1003888,
         "peak_memory_bytes_samples": [
-          1009192,
-          1009812,
-          1009800,
-          1009620,
-          1008632,
-          1008752,
-          1008590
+          1003530,
+          1004000,
+          1003888,
+          1004808,
+          1004270,
+          1003790,
+          1003528
         ]
       },
       "operation_count": 80,
       "sqlite_load_and_optimizer_initialization": {
         "elapsed_seconds_samples": [
-          0.0038725,
-          0.003873292,
-          0.00380625,
-          0.003836583,
-          0.003873708,
-          0.004036834,
-          0.003859917
+          0.003973167,
+          0.004101958,
+          0.004032375,
+          0.00399175,
+          0.004037083,
+          0.00408625,
+          0.003933541
         ],
-        "median_elapsed_seconds": 0.0038725,
-        "median_peak_memory_bytes": 596026,
+        "median_elapsed_seconds": 0.004032375,
+        "median_peak_memory_bytes": 592826,
         "peak_memory_bytes_samples": [
-          596122,
-          596082,
-          596042,
-          596026,
-          596010,
-          595994,
-          595994
+          592922,
+          592882,
+          592842,
+          592826,
+          592810,
+          592794,
+          592794
         ]
       }
     }
