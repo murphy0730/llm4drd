@@ -13,6 +13,8 @@ const CONFIG = {
   GANTT_PAGE_SIZE: 40,
   // 甘特图"全部订单"选项仅在条目数不超过该值时提供，大实例强制按订单聚焦
   GANTT_ALL_ORDERS_MAX_OPS: 2000,
+  // 按订单层级分组时每页工序行数（行=工序，树形表头行为订单/任务令）
+  GANTT_ORDER_PAGE_SIZE: 60,
 };
 
 const GRAPH_NODE_ORDER = ["order", "task", "operation", "machine", "tooling", "personnel"];
@@ -29,6 +31,17 @@ const GRAPH_EDGE_GROUP_LABELS = {
   structure: "结构链路",
   resource: "资源可行",
   other: "其他关系",
+};
+// 边类型中文名：关系分解/关联边表/悬停共用，缺省回退 humanizeCodeLabel
+const GRAPH_EDGE_TYPE_LABELS = {
+  order_has_task: "订单包含任务",
+  task_predecessor: "任务前驱",
+  task_has_operation: "任务包含工序",
+  operation_sequence: "工序顺序",
+  op_depends_task: "工序依赖任务",
+  machine_eligible: "机器可行",
+  tooling_eligible: "工装可行",
+  personnel_eligible: "人员可行",
 };
 
 const PRIMARY_KPI_LABELS = {
@@ -108,7 +121,6 @@ const app = {
   graphMeta: null,
   graphNodes: [],
   graphEdges: [],
-  cyGraphInstance: null,
   graphBuildTaskId: null,
   graphBuildStatus: null,
   graphBuildPollTimer: null,
@@ -116,7 +128,6 @@ const app = {
   selectedGraphNodeId: null,
   selectedGraphOrderId: null,
   graphOrderOptions: [],
-  graphDetailCollapsed: false,
   graphView: defaultGraphView(),
   simResult: null,
   simStatus: null,
@@ -173,6 +184,8 @@ const app = {
   ganttMachineFilter: {},
   // 甘特图订单内二级筛选：canvasId -> { status, query, from, to }
   ganttEntryFilter: {},
+  // 甘特图分组方式：canvasId -> "order"（订单▸任务令▸工序）| "machine"（按机器资源）
+  ganttGroupMode: {},
 };
 
 function defaultGraphView() {
@@ -1472,10 +1485,20 @@ function filterGanttEntries(entries, filter) {
   });
 }
 
+// 甘特"现在"线：进度分界线 = 进行中工序最早开始；无进行中则取已完成最晚结束
+function ganttProgressNowOffset(normalized) {
+  const processingStarts = normalized.filter((item) => item.status === "processing").map((item) => item.start);
+  if (processingStarts.length) return Math.min(...processingStarts);
+  const completedEnds = normalized.filter((item) => item.status === "completed").map((item) => item.end);
+  if (completedEnds.length) return Math.max(...completedEnds);
+  return null;
+}
+
 function buildGanttData(entries, options = {}) {
   const planStartAt = tryParseDate(app.instanceDetails?.plan_start_at);
   const hasRealBase = Boolean(planStartAt);
   const base = hasRealBase ? planStartAt.toISOString() : GANTT_FALLBACK_BASE;
+  const groupMode = options.groupMode === "order" ? "order" : "machine";
 
   const normalized = asArray(entries)
     .map((item) => ({
@@ -1483,6 +1506,7 @@ function buildGanttData(entries, options = {}) {
       machineName: item.machine_name || item.machine_id || item.resource_name || "未知资源",
       opId: item.op_id || item.operation_id || item.id || "-",
       orderId: item.order_id || "-",
+      orderName: item.order_name || "",
       taskId: item.task_id || "-",
       start: Number(item.start ?? item.start_time ?? 0),
       end: Number(item.end ?? item.end_time ?? 0),
@@ -1501,8 +1525,7 @@ function buildGanttData(entries, options = {}) {
     if (!nameByMachine.has(item.machineId)) nameByMachine.set(item.machineId, item.machineName);
   });
 
-  // 资源维度：类型 / 仅含停机 / 关键字 筛选 + 分页（替代旧的"只画最忙前 N 台"硬截断，
-  // 大实例下全部机器都能翻页看到；单页行数仍受 GANTT_PAGE_SIZE 限制，vis 不会锁死）
+  // 机器维度信息（两种分组模式共用）：类型 / 仅含停机 / 关键字 筛选
   const machineFilter = getGanttMachineFilter(options.canvasId);
   const allRows = sortGanttMachineRows(
     Array.from(countByMachine.keys(), (machineId) =>
@@ -1511,6 +1534,132 @@ function buildGanttData(entries, options = {}) {
   const typeOptions = Array.from(new Set(allRows.map((row) => row.typeName)))
     .sort((a, b) => String(a).localeCompare(String(b), "zh-CN", { numeric: true }));
   const filteredRows = filterGanttMachineRows(allRows, machineFilter);
+  const downtimeMachineIds = new Set(allRows.filter((row) => row.hasDowntime).map((row) => row.id));
+  const downtimeGroups = downtimeMachineIds.size;
+  const machineTypeName = (machineId) => allRows.find((row) => row.id === machineId)?.typeName || "未分组";
+
+  const ganttItemTitle = (item) => `${item.statusLabel} · ${item.opId}\n订单:${item.orderId} 任务:${item.taskId}\n机器:${item.machineName}（${machineTypeName(item.machineId)}）\n${hasRealBase ? `${formatDateTime(ganttOffsetToISO(item.start, base))} ~ ${formatDateTime(ganttOffsetToISO(item.end, base))}` : `相对 ${item.start}h ~ ${item.end}h`}`;
+  const overlayClass = (ov) => (ov.className.includes("unplanned") ? "unplanned" : ov.className.includes("planned") ? "planned" : "offshift");
+  const nowOffset = ganttProgressNowOffset(normalized);
+  // "现在"线常驻：无进度数据时落在排程起点（全部未来排产的语义起点）
+  const nowISOFor = (horizonStart, horizonEnd) => {
+    const effective = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd ? nowOffset : horizonStart;
+    return ganttOffsetToISO(effective, base);
+  };
+
+  // —— 模式一：按订单层级（订单 ▸ 任务令 ▸ 工序行，工序行标机器），按工序行分页 ——
+  if (groupMode === "order") {
+    const passingMachines = new Set(filteredRows.map((row) => row.id));
+    const machineFiltered = normalized.filter((item) => passingMachines.has(item.machineId));
+    const pageSize = CONFIG.GANTT_ORDER_PAGE_SIZE || 60;
+    const pageCount = Math.max(1, Math.ceil(machineFiltered.length / pageSize));
+    const page = Math.min(Math.max(1, Number(machineFilter.page) || 1), pageCount);
+    const visible = machineFiltered
+      .slice()
+      .sort((a, b) => String(a.orderId).localeCompare(String(b.orderId), "zh-CN", { numeric: true })
+        || String(a.taskId).localeCompare(String(b.taskId), "zh-CN", { numeric: true })
+        || (a.start - b.start)
+        || String(a.opId).localeCompare(String(b.opId), "zh-CN", { numeric: true }))
+      .slice((page - 1) * pageSize, page * pageSize);
+    const facet = {
+      mode: "order",
+      totalGroups: machineFiltered.length,
+      filteredGroups: machineFiltered.length,
+      machineGroups: filteredRows.length,
+      downtimeGroups,
+      page, pageCount, pageSize, typeOptions, filter: machineFilter,
+    };
+    if (!visible.length) {
+      return { groups: [], items: [], hasRealBase, machineFacet: facet, window: null, nowISO: null, mode: "order" };
+    }
+    const horizonStart = Math.min(...visible.map((i) => i.start));
+    const horizonEnd = Math.max(...visible.map((i) => i.end));
+
+    const orderBuckets = new Map();
+    visible.forEach((item) => {
+      if (!orderBuckets.has(item.orderId)) orderBuckets.set(item.orderId, { name: item.orderName, tasks: new Map(), opCount: 0 });
+      const bucket = orderBuckets.get(item.orderId);
+      if (!bucket.tasks.has(item.taskId)) bucket.tasks.set(item.taskId, []);
+      bucket.tasks.get(item.taskId).push(item);
+      bucket.opCount += 1;
+    });
+
+    const groups = [];
+    const items = [];
+    const opGroupIdOf = new Map();
+    let seq = 0;
+    orderBuckets.forEach((bucket, orderId) => {
+      const taskGroupIds = Array.from(bucket.tasks.keys()).map((taskId) => `gtask|${orderId}|${taskId}`);
+      groups.push({
+        id: `gorder|${orderId}`,
+        content: `<span class="gantt-order-dot" style="background:${orderColorFor(orderId)}"></span>${escapeHtml(orderId)}${bucket.name && bucket.name !== orderId ? ` · ${escapeHtml(bucket.name)}` : ""}<span class="gantt-group-count">${formatInt(bucket.opCount)} 道工序</span>`,
+        className: "gantt-group-order",
+        nestedGroups: taskGroupIds,
+        showNested: true,
+        seq: (seq += 1),
+      });
+      bucket.tasks.forEach((ops, taskId) => {
+        const taskGroupId = `gtask|${orderId}|${taskId}`;
+        const opIds = ops.map((op, index) => `${taskGroupId}|op${index}`);
+        groups.push({
+          id: taskGroupId,
+          content: `${escapeHtml(taskId)}<span class="gantt-group-count">${formatInt(ops.length)} 道工序</span>`,
+          className: "gantt-group-task",
+          nestedGroups: opIds,
+          showNested: true,
+          seq: (seq += 1),
+        });
+        ops.forEach((op, index) => {
+          groups.push({
+            id: opIds[index],
+            content: `<span class="gantt-op-label">${escapeHtml(op.opId)}</span><span class="gantt-op-machine">${escapeHtml(op.machineName)}${downtimeMachineIds.has(op.machineId) ? ' <span class="gantt-group-downtime" title="该机台含停机时段">⚠</span>' : ""}</span>`,
+            className: "gantt-group-op",
+            seq: (seq += 1),
+          });
+          opGroupIdOf.set(op, opIds[index]);
+        });
+      });
+    });
+
+    visible.forEach((item) => {
+      const groupId = opGroupIdOf.get(item);
+      items.push({
+        id: `op-${groupId}`,
+        group: groupId,
+        start: ganttOffsetToISO(item.start, base),
+        end: ganttOffsetToISO(item.end, base),
+        content: escapeHtml(item.opId),
+        className: `status-${item.status}`,
+        style: `background:${ganttStatusBackground(orderColorFor(item.orderId), item.status)};`,
+        title: ganttItemTitle(item),
+      });
+      // 工序行即该机台的时间切片：叠加该机台的班次外/停机遮罩，解释行内空档
+      buildMachineOverlays(machineMap.get(item.machineId), horizonStart, horizonEnd).forEach((ov, i) => {
+        items.push({
+          id: `bg-${groupId}-${i}`,
+          group: groupId,
+          start: ganttOffsetToISO(ov.startOffset, base),
+          end: ganttOffsetToISO(ov.endOffset, base),
+          type: "background",
+          className: overlayClass(ov),
+          title: ov.title,
+        });
+      });
+    });
+
+    const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
+    return {
+      groups,
+      items,
+      hasRealBase,
+      machineFacet: facet,
+      window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
+      nowISO: nowISOFor(horizonStart, horizonEnd),
+      mode: "order",
+    };
+  }
+
+  // —— 模式二：按机器资源（原逻辑），大实例按筛选+分页控制单页行数，vis 不会锁死 ——
   const pageSize = CONFIG.GANTT_PAGE_SIZE || CONFIG.GANTT_MAX_GROUPS;
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const page = Math.min(Math.max(1, Number(machineFilter.page) || 1), pageCount);
@@ -1518,20 +1667,23 @@ function buildGanttData(entries, options = {}) {
   const keep = new Set(pageRows.map((row) => row.id));
 
   const visible = normalized.filter((item) => keep.has(item.machineId));
-  const groups = pageRows.map((row) => ({
+  const groups = pageRows.map((row, index) => ({
     id: row.id,
     content: `${escapeHtml(row.name)}${row.hasDowntime ? ' <span class="gantt-group-downtime" title="该机台含停机时段">⚠</span>' : ""}`,
+    className: "gantt-group-machine",
+    seq: index + 1,
   }));
   const machineFacet = {
+    mode: "machine",
     totalGroups: allRows.length,
     filteredGroups: filteredRows.length,
-    downtimeGroups: allRows.filter((row) => row.hasDowntime).length,
+    downtimeGroups,
     page, pageCount, pageSize, typeOptions, filter: machineFilter,
   };
 
   if (!visible.length) {
     // 筛选/翻页后本页无条目（如关键字无命中）：保留 facet 供工具条渲染
-    return { groups, items: [], hasRealBase, machineFacet, window: null };
+    return { groups, items: [], hasRealBase, machineFacet, window: null, nowISO: null, mode: "machine" };
   }
 
   const horizonStart = Math.min(...visible.map((i) => i.start));
@@ -1546,7 +1698,8 @@ function buildGanttData(entries, options = {}) {
       end: ganttOffsetToISO(item.end, base),
       content: escapeHtml(item.opId),
       className: `status-${item.status}`,
-      title: `${item.statusLabel} · ${item.opId}\n订单:${item.orderId} 任务:${item.taskId}\n${hasRealBase ? `${formatDateTime(ganttOffsetToISO(item.start, base))} ~ ${formatDateTime(ganttOffsetToISO(item.end, base))}` : `相对 ${item.start}h ~ ${item.end}h`}`,
+      style: `background:${ganttStatusBackground(orderColorFor(item.orderId), item.status)};`,
+      title: ganttItemTitle(item),
     });
   });
 
@@ -1554,14 +1707,13 @@ function buildGanttData(entries, options = {}) {
   groups.forEach((g) => {
     const overlays = buildMachineOverlays(machineMap.get(g.id), horizonStart, horizonEnd);
     overlays.forEach((ov, i) => {
-      const cls = ov.className.includes("unplanned") ? "unplanned" : ov.className.includes("planned") ? "planned" : "offshift";
       items.push({
         id: `bg-${g.id}-${i}`,
         group: g.id,
         start: ganttOffsetToISO(ov.startOffset, base),
         end: ganttOffsetToISO(ov.endOffset, base),
         type: "background",
-        className: cls,
+        className: overlayClass(ov),
         title: ov.title,
       });
     });
@@ -1574,6 +1726,8 @@ function buildGanttData(entries, options = {}) {
     hasRealBase,
     machineFacet,
     window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
+    nowISO: nowISOFor(horizonStart, horizonEnd),
+    mode: "machine",
   };
 }
 
@@ -1603,13 +1757,19 @@ function renderTimeline(entries, options = {}) {
   const entryFilter = getGanttEntryFilter(id);
   const visibleEntries = filterGanttEntries(orderEntries, entryFilter);
 
-  const data = buildGanttData(visibleEntries, { ...options, canvasId: id });
+  // 分组方式：按订单层级（订单▸任务令▸工序行）/ 按机器资源；"全部订单"时订单层级过重，强制机器模式
+  const allowOrderMode = selectedOrder !== "__all__";
+  const storedMode = app.ganttGroupMode[id];
+  const groupMode = allowOrderMode ? (storedMode === "machine" ? "machine" : "order") : "machine";
+
+  const data = buildGanttData(visibleEntries, { ...options, canvasId: id, groupMode });
   if (!data) {
     return renderEmptyState("暂无甘特数据", "当前方案还没有可显示的资源排程。");
   }
   // 连同已计算的 data 一起暂存：mountGantts 直接复用，避免大实例下重复构建（A3）
-  app.pendingGantts.set(id, { entries: visibleEntries, options: { ...options, canvasId: id }, data });
+  app.pendingGantts.set(id, { entries: visibleEntries, options: { ...options, canvasId: id, groupMode }, data });
 
+  const selectedOrderColor = selectedOrder === "__all__" ? null : orderColorFor(selectedOrder);
   const orderSelector = orderOptions.length > 1 || !allowAll ? `
     <div class="field-inline">
       <span>订单</span>
@@ -1620,6 +1780,11 @@ function renderTimeline(entries, options = {}) {
           return `<option value="${escapeHtml(orderId)}" ${orderId === selectedOrder ? "selected" : ""}>${escapeHtml(name && name !== orderId ? `${orderId} · ${name}` : orderId)}</option>`;
         }).join("")}
       </select>
+      <span>分组</span>
+      <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
+        <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
+        <option value="machine" ${groupMode === "machine" ? "selected" : ""}>按机器资源</option>
+      </select>
     </div>
   ` : "";
 
@@ -1628,7 +1793,7 @@ function renderTimeline(entries, options = {}) {
     <div class="field-inline gantt-filter-bar">
       <span>机器类型</span>
       <select data-gantt-machine-type data-canvas="${escapeHtml(id)}">
-        <option value="__all__" ${facet.filter.type === "__all__" ? "selected" : ""}>全部类型（${formatInt(facet.totalGroups)} 台）</option>
+        <option value="__all__" ${facet.filter.type === "__all__" ? "selected" : ""}>全部类型（${formatInt(groupMode === "order" ? facet.machineGroups : facet.totalGroups)} 台）</option>
         ${facet.typeOptions.map((t) => `<option value="${escapeHtml(t)}" ${t === facet.filter.type ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
       </select>
       <label class="gantt-filter-check"><input type="checkbox" data-gantt-downtime-only data-canvas="${escapeHtml(id)}" ${facet.filter.downtimeOnly ? "checked" : ""}> 仅含停机（${formatInt(facet.downtimeGroups)} 台）</label>
@@ -1654,7 +1819,7 @@ function renderTimeline(entries, options = {}) {
   const pager = facet && facet.pageCount > 1 ? `
     <div class="gantt-pager">
       <button class="btn-ghost" data-gantt-page="${facet.page - 1}" data-canvas="${escapeHtml(id)}" ${facet.page <= 1 ? "disabled" : ""}>上一页</button>
-      <span>第 ${formatInt(facet.page)} / ${formatInt(facet.pageCount)} 页 · 命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} 台机器</span>
+      <span>第 ${formatInt(facet.page)} / ${formatInt(facet.pageCount)} 页 · 命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} ${groupMode === "order" ? "道工序行" : "台机器"}</span>
       <button class="btn-ghost" data-gantt-page="${facet.page + 1}" data-canvas="${escapeHtml(id)}" ${facet.page >= facet.pageCount ? "disabled" : ""}>下一页</button>
     </div>
   ` : "";
@@ -1666,49 +1831,164 @@ function renderTimeline(entries, options = {}) {
     return acc;
   }, { completed: 0, processing: 0, future: 0 });
 
+  // 图例：订单标识色（与图谱订单节点外圈一致）+ 状态质感 + 遮罩 + 现在线
+  const legendOrderIds = Array.from(new Set(visibleEntries.map((item) => item.order_id || "-"))).slice(0, 6);
+  const repColor = orderColorFor(legendOrderIds[0] || selectedOrder || "-");
+  const legendHtml = `
+    <div class="legend">
+      ${legendOrderIds.map((orderId) => `<span class="legend-item"><span class="legend-swatch order-dot" style="background:${orderColorFor(orderId)}"></span>${escapeHtml(orderId === "-" ? "未指定订单" : orderId)}</span>`).join("")}
+      <span class="legend-item"><span class="legend-swatch" style="background:${ganttStatusBackground(repColor, "completed")}"></span>已完成</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:${ganttStatusBackground(repColor, "processing")}"></span>进行中</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:${ganttStatusBackground(repColor, "future")}"></span>未来排产</span>
+      <span class="legend-item"><span class="legend-swatch offshift"></span>班次外</span>
+      <span class="legend-item"><span class="legend-swatch planned"></span>计划停机</span>
+      <span class="legend-item"><span class="legend-swatch unplanned"></span>非计划停机</span>
+      ${data.nowISO ? '<span class="legend-item"><span class="legend-swatch now-line"></span>现在（进度分界）</span>' : ""}
+    </div>
+  `;
+
   return `
     <div class="surface-card">
       <div class="card-head">
         <h3>${escapeHtml(options.title || "资源甘特图")}</h3>
-        <p>可滚轮缩放、左右拖拽平移查看全程；条块颜色区分已完成 / 进行中 / 未来排产，斜纹遮罩显示班次外与停机占用（悬停可见起止与类型）。</p>
+        <p>条块颜色=订单标识色（与图谱订单节点外圈一致），质感区分已完成 / 进行中 / 未来排产；红色竖线为"现在"进度分界；斜纹遮罩显示班次外与停机占用（悬停可见起止与类型）。</p>
       </div>
       ${orderSelector}
       ${machineFilterBar}
       ${entryFilterBar}
       <div class="timeline-summary-strip">
-        <div class="timeline-summary-card"><span>当前展示</span><strong>${selectedOrder === "__all__" ? "全部订单" : escapeHtml(selectedOrder)}（共 ${formatInt(orderOptions.length)} 个订单）</strong></div>
-        <div class="timeline-summary-card"><span>工序 / 资源行数</span><strong>${formatInt(visibleEntries.length)} / ${formatInt(data.groups.length)}${facet ? `（共 ${formatInt(facet.totalGroups)} 台）` : ""}</strong></div>
+        <div class="timeline-summary-card"><span>当前展示</span><strong>${selectedOrderColor ? `<i class="gantt-order-dot" style="background:${selectedOrderColor}"></i>` : ""}${selectedOrder === "__all__" ? "全部订单" : escapeHtml(selectedOrder)}（共 ${formatInt(orderOptions.length)} 个订单）</strong></div>
+        <div class="timeline-summary-card"><span>${groupMode === "order" ? "工序行 / 涉及机器" : "工序 / 资源行数"}</span><strong>${groupMode === "order" ? `${formatInt(visibleEntries.length)} / ${formatInt(facet ? facet.machineGroups : 0)} 台` : `${formatInt(visibleEntries.length)} / ${formatInt(data.groups.length)}${facet ? `（共 ${formatInt(facet.totalGroups)} 台）` : ""}`}</strong></div>
         <div class="timeline-summary-card"><span>已完成 / 进行中 / 未来</span><strong>${formatInt(statusCounts.completed)} / ${formatInt(statusCounts.processing)} / ${formatInt(statusCounts.future)}</strong></div>
         <div class="timeline-summary-card"><span>时间基准</span><strong>${data.hasRealBase ? "计划起始时间" : "相对小时（无 plan_start_at）"}</strong></div>
       </div>
       ${pager}
-      <div class="legend">
-        <span class="legend-item"><span class="legend-swatch status-completed"></span>已完成</span>
-        <span class="legend-item"><span class="legend-swatch status-processing"></span>进行中</span>
-        <span class="legend-item"><span class="legend-swatch status-future"></span>未来排产</span>
-        <span class="legend-item"><span class="legend-swatch offshift"></span>班次外</span>
-        <span class="legend-item"><span class="legend-swatch planned"></span>计划停机</span>
-        <span class="legend-item"><span class="legend-swatch unplanned"></span>非计划停机</span>
-      </div>
+      ${legendHtml}
       <div class="gantt-canvas" id="${escapeHtml(id)}"></div>
     </div>
   `;
 }
 
+// —— 图谱视觉编码：配色（token 派生）+ 形状 + 尺寸 三重编码 ——
+// 规划链冷色（订单/任务/工序），资源暖色（机器/工装/人员），与 design-system token 对齐
+const GRAPH_TYPE_COLORS = {
+  order: "#1d53c0",      // --primary-strong
+  task: "#2f6feb",       // --primary
+  operation: "#0e8e7f",  // --info
+  machine: "#c2620a",    // --accent
+  tooling: "#bf3f8c",    // 暖品红
+  personnel: "#7048e8",  // 暖紫
+  other: "#7a8795",
+};
+// 节点形状尺寸（半径基准，选中时 +4）
+const GRAPH_NODE_SIZES = { order: 24, task: 20, operation: 12, machine: 19, tooling: 17, personnel: 17, other: 15 };
+// 节点内单字标签
+const GRAPH_TYPE_CHARS = { order: "订", task: "任", operation: "工", machine: "机", tooling: "装", personnel: "员", other: "·" };
+// 订单标识色板：固定的一套 12 色，按订单序号（自然排序后的位置）确定性分配，
+// 不哈希、不随机——同一实例任何时刻、任何视图（图谱订单节点外圈 / 面包屑色点 /
+// 甘特条块 / 图例色点）拿到的都是同一套颜色。色板与 design-system token 协调，
+// 按相邻对比度排序，均保证白字可读。
+const ORDER_COLOR_PALETTE = [
+  "#2f6feb", // 蓝（--primary）
+  "#c2620a", // 琥珀（--accent）
+  "#0e8e7f", // 青（--info）
+  "#7048e8", // 暖紫
+  "#b45309", // 赭橙（--warning）
+  "#bf3f8c", // 品红
+  "#12a150", // 绿（--success）
+  "#0b5f8a", // 深青蓝
+  "#8d6e63", // 棕灰
+  "#c2410c", // 橙红
+  "#4d7c0f", // 橄榄
+  "#64748b", // 石板灰
+];
+const ORDER_COLOR_NEUTRAL = "#64748b";
+
 function graphTypeColor(type) {
-  const palette = {
-    order: "#0f4c81",
-    task: "#2c7fb0",
-    operation: "#4d908e",
-    machine: "#b76800",
-    tooling: "#a23b72",
-    personnel: "#6c5ce7",
-  };
-  return palette[String(type || "").toLowerCase()] || "#7a8795";
+  return GRAPH_TYPE_COLORS[String(type || "").toLowerCase()] || GRAPH_TYPE_COLORS.other;
+}
+
+// 已加载实例的订单全集（图谱下拉选项），作为颜色分配的固定序号来源
+function knownOrderIds() {
+  const ids = new Set();
+  asArray(app.graphOrderOptions).forEach((raw) => {
+    const entity = raw.entity_id || entityIdFromGraphId(raw.node_id || raw.id || "");
+    if (entity) ids.add(String(entity));
+  });
+  return ids;
+}
+
+function orderColorFor(orderId) {
+  const key = String(orderId || "").trim();
+  if (!key || key === "-") return ORDER_COLOR_NEUTRAL;
+  const ids = knownOrderIds();
+  ids.add(key);
+  const sorted = Array.from(ids).sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+  const idx = Math.max(0, sorted.indexOf(key));
+  const base = ORDER_COLOR_PALETTE[idx % ORDER_COLOR_PALETTE.length];
+  // 超过 12 个订单时确定性派生：每循环一轮交替加深/减淡，仍属同一套固定规则
+  const cycle = Math.floor(idx / ORDER_COLOR_PALETTE.length);
+  if (!cycle) return base;
+  return mixHex(base, cycle % 2 === 1 ? "#0e0f11" : "#fbfbfc", Math.min(0.22 * cycle, 0.45));
+}
+
+function hexToRgb(hex) {
+  const value = String(hex || "").replace("#", "");
+  const full = value.length === 3 ? value.split("").map((c) => c + c).join("") : value;
+  const num = parseInt(full, 16);
+  if (Number.isNaN(num)) return { r: 122, g: 135, b: 149 };
+  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+}
+
+// 两色按比例混合（t=0 取 a，t=1 取 b），用于甘特状态质感与泳道/图例派生色
+function mixHex(a, b, t) {
+  const ca = hexToRgb(a);
+  const cb = hexToRgb(b);
+  const mix = (x, y) => Math.round(x + (y - x) * Math.max(0, Math.min(1, t)));
+  return `#${[mix(ca.r, cb.r), mix(ca.g, cb.g), mix(ca.b, cb.b)].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+// 甘特条块底色：订单标识色 × 状态质感（未来=实心，进行中=斜纹，已完成=降饱和）
+function ganttStatusBackground(orderColor, status) {
+  if (status === "processing") {
+    const light = mixHex(orderColor, "#ffffff", 0.34);
+    return `repeating-linear-gradient(135deg, ${orderColor}, ${orderColor} 7px, ${light} 7px, ${light} 13px)`;
+  }
+  if (status === "completed") return mixHex(orderColor, "#8a94a6", 0.55);
+  return orderColor;
+}
+
+function graphPolygonPoints(sides, r, rotateDeg = -90) {
+  return Array.from({ length: sides }, (_, i) => {
+    const angle = ((rotateDeg + (360 * i) / sides) * Math.PI) / 180;
+    return `${(r * Math.cos(angle)).toFixed(2)},${(r * Math.sin(angle)).toFixed(2)}`;
+  }).join(" ");
+}
+
+// 类型形状：订单=圆角矩形、任务=菱形、工序=圆形、机器=六边形、工装=三角、人员=五边形
+function graphNodeShapeSVG(type, r, attrs = "") {
+  switch (String(type || "").toLowerCase()) {
+    case "order":
+      return `<rect x="${(-r * 1.25).toFixed(1)}" y="${(-r * 0.85).toFixed(1)}" width="${(r * 2.5).toFixed(1)}" height="${(r * 1.7).toFixed(1)}" rx="${(r * 0.42).toFixed(1)}" ${attrs}></rect>`;
+    case "task":
+      return `<polygon points="0,${-r} ${(r * 1.2).toFixed(1)},0 0,${r} ${(-r * 1.2).toFixed(1)},0" ${attrs}></polygon>`;
+    case "machine":
+      return `<polygon points="${graphPolygonPoints(6, r, 0)}" ${attrs}></polygon>`;
+    case "tooling":
+      return `<polygon points="${graphPolygonPoints(3, r, -90)}" ${attrs}></polygon>`;
+    case "personnel":
+      return `<polygon points="${graphPolygonPoints(5, r, -90)}" ${attrs}></polygon>`;
+    default:
+      return `<circle r="${r}" ${attrs}></circle>`;
+  }
 }
 
 function graphTypeLabel(type) {
   return GRAPH_TYPE_LABELS[String(type || "").toLowerCase()] || GRAPH_TYPE_LABELS.other;
+}
+
+function graphEdgeTypeLabel(edgeType) {
+  return GRAPH_EDGE_TYPE_LABELS[String(edgeType || "").toLowerCase()] || humanizeCodeLabel(edgeType || "-");
 }
 
 function graphEdgeGroupForType(type) {
@@ -1812,7 +2092,11 @@ function buildOrderClusterContext(nodes, edges) {
   nodes.forEach((node) => {
     if (node.type === "task") {
       const orderNodeId = orderEntityToNodeId.get(String(node.order_id || ""));
-      if (orderNodeId) taskToOrderNodeId.set(node.id, orderNodeId);
+      if (orderNodeId) {
+        // 节点 ID（T:xxx）与实体 ID（xxx）都建立映射：工序节点 attrs.task_id 存的是实体 ID
+        taskToOrderNodeId.set(node.id, orderNodeId);
+        if (node.entity_id) taskToOrderNodeId.set(node.entity_id, orderNodeId);
+      }
     }
   });
 
@@ -1947,6 +2231,28 @@ function graphNodeDetailRows(node, relatedEdges = []) {
   return rows;
 }
 
+// 层级泳道布局：订单→任务→工序→机器/工装/人员 六条纵向泳道（左冷右暖），
+// 列内按"子列网格"紧凑排布，避免单列过高；返回泳道几何供背景渲染。
+const GRAPH_LANE_CONFIG = {
+  order: { rows: 12, rowGap: 86, colGap: 132 },
+  task: { rows: 16, rowGap: 74, colGap: 128 },
+  operation: { rows: 22, rowGap: 54, colGap: 92 },
+  machine: { rows: 16, rowGap: 74, colGap: 128 },
+  tooling: { rows: 14, rowGap: 74, colGap: 128 },
+  personnel: { rows: 14, rowGap: 74, colGap: 128 },
+  other: { rows: 14, rowGap: 74, colGap: 128 },
+};
+const GRAPH_LANE_PAD_X = 24;
+const GRAPH_LANE_GAP = 30;
+const GRAPH_LANE_TOP = 60;
+const GRAPH_LANE_OUTER_PAD = 24;
+
+function graphLaneFamily(type) {
+  if (["order", "task", "operation"].includes(type)) return "plan";
+  if (isResourceNodeType(type)) return "resource";
+  return "other";
+}
+
 function layoutGraph(nodes, edges, selectedId) {
   const groups = new Map();
   GRAPH_NODE_ORDER.forEach((type) => groups.set(type, []));
@@ -1970,14 +2276,13 @@ function layoutGraph(nodes, edges, selectedId) {
   });
 
   const usedGroups = Array.from(groups.entries()).filter(([, items]) => items.length);
-  const columnGap = usedGroups.length > 4 ? 188 : 210;
-  const width = Math.max(1240, 160 + usedGroups.length * columnGap);
-  const rowGap = 78;
-  const maxRows = Math.max(...usedGroups.map(([, items]) => items.length), 1);
-  const height = Math.max(560, 150 + maxRows * rowGap);
   const placed = new Map();
+  const lanes = [];
+  let laneX = GRAPH_LANE_OUTER_PAD;
+  let maxContentBottom = GRAPH_LANE_TOP + 40;
 
-  usedGroups.forEach(([type, items], colIndex) => {
+  usedGroups.forEach(([type, items]) => {
+    const cfg = GRAPH_LANE_CONFIG[type] || GRAPH_LANE_CONFIG.other;
     items.sort((a, b) => {
       const aRank = a.id === selectedId ? 0 : directNeighbors.has(a.id) ? 1 : 2;
       const bRank = b.id === selectedId ? 0 : directNeighbors.has(b.id) ? 1 : 2;
@@ -1986,339 +2291,68 @@ function layoutGraph(nodes, edges, selectedId) {
       if (degreeGap !== 0) return degreeGap;
       return String(a.label).localeCompare(String(b.label), "zh-CN");
     });
-    const totalHeight = (items.length - 1) * rowGap;
-    const startY = Math.max(88, (height - totalHeight) / 2);
-    items.forEach((node, rowIndex) => {
+    const subCols = Math.max(1, Math.ceil(items.length / cfg.rows));
+    const usedRows = Math.max(1, Math.ceil(items.length / subCols));
+    maxContentBottom = Math.max(maxContentBottom, GRAPH_LANE_TOP + 40 + (usedRows - 1) * cfg.rowGap);
+    const laneWidth = GRAPH_LANE_PAD_X * 2 + (subCols - 1) * cfg.colGap + 64;
+    items.forEach((node, index) => {
+      const col = Math.floor(index / usedRows);
+      const row = index % usedRows;
       placed.set(node.id, {
-        x: 110 + colIndex * columnGap,
-        y: startY + rowIndex * rowGap,
+        x: laneX + GRAPH_LANE_PAD_X + 32 + col * cfg.colGap,
+        y: GRAPH_LANE_TOP + 40 + row * cfg.rowGap,
+        r: GRAPH_NODE_SIZES[node.type] || GRAPH_NODE_SIZES.other,
         node,
         type,
       });
     });
+    lanes.push({
+      type,
+      family: graphLaneFamily(type),
+      label: graphTypeLabel(type),
+      count: items.length,
+      x: laneX,
+      width: laneWidth,
+    });
+    laneX += laneWidth + GRAPH_LANE_GAP;
   });
 
-  return { width, height, placed };
-}
+  const width = Math.max(960, laneX - GRAPH_LANE_GAP + GRAPH_LANE_OUTER_PAD);
+  const height = Math.max(460, maxContentBottom + 96);
+  lanes.forEach((lane) => {
+    lane.y = GRAPH_LANE_TOP - 12;
+    lane.height = height - GRAPH_LANE_TOP + 12 - 16;
+  });
 
-function renderInteractiveGraph() {
-  const nodes = asArray(app.graphNodes).slice(0, 80);
-  const edges = asArray(app.graphEdges).slice(0, 140);
-  if (!nodes.length) {
-    return renderEmptyState("暂无图谱节点", "请先构建图谱，或确认当前实例已正确加载。");
-  }
-
-  const layout = layoutGraph(nodes, edges);
-  const selectedId = app.selectedGraphNodeId || nodes[0]?.node_id || nodes[0]?.id;
-  const selected = layout.placed.get(selectedId) || Array.from(layout.placed.values())[0];
-  const neighborIds = new Set();
-  layout.edges.forEach((edge) => {
-    const src = edge.src || edge.source;
-    const dst = edge.dst || edge.target;
-    if (src === selected?.node?.node_id || src === selected?.node?.id || dst === selected?.node?.node_id || dst === selected?.node?.id) {
-      neighborIds.add(src);
-      neighborIds.add(dst);
+  // 泳道族（规划链/资源）连续区段，用于顶部族标
+  const families = [];
+  lanes.forEach((lane) => {
+    const last = families[families.length - 1];
+    if (last && last.family === lane.family) {
+      last.width = lane.x + lane.width - last.x;
+    } else {
+      families.push({ family: lane.family, x: lane.x, width: lane.width });
     }
   });
 
-  const svg = `
-    <svg viewBox="0 0 ${layout.width} ${layout.height}" class="graph-svg" role="img" aria-label="异构图预览">
-      <defs>
-        <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ca0b5"></path>
-        </marker>
-      </defs>
-      ${layout.edges.map((edge) => {
-        const srcId = edge.src || edge.source;
-        const dstId = edge.dst || edge.target;
-        const src = layout.placed.get(srcId);
-        const dst = layout.placed.get(dstId);
-        const highlighted = neighborIds.has(srcId) && neighborIds.has(dstId);
-        return `
-          <line
-            x1="${src.x + 26}" y1="${src.y + 18}"
-            x2="${dst.x - 26}" y2="${dst.y + 18}"
-            stroke="${highlighted ? "#0f4c81" : "#c4d0db"}"
-            stroke-width="${highlighted ? 2.4 : 1.2}"
-            opacity="${highlighted ? 0.92 : 0.58}"
-            marker-end="url(#graph-arrow)"
-          ></line>
-        `;
-      }).join("")}
-      ${Array.from(layout.placed.values()).map((item) => {
-        const id = item.node.node_id || item.node.id;
-        const isSelected = id === (selected?.node?.node_id || selected?.node?.id);
-        const isNeighbor = neighborIds.has(id);
-        const fill = graphTypeColor(item.type);
-        return `
-          <g class="graph-node ${isSelected ? "selected" : isNeighbor ? "neighbor" : ""}" data-action="focus-graph-node" data-id="${escapeHtml(id)}" style="cursor:pointer">
-            <circle cx="${item.x}" cy="${item.y}" r="${isSelected ? 20 : 16}" fill="${fill}" opacity="${isSelected ? 1 : isNeighbor ? 0.95 : 0.82}"></circle>
-            <text x="${item.x}" y="${item.y + 4}" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">${escapeHtml(String(item.type).slice(0, 3).toUpperCase())}</text>
-            <text x="${item.x}" y="${item.y + 36}" text-anchor="middle" fill="#32485a" font-size="10">${escapeHtml((item.node.label || id).slice(0, 16))}</text>
-          </g>
-        `;
-      }).join("")}
-    </svg>
-  `;
-
-  const selectedNode = selected?.node || null;
-  const selectedEdges = layout.edges.filter((edge) => {
-    const src = edge.src || edge.source;
-    const dst = edge.dst || edge.target;
-    const currentId = selectedNode?.node_id || selectedNode?.id;
-    return src === currentId || dst === currentId;
-  });
-
-  return `
-    <div class="split-panel">
-      <article class="surface-card">
-        <div class="card-head">
-          <h3>有向异构图</h3>
-          <p>展示订单、任务、工序与资源之间的依赖和可行关系。点击节点可高亮相关边与邻居。</p>
-        </div>
-        <div class="graph-shell">${svg}</div>
-      </article>
-      <article class="surface-card">
-        <div class="card-head">
-          <h3>节点详情</h3>
-          <p>用于解释问题复杂性与当前节点的上下游依赖。</p>
-        </div>
-        ${selectedNode ? renderKeyValueGrid([
-          { label: "节点 ID", value: escapeHtml(selectedNode.node_id || selectedNode.id || "-") },
-          { label: "节点类型", value: escapeHtml(selectedNode.node_type || selectedNode.type || "-") },
-          { label: "显示标签", value: escapeHtml(selectedNode.label || selectedNode.name || "-") },
-          { label: "关联边数", value: formatInt(selectedEdges.length) },
-        ]) : renderEmptyState("未选中节点", "点击左侧图中的节点查看详情。")}
-        ${selectedEdges.length ? renderSimpleTable(
-          ["关系", "源", "目标"],
-          selectedEdges.slice(0, 12).map((edge) => [
-            escapeHtml(edge.edge_type || edge.type || "-"),
-            escapeHtml(edge.src || edge.source || "-"),
-            escapeHtml(edge.dst || edge.target || "-"),
-          ]),
-          { footer: selectedEdges.length > 12 ? `仅展示前 12 条关联边，共 ${selectedEdges.length} 条。` : "" },
-        ) : ""}
-      </article>
-    </div>
-  `;
+  return { width, height, placed, lanes, families };
 }
 
-function buildGraphViewModel() {
-  const allNodes = asArray(app.graphNodes).map(normalizeGraphNode).filter((node) => node.id);
-  const allEdges = asArray(app.graphEdges).map(normalizeGraphEdge).filter((edge) => edge.source && edge.target);
-  if (!allNodes.length) return null;
-
-  ensureGraphViewState(allNodes);
-  const nodeMap = new Map(allNodes.map((node) => [node.id, node]));
-  const visibleTypes = new Set(Object.entries(app.graphView.nodeTypes || {}).filter(([, enabled]) => enabled).map(([type]) => type));
-  const visibleGroups = new Set(Object.entries(app.graphView.edgeGroups || {}).filter(([, enabled]) => enabled).map(([group]) => group));
-
-  const eligibleNodes = allNodes.filter((node) => visibleTypes.has(node.type));
-  const eligibleNodeIds = new Set(eligibleNodes.map((node) => node.id));
-  const eligibleEdges = allEdges.filter((edge) => visibleGroups.has(edge.group) && eligibleNodeIds.has(edge.source) && eligibleNodeIds.has(edge.target));
-  const clusterContext = buildOrderClusterContext(eligibleNodes, eligibleEdges);
-
-  const adjacency = new Map(eligibleNodes.map((node) => [node.id, []]));
-  eligibleEdges.forEach((edge) => {
-    adjacency.get(edge.source)?.push({ id: edge.target, edge, direction: "out" });
-    adjacency.get(edge.target)?.push({ id: edge.source, edge, direction: "in" });
-  });
-
-  const term = (app.graphView.search || "").trim().toLowerCase();
-  let selectedId = app.selectedGraphNodeId;
-  if (!eligibleNodeIds.has(selectedId)) selectedId = eligibleNodes[0]?.id || null;
-
-  let focusIds = new Set(eligibleNodeIds);
-  const matchedIds = eligibleNodes.filter((node) => graphNodeMatchesSearch(node, term)).map((node) => node.id);
-  const expandToWholeOrders = (ids, targetSet) => {
-    asArray(ids).forEach((id) => {
-      clusterContext.ordersFromNode(id).forEach((orderId) => {
-        clusterContext.orderClusters.get(orderId)?.forEach((nodeId) => targetSet.add(nodeId));
-      });
-    });
-  };
-  if (term && matchedIds.length) {
-    focusIds = new Set(matchedIds);
-    matchedIds.forEach((id) => {
-      (adjacency.get(id) || []).forEach((neighbor) => {
-        focusIds.add(neighbor.id);
-      });
-    });
-    expandToWholeOrders(matchedIds, focusIds);
-    if (!focusIds.has(selectedId)) selectedId = matchedIds[0];
+// 边几何：跨列走直线（按节点半径做边界吸附），同列顺序边向右弓形绕开节点
+function graphEdgePathD(a, b) {
+  const ra = a.r || 18;
+  const rb = b.r || 18;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (Math.abs(dx) < 48) {
+    const dir = dy >= 0 ? 1 : -1;
+    const bow = 68;
+    const sy = a.y + dir * ra;
+    const ty = b.y - dir * rb;
+    return `M ${a.x} ${sy} C ${a.x + bow} ${sy}, ${b.x + bow} ${ty}, ${b.x} ${ty}`;
   }
-
-  if (app.graphView.mode === "focus" && selectedId) {
-    const localIds = new Set([selectedId]);
-    (adjacency.get(selectedId) || []).forEach((neighbor) => {
-      localIds.add(neighbor.id);
-      if (neighbor.edge.group === "structure") {
-        (adjacency.get(neighbor.id) || []).forEach((secondary) => {
-          if (secondary.edge.group === "structure") localIds.add(secondary.id);
-        });
-      }
-    });
-    expandToWholeOrders([selectedId, ...matchedIds], localIds);
-    focusIds.forEach((id) => localIds.add(id));
-    focusIds = localIds;
-  }
-
-  let visibleNodes = eligibleNodes.filter((node) => focusIds.has(node.id));
-  let visibleEdges = eligibleEdges.filter((edge) => focusIds.has(edge.source) && focusIds.has(edge.target));
-
-  const nodeLimit = app.graphView.mode === "focus" ? CONFIG.GRAPH_FOCUS_NODE_LIMIT : CONFIG.GRAPH_ALL_NODE_LIMIT;
-  const maxOrders = Math.max(1, Number(app.graphView.maxOrders || 6));
-  let orderScoped = false;
-  const visibleOrderCount = new Set(visibleNodes.filter((node) => node.type === "order").map((node) => node.id)).size;
-  if (visibleNodes.length > nodeLimit || visibleOrderCount > maxOrders) {
-    let keepIds = buildOrderScopedNodeSet(visibleNodes, visibleEdges, selectedId, matchedIds, Number.MAX_SAFE_INTEGER, maxOrders);
-    orderScoped = !!keepIds;
-    if (!keepIds) {
-      const priorityIds = new Set([selectedId, ...matchedIds]);
-      const degree = new Map(visibleNodes.map((node) => [node.id, 0]));
-      visibleEdges.forEach((edge) => {
-        degree.set(edge.source, (degree.get(edge.source) || 0) + 1);
-        degree.set(edge.target, (degree.get(edge.target) || 0) + 1);
-      });
-      keepIds = new Set(
-        visibleNodes
-          .slice()
-          .sort((a, b) => {
-            const aRank = priorityIds.has(a.id) ? 0 : 1;
-            const bRank = priorityIds.has(b.id) ? 0 : 1;
-            if (aRank !== bRank) return aRank - bRank;
-            return (degree.get(b.id) || 0) - (degree.get(a.id) || 0);
-          })
-          .slice(0, nodeLimit)
-          .map((node) => node.id),
-      );
-    }
-    visibleNodes = visibleNodes.filter((node) => keepIds.has(node.id));
-    visibleEdges = visibleEdges.filter((edge) => keepIds.has(edge.source) && keepIds.has(edge.target));
-  }
-
-  if (!orderScoped && visibleEdges.length > CONFIG.GRAPH_ALL_EDGE_LIMIT) {
-    const priorityIds = new Set([selectedId, ...matchedIds]);
-    visibleEdges = visibleEdges
-      .slice()
-      .sort((a, b) => {
-        const aRank = priorityIds.has(a.source) || priorityIds.has(a.target) ? 0 : 1;
-        const bRank = priorityIds.has(b.source) || priorityIds.has(b.target) ? 0 : 1;
-        if (aRank !== bRank) return aRank - bRank;
-        if (a.group !== b.group) return a.group.localeCompare(b.group);
-        return String(a.edgeType).localeCompare(String(b.edgeType));
-      })
-      .slice(0, CONFIG.GRAPH_ALL_EDGE_LIMIT);
-  }
-
-  const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
-  visibleEdges = visibleEdges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target));
-
-  const connectedNodeIds = new Set();
-  visibleEdges.forEach((edge) => {
-    connectedNodeIds.add(edge.source);
-    connectedNodeIds.add(edge.target);
-  });
-  if (selectedId && !connectedNodeIds.has(selectedId)) {
-    selectedId = visibleNodes.find((node) => connectedNodeIds.has(node.id))?.id || selectedId;
-  }
-  visibleNodes = visibleNodes.filter((node) => connectedNodeIds.has(node.id) || node.id === selectedId);
-  const filteredVisibleNodeIds = new Set(visibleNodes.map((node) => node.id));
-  visibleEdges = visibleEdges.filter((edge) => filteredVisibleNodeIds.has(edge.source) && filteredVisibleNodeIds.has(edge.target));
-  if (!filteredVisibleNodeIds.has(selectedId)) {
-    selectedId = visibleNodes.find((node) => connectedNodeIds.has(node.id))?.id || visibleNodes[0]?.id || null;
-  }
-
-  const layout = layoutGraph(visibleNodes, visibleEdges, selectedId);
-  const previousPositions = app.graphView.positions || {};
-  const positions = {};
-  visibleNodes.forEach((node) => {
-    const base = layout.placed.get(node.id);
-    positions[node.id] = previousPositions[node.id] ? { ...previousPositions[node.id] } : { x: base?.x || 0, y: base?.y || 0 };
-  });
-  app.graphView.positions = positions;
-  app.selectedGraphNodeId = selectedId;
-
-  const selectedNode = nodeMap.get(selectedId) || visibleNodes[0] || null;
-  const visibleAdjacency = new Map(visibleNodes.map((node) => [node.id, []]));
-  visibleEdges.forEach((edge) => {
-    visibleAdjacency.get(edge.source)?.push(edge.target);
-    visibleAdjacency.get(edge.target)?.push(edge.source);
-  });
-  const relatedFocusIds = new Set(selectedId ? [selectedId] : []);
-  (visibleAdjacency.get(selectedId) || []).forEach((neighborId) => relatedFocusIds.add(neighborId));
-  clusterContext.ordersFromNode(selectedId).forEach((orderId) => {
-    clusterContext.orderClusters.get(orderId)?.forEach((nodeId) => {
-      if (visibleAdjacency.has(nodeId)) relatedFocusIds.add(nodeId);
-    });
-  });
-  const neighborIds = new Set(selectedId ? [selectedId] : []);
-  (visibleAdjacency.get(selectedId) || []).forEach((neighborId) => neighborIds.add(neighborId));
-  const relatedEdges = visibleEdges.filter((edge) => relatedFocusIds.has(edge.source) || relatedFocusIds.has(edge.target));
-  const relatedNodeIds = new Set();
-  relatedEdges.forEach((edge) => {
-    relatedNodeIds.add(edge.source);
-    relatedNodeIds.add(edge.target);
-  });
-  const relatedNodes = visibleNodes.filter((node) => relatedNodeIds.has(node.id) && node.id !== selectedId);
-  const relatedByType = {};
-  relatedNodes.forEach((node) => {
-    if (!relatedByType[node.type]) relatedByType[node.type] = [];
-    relatedByType[node.type].push(node);
-  });
-
-  const relatedNodeCountByType = {};
-  relatedNodes.forEach((node) => {
-    relatedNodeCountByType[node.type] = (relatedNodeCountByType[node.type] || 0) + 1;
-  });
-
-  const selectedStats = {
-    directNeighborCount: Math.max(0, neighborIds.size - (selectedId ? 1 : 0)),
-    relatedNodeCount: relatedNodes.length,
-    relatedEdgeCount: relatedEdges.length,
-    orderCount: new Set([
-      ...(clusterContext.ordersFromNode(selectedId) || []),
-      ...relatedNodes.filter((node) => node.type === "order").map((node) => node.id),
-      ...(selectedNode?.type === "order" ? [selectedNode.id] : []),
-    ]).size,
-    taskCount: relatedNodeCountByType.task || 0,
-    operationCount: relatedNodeCountByType.operation || 0,
-    machineCount: relatedNodeCountByType.machine || 0,
-    toolingCount: relatedNodeCountByType.tooling || 0,
-    personnelCount: relatedNodeCountByType.personnel || 0,
-  };
-
-  const typeCounts = {};
-  visibleNodes.forEach((node) => {
-    typeCounts[node.type] = (typeCounts[node.type] || 0) + 1;
-  });
-  const edgeGroupCounts = {};
-  visibleEdges.forEach((edge) => {
-    edgeGroupCounts[edge.group] = (edgeGroupCounts[edge.group] || 0) + 1;
-  });
-
-  return {
-    selectedId,
-    selectedNode,
-    nodeMap,
-    visibleNodes,
-    visibleEdges,
-    relatedEdges,
-    relatedByType,
-    neighborIds,
-    positions,
-    layout,
-    typeCounts,
-    edgeGroupCounts,
-    totalNodeCount: allNodes.length,
-    totalEdgeCount: allEdges.length,
-    culledNodeCount: Math.max(0, eligibleNodes.length - visibleNodes.length),
-    culledEdgeCount: Math.max(0, eligibleEdges.length - visibleEdges.length),
-    orderScoped,
-    maxOrders,
-    visibleOrderCount,
-    selectedStats,
-  };
+  const dir = dx > 0 ? 1 : -1;
+  return `M ${a.x + dir * ra} ${a.y} L ${b.x - dir * rb} ${b.y}`;
 }
 
 function graphViewportTransform() {
@@ -2341,14 +2375,11 @@ function applyGraphNodePositions(root) {
     if (!pos) return;
     nodeEl.setAttribute("transform", `translate(${pos.x} ${pos.y})`);
   });
-  container.querySelectorAll("[data-graph-link]").forEach((lineEl) => {
-    const source = positions[lineEl.dataset.source];
-    const target = positions[lineEl.dataset.target];
+  container.querySelectorAll("[data-graph-link]").forEach((pathEl) => {
+    const source = positions[pathEl.dataset.source];
+    const target = positions[pathEl.dataset.target];
     if (!source || !target) return;
-    lineEl.setAttribute("x1", String(source.x + 28));
-    lineEl.setAttribute("y1", String(source.y));
-    lineEl.setAttribute("x2", String(target.x - 28));
-    lineEl.setAttribute("y2", String(target.y));
+    pathEl.setAttribute("d", graphEdgePathD(source, target));
   });
 }
 
@@ -2358,641 +2389,10 @@ function fitGraphViewport(bounds) {
   const height = Math.max(120, (bounds.maxY - bounds.minY) + 120);
   const canvasWidth = bounds.canvasWidth || 1220;
   const canvasHeight = bounds.canvasHeight || 640;
-  const zoom = Math.max(0.62, Math.min(1.6, Math.min((canvasWidth - 120) / width, (canvasHeight - 120) / height)));
+  const zoom = Math.max(0.32, Math.min(1.6, Math.min((canvasWidth - 120) / width, (canvasHeight - 120) / height)));
   app.graphView.zoom = zoom;
   app.graphView.panX = 60 - bounds.minX * zoom;
   app.graphView.panY = 80 - bounds.minY * zoom;
-}
-
-function renderInteractiveGraph() {
-  const graph = buildGraphViewModel();
-  if (!graph || !graph.visibleNodes.length) {
-    return renderEmptyState("暂无图谱节点", "请先构建图谱，或确认当前实例已正确加载。");
-  }
-
-  const nodeDegree = new Map(graph.visibleNodes.map((node) => [node.id, 0]));
-  graph.visibleEdges.forEach((edge) => {
-    nodeDegree.set(edge.source, (nodeDegree.get(edge.source) || 0) + 1);
-    nodeDegree.set(edge.target, (nodeDegree.get(edge.target) || 0) + 1);
-  });
-  const selectedNode = graph.selectedNode;
-  const selectedId = graph.selectedId;
-  const svg = `
-    <svg viewBox="0 0 ${graph.layout.width} ${graph.layout.height}" class="graph-svg interactive" data-graph-canvas role="img" aria-label="Graph Interactive View">
-      <defs>
-        <pattern id="graph-grid-pattern" width="28" height="28" patternUnits="userSpaceOnUse">
-          <path d="M 28 0 L 0 0 0 28" fill="none" stroke="rgba(163,178,193,0.22)" stroke-width="1"></path>
-        </pattern>
-        <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ca0b5"></path>
-        </marker>
-      </defs>
-      <rect x="0" y="0" width="${graph.layout.width}" height="${graph.layout.height}" rx="26" fill="url(#graph-grid-pattern)" class="graph-canvas-bg"></rect>
-      <g data-graph-viewport transform="${graphViewportTransform()}">
-        <g data-graph-links>
-          ${graph.visibleEdges.map((edge) => {
-            const source = graph.positions[edge.source];
-            const target = graph.positions[edge.target];
-            const highlighted = graph.neighborIds.has(edge.source) && graph.neighborIds.has(edge.target);
-            return `
-              <line
-                class="graph-link ${highlighted ? "highlighted" : ""} graph-link-${escapeHtml(edge.group)}"
-                data-graph-link
-                data-source="${escapeHtml(edge.source)}"
-                data-target="${escapeHtml(edge.target)}"
-                x1="${source.x + 28}" y1="${source.y}"
-                x2="${target.x - 28}" y2="${target.y}"
-                marker-end="url(#graph-arrow)"
-              ></line>
-            `;
-          }).join("")}
-        </g>
-        <g data-graph-nodes>
-          ${graph.visibleNodes.map((node) => {
-            const pos = graph.positions[node.id];
-            const isSelected = node.id === selectedId;
-            const isNeighbor = graph.neighborIds.has(node.id) && !isSelected;
-            return `
-              <g
-                class="graph-node ${isSelected ? "selected" : isNeighbor ? "neighbor" : ""}"
-                data-action="focus-graph-node"
-                data-id="${escapeHtml(node.id)}"
-                data-graph-node="${escapeHtml(node.id)}"
-                data-node-label="${escapeHtml(node.label || node.id)}"
-                data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}"
-                data-node-degree="${formatInt(nodeDegree.get(node.id) || 0)}"
-                transform="translate(${pos.x} ${pos.y})"
-                style="cursor:pointer"
-              >
-                <title>${escapeHtml(`${graphTypeLabel(node.type)}\n${node.label || node.id}\nID: ${node.id}\n关联关系: ${formatInt(nodeDegree.get(node.id) || 0)}`)}</title>
-                <circle class="graph-node-hitbox" r="28" fill="transparent"></circle>
-                <circle r="${isSelected ? 22 : 18}" fill="${graphTypeColor(node.type)}"></circle>
-                <text x="0" y="4" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">${escapeHtml(String(node.type).slice(0, 3).toUpperCase())}</text>
-                <text class="graph-node-label" x="0" y="34" text-anchor="middle">${escapeHtml(String(node.label).slice(0, 18))}</text>
-              </g>
-            `;
-          }).join("")}
-        </g>
-      </g>
-    </svg>
-  `;
-
-  const nodeTypeFilters = Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
-      <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
-        <span class="filter-chip-dot" style="background:${graphTypeColor(type)}"></span>
-        ${escapeHtml(graphTypeLabel(type))}
-        <span class="filter-chip-count">${formatInt(graph.typeCounts[type] || 0)}</span>
-      </button>
-    `).join("");
-  const edgeGroupFilters = Object.entries(app.graphView.edgeGroups || {}).map(([group, enabled]) => `
-      <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-edge-group" data-key="${escapeHtml(group)}">
-        ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}
-        <span class="filter-chip-count">${formatInt(graph.edgeGroupCounts[group] || 0)}</span>
-      </button>
-    `).join("");
-
-  const bounds = Object.values(graph.positions).reduce((acc, item) => ({
-    minX: Math.min(acc.minX, item.x),
-    maxX: Math.max(acc.maxX, item.x),
-    minY: Math.min(acc.minY, item.y),
-    maxY: Math.max(acc.maxY, item.y),
-    canvasWidth: graph.layout.width,
-    canvasHeight: graph.layout.height,
-  }), { minX: Infinity, maxX: 0, minY: Infinity, maxY: 0, canvasWidth: graph.layout.width, canvasHeight: graph.layout.height });
-  app.graphView.bounds = bounds;
-
-  return `
-    <div class="surface-card graph-workbench">
-      <div class="card-head">
-        <h3>可交互有向异构图</h3>
-        <p>保留所有关系类型，并通过图层筛选、焦点邻域、拖拽缩放和节点联动，让复杂结构可讲清、可分析、可展示。</p>
-      </div>
-      <div class="graph-toolbar">
-        <div class="inline-actions">
-          <button class="btn ${app.graphView.mode === "focus" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
-          <button class="btn ${app.graphView.mode === "all" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
-          <button class="btn btn-ghost" type="button" data-action="fit-graph-view">适配视图</button>
-          <button class="btn btn-ghost" type="button" data-action="reset-graph-view">重置视图</button>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-out">-</button>
-          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen">全屏查看</button>
-          <span class="graph-zoom-pill" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-in">+</button>
-        </div>
-        <label class="graph-search">
-          <span>搜索</span>
-          <input type="search" value="${escapeHtml(app.graphView.search || "")}" data-graph-search placeholder="搜索订单、任务、工序或资源">
-        </label>
-        <label class="graph-search graph-order-limit">
-          <span>鏈€澶氬睍绀鸿鍗?</span>
-          <input type="number" min="1" max="20" step="1" value="${escapeHtml(String(app.graphView.maxOrders || 6))}" id="graph-max-orders">
-        </label>
-      </div>
-        <label class="graph-search graph-order-limit">
-          <span>鏈€澶氬睍绀鸿鍗?</span>
-          <input type="number" min="1" max="20" step="1" value="${escapeHtml(String(app.graphView.maxOrders || 6))}" id="graph-max-orders">
-        </label>
-      <div class="graph-stage-meta">
-        <span>展示节点 ${formatInt(graph.visibleNodes.length)} / ${formatInt(graph.totalNodeCount)}</span>
-        <span>展示边 ${formatInt(graph.visibleEdges.length)} / ${formatInt(graph.totalEdgeCount)}</span>
-        <span>${graph.orderScoped ? "大图已按完整订单子图保留全部关系" : "支持滚轮缩放、拖拽空白平移、拖拽节点微调布局"}</span>
-      </div>
-      <div class="graph-filter-grid">
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">节点层级</div>
-          <div class="filter-chip-row">${nodeTypeFilters}</div>
-        </section>
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">关系图层</div>
-          <div class="filter-chip-row">${edgeGroupFilters}</div>
-        </section>
-      </div>
-      <div class="split-panel graph-split">
-        <article class="surface-card graph-stage-card">
-          <div class="graph-shell">${svg}</div>
-          <div class="legend graph-legend">
-            ${GRAPH_NODE_ORDER.filter((type) => graph.typeCounts[type] || app.graphView.nodeTypes[type]).map((type) => `
-              <span class="legend-item">
-                <span class="legend-swatch" style="background:${graphTypeColor(type)}"></span>
-                ${escapeHtml(graphTypeLabel(type))}
-              </span>
-            `).join("")}
-            ${Object.keys(app.graphView.edgeGroups || {}).map((group) => `
-              <span class="legend-item">
-                <span class="legend-line legend-line-${escapeHtml(group)}"></span>
-                ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}
-              </span>
-            `).join("")}
-          </div>
-          ${(graph.culledNodeCount || graph.culledEdgeCount) ? `
-            <div class="graph-footnote">
-              当前为了保证大实例下交互流畅，已按优先级收敛部分节点/边，但所有关系类型都已纳入可视化逻辑。
-              ${graph.orderScoped ? "当前优先按完整订单子图进行保留，保证已展示订单的关联关系不被截断。" : ""}
-              省略节点 ${formatInt(graph.culledNodeCount)}，省略边 ${formatInt(graph.culledEdgeCount)}。
-            </div>
-          ` : ""}
-        </article>
-        <article class="surface-card graph-detail-card">
-          <div class="card-head">
-            <h3>节点详情与关系解释</h3>
-            <p>从当前节点切入解释复杂性，帮助业务理解关键路径、资源耦合和装配结构。</p>
-          </div>
-          <div class="graph-hover-preview" id="graph-hover-preview">
-            ${selectedNode ? `当前选中：${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / 关联关系 ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "悬浮节点可快速预览其类型、标签和关系数，点击后会在右侧锁定完整详情。"}
-          </div>
-          ${selectedNode ? renderKeyValueGrid([
-            { label: "节点 ID", value: escapeHtml(selectedNode.id || "-") },
-            { label: "节点类型", value: escapeHtml(graphTypeLabel(selectedNode.type)) },
-            { label: "显示标签", value: escapeHtml(selectedNode.label || "-") },
-            { label: "关联边数", value: formatInt(graph.relatedEdges.length) },
-          ]) : renderEmptyState("未选中节点", "点击图中的节点查看详细关系。")}
-          ${selectedNode ? `
-            <div class="graph-selected-summary" data-graph-selected-summary>
-              <div class="graph-selected-main">
-                <span class="graph-selected-badge" style="background:${graphTypeColor(selectedNode.type)}"></span>
-                <div>
-                  <div class="graph-selected-title">${escapeHtml(selectedNode.label || selectedNode.id)}</div>
-                  <div class="graph-selected-meta">${escapeHtml(graphTypeLabel(selectedNode.type))} · ${escapeHtml(selectedNode.entity_id || selectedNode.id || "-")}</div>
-                </div>
-              </div>
-              <div class="graph-selected-stats">
-                <span>鍏宠仈鍏崇郴 ${formatInt(nodeDegree.get(selectedNode.id) || 0)}</span>
-                <span>閭诲眳鑺傜偣 ${formatInt(graph.neighborIds.size ? graph.neighborIds.size - 1 : 0)}</span>
-                <span>鍙杈?${formatInt(graph.relatedEdges.length)}</span>
-              </div>
-            </div>
-          ` : ""}
-          ${Object.keys(graph.relatedByType).length ? `
-            <div class="graph-neighbor-groups">
-              ${Object.entries(graph.relatedByType).map(([type, items]) => `
-                <section class="graph-neighbor-group">
-                  <div class="graph-filter-title">${escapeHtml(graphTypeLabel(type))}</div>
-                  <div class="neighbor-pill-row">
-                    ${items.slice(0, 10).map((item) => `
-                      <button class="neighbor-pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(item.id)}">${escapeHtml(String(item.label).slice(0, 18))}</button>
-                    `).join("")}
-                  </div>
-                </section>
-              `).join("")}
-            </div>
-          ` : ""}
-          ${graph.relatedEdges.length ? renderSimpleTable(
-            ["关系", "起点", "终点"],
-            graph.relatedEdges.slice(0, 14).map((edge) => [
-              escapeHtml(humanizeCodeLabel(edge.edgeType)),
-              escapeHtml(edge.source),
-              escapeHtml(edge.target),
-            ]),
-            { footer: graph.relatedEdges.length > 14 ? `当前节点共关联 ${graph.relatedEdges.length} 条边，这里展示前 14 条。` : "" },
-          ) : ""}
-        </article>
-      </div>
-    </div>
-  `;
-}
-
-function renderInteractiveGraph() {
-  const graph = buildGraphViewModel();
-  if (!graph || !graph.visibleNodes.length) {
-    return renderEmptyState("暂无图谱节点", "请先构建图谱，或确认当前实例已经正确加载。");
-  }
-
-  const nodeDegree = new Map(graph.visibleNodes.map((node) => [node.id, 0]));
-  graph.visibleEdges.forEach((edge) => {
-    nodeDegree.set(edge.source, (nodeDegree.get(edge.source) || 0) + 1);
-    nodeDegree.set(edge.target, (nodeDegree.get(edge.target) || 0) + 1);
-  });
-
-  const selectedNode = graph.selectedNode;
-  const selectedId = graph.selectedId;
-  const svg = `
-    <svg viewBox="0 0 ${graph.layout.width} ${graph.layout.height}" class="graph-svg interactive" data-graph-canvas role="img" aria-label="Graph Interactive View">
-      <defs>
-        <pattern id="graph-grid-pattern" width="28" height="28" patternUnits="userSpaceOnUse">
-          <path d="M 28 0 L 0 0 0 28" fill="none" stroke="rgba(163,178,193,0.22)" stroke-width="1"></path>
-        </pattern>
-        <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ca0b5"></path>
-        </marker>
-      </defs>
-      <rect x="0" y="0" width="${graph.layout.width}" height="${graph.layout.height}" rx="26" fill="url(#graph-grid-pattern)" class="graph-canvas-bg"></rect>
-      <g data-graph-viewport transform="${graphViewportTransform()}">
-        <g data-graph-links>
-          ${graph.visibleEdges.map((edge) => {
-            const source = graph.positions[edge.source];
-            const target = graph.positions[edge.target];
-            const highlighted = graph.neighborIds.has(edge.source) && graph.neighborIds.has(edge.target);
-            return `
-              <line
-                class="graph-link ${highlighted ? "highlighted" : ""} graph-link-${escapeHtml(edge.group)}"
-                data-graph-link
-                data-source="${escapeHtml(edge.source)}"
-                data-target="${escapeHtml(edge.target)}"
-                x1="${source.x + 28}" y1="${source.y}"
-                x2="${target.x - 28}" y2="${target.y}"
-                marker-end="url(#graph-arrow)"
-              ></line>
-            `;
-          }).join("")}
-        </g>
-        <g data-graph-nodes>
-          ${graph.visibleNodes.map((node) => {
-            const pos = graph.positions[node.id];
-            const isSelected = node.id === selectedId;
-            const isNeighbor = graph.neighborIds.has(node.id) && !isSelected;
-            return `
-              <g
-                class="graph-node ${isSelected ? "selected" : isNeighbor ? "neighbor" : ""}"
-                data-action="focus-graph-node"
-                data-id="${escapeHtml(node.id)}"
-                data-graph-node="${escapeHtml(node.id)}"
-                data-node-label="${escapeHtml(node.label || node.id)}"
-                data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}"
-                data-node-degree="${formatInt(nodeDegree.get(node.id) || 0)}"
-                data-node-entity-id="${escapeHtml(node.entity_id || entityIdFromGraphId(node.id))}"
-                transform="translate(${pos.x} ${pos.y})"
-                style="cursor:pointer"
-              >
-                <title>${escapeHtml(`${graphTypeLabel(node.type)}\n${node.label || node.id}\nID: ${node.id}\n关联关系: ${formatInt(nodeDegree.get(node.id) || 0)}`)}</title>
-                <circle class="graph-node-hitbox" r="28" fill="transparent"></circle>
-                <circle r="${isSelected ? 22 : 18}" fill="${graphTypeColor(node.type)}"></circle>
-                <text x="0" y="4" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">${escapeHtml(String(node.type).slice(0, 3).toUpperCase())}</text>
-                <text class="graph-node-label" x="0" y="34" text-anchor="middle">${escapeHtml(String(node.label).slice(0, 18))}</text>
-              </g>
-            `;
-          }).join("")}
-        </g>
-      </g>
-    </svg>
-  `;
-
-  const nodeTypeFilters = Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
-      <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
-        <span class="filter-chip-dot" style="background:${graphTypeColor(type)}"></span>
-        ${escapeHtml(graphTypeLabel(type))}
-        <span class="filter-chip-count">${formatInt(graph.typeCounts[type] || 0)}</span>
-      </button>
-    `).join("");
-  const edgeGroupFilters = Object.entries(app.graphView.edgeGroups || {}).map(([group, enabled]) => `
-      <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-edge-group" data-key="${escapeHtml(group)}">
-        ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}
-        <span class="filter-chip-count">${formatInt(graph.edgeGroupCounts[group] || 0)}</span>
-      </button>
-    `).join("");
-
-  const bounds = Object.values(graph.positions).reduce((acc, item) => ({
-    minX: Math.min(acc.minX, item.x),
-    maxX: Math.max(acc.maxX, item.x),
-    minY: Math.min(acc.minY, item.y),
-    maxY: Math.max(acc.maxY, item.y),
-    canvasWidth: graph.layout.width,
-    canvasHeight: graph.layout.height,
-  }), { minX: Infinity, maxX: 0, minY: Infinity, maxY: 0, canvasWidth: graph.layout.width, canvasHeight: graph.layout.height });
-  app.graphView.bounds = bounds;
-
-  return `
-    <div class="surface-card graph-workbench">
-      <div class="card-head">
-        <h3>可交互有向异构图</h3>
-        <p>保留订单、任务、工序、机器、工装、人员等全部关系类型，并通过图层筛选、焦点邻域、拖拽缩放和节点联动，让复杂结构可解释、可钻取、可展示。</p>
-      </div>
-      <div class="graph-toolbar">
-        <div class="inline-actions">
-          <button class="btn ${app.graphView.mode === "focus" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
-          <button class="btn ${app.graphView.mode === "all" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
-          <button class="btn btn-ghost" type="button" data-action="fit-graph-view">适配视图</button>
-          <button class="btn btn-ghost" type="button" data-action="reset-graph-view">重置视图</button>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-out">-</button>
-          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen">全屏查看</button>
-          <span class="graph-zoom-pill" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-in">+</button>
-        </div>
-        <label class="graph-search">
-          <span>搜索</span>
-          <input type="search" value="${escapeHtml(app.graphView.search || "")}" data-graph-search placeholder="搜索订单、任务、工序或资源">
-        </label>
-      </div>
-      <div class="graph-stage-meta">
-        <span>展示节点 ${formatInt(graph.visibleNodes.length)} / ${formatInt(graph.totalNodeCount)}</span>
-        <span>展示边 ${formatInt(graph.visibleEdges.length)} / ${formatInt(graph.totalEdgeCount)}</span>
-        <span>${graph.orderScoped ? "大图已按完整订单子图保留全部关联" : "支持滚轮缩放、拖拽平移和节点微调布局"}</span>
-      </div>
-      <div class="graph-filter-grid">
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">节点层级</div>
-          <div class="filter-chip-row">${nodeTypeFilters}</div>
-        </section>
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">关系图层</div>
-          <div class="filter-chip-row">${edgeGroupFilters}</div>
-        </section>
-      </div>
-      <div class="split-panel graph-split">
-        <article class="surface-card graph-stage-card">
-          <div class="graph-shell">${svg}</div>
-          <div class="legend graph-legend">
-            ${GRAPH_NODE_ORDER.filter((type) => graph.typeCounts[type] || app.graphView.nodeTypes[type]).map((type) => `
-              <span class="legend-item">
-                <span class="legend-swatch" style="background:${graphTypeColor(type)}"></span>
-                ${escapeHtml(graphTypeLabel(type))}
-              </span>
-            `).join("")}
-            ${Object.keys(app.graphView.edgeGroups || {}).map((group) => `
-              <span class="legend-item">
-                <span class="legend-line legend-line-${escapeHtml(group)}"></span>
-                ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}
-              </span>
-            `).join("")}
-          </div>
-          ${(graph.culledNodeCount || graph.culledEdgeCount) ? `
-            <div class="graph-footnote">
-              当前为保证大实例下交互流畅，已按优先级收敛部分节点和边，但所有关系类型都纳入了可视化逻辑。
-              ${graph.orderScoped ? "当前优先按完整订单子图保留，已展示订单不会被拆断。" : ""}
-              省略节点 ${formatInt(graph.culledNodeCount)}，省略边 ${formatInt(graph.culledEdgeCount)}。
-            </div>
-          ` : ""}
-        </article>
-        <article class="surface-card graph-detail-card">
-          <div class="card-head">
-            <h3>节点详情与关系解释</h3>
-            <p>点击左侧节点后，右侧立即展示完整属性、关联对象与关系证据，便于业务快速理解复杂性。</p>
-          </div>
-          <div class="graph-hover-preview" id="graph-hover-preview">
-            ${selectedNode ? `当前选中：${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / 关联关系 ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "悬浮节点可快速预览其类型、标签和关系数，点击后会在右侧锁定完整详情。"}
-          </div>
-          ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : renderEmptyState("未选中节点", "点击图中的节点查看详细关系。")}
-          ${Object.keys(graph.relatedByType).length ? `
-            <div class="graph-neighbor-groups">
-              ${Object.entries(graph.relatedByType).map(([type, items]) => `
-                <section class="graph-neighbor-group">
-                  <div class="graph-filter-title">${escapeHtml(graphTypeLabel(type))}</div>
-                  <div class="neighbor-pill-row">
-                    ${items.slice(0, 10).map((item) => `
-                      <button class="neighbor-pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(item.id)}">${escapeHtml(String(item.label).slice(0, 18))}</button>
-                    `).join("")}
-                  </div>
-                </section>
-              `).join("")}
-            </div>
-          ` : ""}
-          ${graph.relatedEdges.length ? renderSimpleTable(
-            ["关系", "起点", "终点"],
-            graph.relatedEdges.slice(0, 14).map((edge) => [
-              escapeHtml(humanizeCodeLabel(edge.edgeType)),
-              escapeHtml(edge.source),
-              escapeHtml(edge.target),
-            ]),
-            { footer: graph.relatedEdges.length > 14 ? `当前节点共关联 ${graph.relatedEdges.length} 条边，这里展示前 14 条。` : "" },
-          ) : ""}
-        </article>
-      </div>
-    </div>
-  `;
-}
-
-function renderInteractiveGraph() {
-  const graph = buildGraphViewModel();
-  if (!graph || !graph.visibleNodes.length) {
-    return renderEmptyState("\u6682\u65e0\u56fe\u8c31\u8282\u70b9", "\u8bf7\u5148\u6784\u5efa\u56fe\u8c31\uff0c\u6216\u786e\u8ba4\u5f53\u524d\u5b9e\u4f8b\u5df2\u7ecf\u6b63\u786e\u52a0\u8f7d\u3002");
-  }
-
-  const nodeDegree = new Map(graph.visibleNodes.map((node) => [node.id, 0]));
-  graph.visibleEdges.forEach((edge) => {
-    nodeDegree.set(edge.source, (nodeDegree.get(edge.source) || 0) + 1);
-    nodeDegree.set(edge.target, (nodeDegree.get(edge.target) || 0) + 1);
-  });
-
-  const selectedNode = graph.selectedNode;
-  const selectedId = graph.selectedId;
-  const svg = `
-    <svg viewBox="0 0 ${graph.layout.width} ${graph.layout.height}" class="graph-svg interactive" data-graph-canvas role="img" aria-label="\u53ef\u4ea4\u4e92\u6709\u5411\u5f02\u6784\u56fe">
-      <defs>
-        <pattern id="graph-grid-pattern" width="28" height="28" patternUnits="userSpaceOnUse">
-          <path d="M 28 0 L 0 0 0 28" fill="none" stroke="rgba(163,178,193,0.22)" stroke-width="1"></path>
-        </pattern>
-        <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ca0b5"></path>
-        </marker>
-      </defs>
-      <rect x="0" y="0" width="${graph.layout.width}" height="${graph.layout.height}" rx="26" fill="url(#graph-grid-pattern)" class="graph-canvas-bg"></rect>
-      <g data-graph-viewport transform="${graphViewportTransform()}">
-        <g data-graph-links>
-          ${graph.visibleEdges.map((edge) => {
-            const source = graph.positions[edge.source];
-            const target = graph.positions[edge.target];
-            const highlighted = graph.neighborIds.has(edge.source) || graph.neighborIds.has(edge.target);
-            return `
-              <line
-                class="graph-link ${highlighted ? "highlighted" : ""} graph-link-${escapeHtml(edge.group)}"
-                data-graph-link
-                data-source="${escapeHtml(edge.source)}"
-                data-target="${escapeHtml(edge.target)}"
-                x1="${source.x + 28}" y1="${source.y}"
-                x2="${target.x - 28}" y2="${target.y}"
-                marker-end="url(#graph-arrow)"
-              ></line>
-            `;
-          }).join("")}
-        </g>
-        <g data-graph-nodes>
-          ${graph.visibleNodes.map((node) => {
-            const pos = graph.positions[node.id];
-            const isSelected = node.id === selectedId;
-            const isNeighbor = graph.neighborIds.has(node.id) && !isSelected;
-            return `
-              <g
-                class="graph-node ${isSelected ? "selected" : isNeighbor ? "neighbor" : ""}"
-                data-action="focus-graph-node"
-                data-id="${escapeHtml(node.id)}"
-                data-graph-node="${escapeHtml(node.id)}"
-                data-node-label="${escapeHtml(node.label || node.id)}"
-                data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}"
-                data-node-degree="${formatInt(nodeDegree.get(node.id) || 0)}"
-                data-node-entity-id="${escapeHtml(node.entity_id || entityIdFromGraphId(node.id))}"
-                transform="translate(${pos.x} ${pos.y})"
-                style="cursor:pointer"
-              >
-                <title>${escapeHtml(`${graphTypeLabel(node.type)}\n${node.label || node.id}\nID: ${node.id}\n\u5173\u8054\u5173\u7cfb: ${formatInt(nodeDegree.get(node.id) || 0)}`)}</title>
-                <circle class="graph-node-hitbox" r="28" fill="transparent"></circle>
-                <circle r="${isSelected ? 22 : 18}" fill="${graphTypeColor(node.type)}"></circle>
-                <text x="0" y="4" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">${escapeHtml(String(node.type).slice(0, 3).toUpperCase())}</text>
-                <text class="graph-node-label" x="0" y="34" text-anchor="middle">${escapeHtml(String(node.label).slice(0, 18))}</text>
-              </g>
-            `;
-          }).join("")}
-        </g>
-      </g>
-    </svg>
-  `;
-
-  const nodeTypeFilters = Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
-      <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
-        <span class="filter-chip-dot" style="background:${graphTypeColor(type)}"></span>
-        ${escapeHtml(graphTypeLabel(type))}
-        <span class="filter-chip-count">${formatInt(graph.typeCounts[type] || 0)}</span>
-      </button>
-    `).join("");
-  const edgeGroupFilters = Object.entries(app.graphView.edgeGroups || {}).map(([group, enabled]) => `
-      <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-edge-group" data-key="${escapeHtml(group)}">
-        ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}
-        <span class="filter-chip-count">${formatInt(graph.edgeGroupCounts[group] || 0)}</span>
-      </button>
-    `).join("");
-
-  const bounds = Object.values(graph.positions).reduce((acc, item) => ({
-    minX: Math.min(acc.minX, item.x),
-    maxX: Math.max(acc.maxX, item.x),
-    minY: Math.min(acc.minY, item.y),
-    maxY: Math.max(acc.maxY, item.y),
-    canvasWidth: graph.layout.width,
-    canvasHeight: graph.layout.height,
-  }), { minX: Infinity, maxX: 0, minY: Infinity, maxY: 0, canvasWidth: graph.layout.width, canvasHeight: graph.layout.height });
-  app.graphView.bounds = bounds;
-
-  const selectedSummary = selectedNode ? `
-    <div class="graph-selected-summary" data-graph-selected-summary>
-      <div class="graph-selected-main">
-        <span class="graph-selected-badge" style="background:${graphTypeColor(selectedNode.type)}"></span>
-        <div>
-          <div class="graph-selected-title">${escapeHtml(selectedNode.label || selectedNode.id)}</div>
-          <div class="graph-selected-meta">${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.entity_id || selectedNode.id || "-")}</div>
-        </div>
-      </div>
-      <div class="graph-selected-stats">
-        <span>\u76f4\u63a5\u90bb\u5c45 ${formatInt(graph.selectedStats.directNeighborCount)}</span>
-        <span>\u8ba2\u5355 ${formatInt(graph.selectedStats.orderCount)}</span>
-        <span>\u4efb\u52a1 ${formatInt(graph.selectedStats.taskCount)}</span>
-        <span>\u5de5\u5e8f ${formatInt(graph.selectedStats.operationCount)}</span>
-        <span>\u673a\u5668 ${formatInt(graph.selectedStats.machineCount)}</span>
-        <span>\u5de5\u88c5 ${formatInt(graph.selectedStats.toolingCount)}</span>
-        <span>\u4eba\u5458 ${formatInt(graph.selectedStats.personnelCount)}</span>
-        <span>\u5173\u8054\u8fb9 ${formatInt(graph.selectedStats.relatedEdgeCount)}</span>
-      </div>
-    </div>
-  ` : renderEmptyState("\u672a\u9009\u4e2d\u8282\u70b9", "\u70b9\u51fb\u5de6\u4fa7\u56fe\u4e2d\u7684\u8282\u70b9\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u8be5\u8282\u70b9\u76f8\u5173\u7684\u5b8c\u6574\u7edf\u8ba1\u4e0e\u5173\u7cfb\u8bf4\u660e\u3002");
-
-  return `
-    <div class="surface-card graph-workbench">
-      <div class="card-head">
-        <h3>\u53ef\u4ea4\u4e92\u6709\u5411\u5f02\u6784\u56fe</h3>
-        <p>\u4fdd\u7559\u8ba2\u5355\u3001\u4efb\u52a1\u3001\u5de5\u5e8f\u3001\u673a\u5668\u3001\u5de5\u88c5\u3001\u4eba\u5458\u7b49\u5168\u90e8\u5173\u7cfb\u7c7b\u578b\uff0c\u5e76\u901a\u8fc7\u56fe\u5c42\u7b5b\u9009\u3001\u7126\u70b9\u90bb\u57df\u3001\u62d6\u62fd\u7f29\u653e\u548c\u8282\u70b9\u8054\u52a8\uff0c\u8ba9\u590d\u6742\u7ed3\u6784\u53ef\u89e3\u91ca\u3001\u53ef\u94bb\u53d6\u3001\u53ef\u5c55\u793a\u3002</p>
-      </div>
-      <div class="graph-toolbar">
-        <div class="inline-actions">
-          <button class="btn ${app.graphView.mode === "focus" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="focus">\u7126\u70b9\u90bb\u57df</button>
-          <button class="btn ${app.graphView.mode === "all" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="all">\u5168\u5173\u7cfb\u89c6\u56fe</button>
-          <button class="btn btn-ghost" type="button" data-action="fit-graph-view">\u9002\u914d\u89c6\u56fe</button>
-          <button class="btn btn-ghost" type="button" data-action="reset-graph-view">\u91cd\u7f6e\u89c6\u56fe</button>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-out">-</button>
-          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen">\u5168\u5c4f\u67e5\u770b</button>
-          <span class="graph-zoom-pill" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-in">+</button>
-        </div>
-        <label class="graph-search">
-          <span>\u641c\u7d22\u8282\u70b9</span>
-          <input type="search" value="${escapeHtml(app.graphView.search || "")}" data-graph-search placeholder="\u641c\u7d22\u8ba2\u5355\u3001\u4efb\u52a1\u3001\u5de5\u5e8f\u6216\u8d44\u6e90">
-        </label>
-        <label class="graph-search graph-order-limit">
-          <span>\u6700\u591a\u5c55\u793a\u8ba2\u5355\u6570</span>
-          <input type="number" min="1" max="20" step="1" value="${escapeHtml(String(app.graphView.maxOrders || 6))}" id="graph-max-orders">
-        </label>
-      </div>
-      <div class="graph-stage-meta">
-        <span>\u5c55\u793a\u8282\u70b9 ${formatInt(graph.visibleNodes.length)} / ${formatInt(graph.totalNodeCount)}</span>
-        <span>\u5c55\u793a\u8fb9 ${formatInt(graph.visibleEdges.length)} / ${formatInt(graph.totalEdgeCount)}</span>
-        <span>${graph.orderScoped ? `\u5927\u56fe\u5df2\u6309\u5b8c\u6574\u8ba2\u5355\u5b50\u56fe\u4fdd\u7559\uff0c\u5f53\u524d\u6700\u591a\u5c55\u793a ${formatInt(graph.maxOrders)} \u4e2a\u8ba2\u5355` : "\u5f53\u524d\u89c6\u56fe\u652f\u6301\u6eda\u8f6e\u7f29\u653e\u3001\u62d6\u62fd\u5e73\u79fb\u548c\u8282\u70b9\u5fae\u8c03\u5e03\u5c40"}</span>
-      </div>
-      <div class="graph-filter-grid">
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">\u8282\u70b9\u5c42\u7ea7</div>
-          <div class="filter-chip-row">${nodeTypeFilters}</div>
-        </section>
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">\u5173\u7cfb\u5c42\u7ea7</div>
-          <div class="filter-chip-row">${edgeGroupFilters}</div>
-        </section>
-      </div>
-      <div class="split-panel graph-split">
-        <article class="surface-card graph-stage-card">
-          <div class="graph-hover-preview" data-graph-hover-preview>
-            ${selectedNode ? `\u5f53\u524d\u9009\u4e2d\uff1a${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / \u5173\u8054\u5173\u7cfb ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "\u5c06\u9f20\u6807\u60ac\u6d6e\u5230\u8282\u70b9\u4e0a\uff0c\u53ef\u5feb\u901f\u9884\u89c8\u8be5\u8282\u70b9\u540d\u79f0\u3001\u7c7b\u578b\u4e0e\u5173\u8054\u5173\u7cfb\u5f3a\u5ea6\u3002"}
-          </div>
-          <div class="graph-shell">${svg}</div>
-        </article>
-        <article class="surface-card graph-detail-card">
-          <div class="card-head">
-            <h3>\u8282\u70b9\u8be6\u60c5\u4e0e\u5173\u7cfb\u89e3\u91ca</h3>
-            <p>\u70b9\u51fb\u5de6\u4fa7\u4efb\u610f\u8282\u70b9\u540e\uff0c\u53f3\u4fa7\u4f1a\u8054\u52a8\u5237\u65b0\u8be5\u8282\u70b9\u7684\u5173\u8054\u7edf\u8ba1\u3001\u5c5e\u6027\u5b57\u6bb5\u3001\u5173\u7cfb\u6e05\u5355\u4e0e\u5c40\u90e8\u90bb\u57df\u5206\u5e03\u3002</p>
-          </div>
-          ${selectedSummary}
-          ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : renderEmptyState("\u672a\u9009\u4e2d\u8282\u70b9", "\u8bf7\u5148\u5728\u5de6\u4fa7\u56fe\u4e2d\u70b9\u51fb\u4e00\u4e2a\u8282\u70b9\u3002")}
-          ${Object.keys(graph.relatedByType).length ? `
-            <div class="graph-neighbor-groups">
-              ${Object.entries(graph.relatedByType).map(([type, items]) => `
-                <section class="graph-neighbor-group">
-                  <header>
-                    <strong>${escapeHtml(graphTypeLabel(type))}</strong>
-                    <span>${formatInt(items.length)} \u4e2a</span>
-                  </header>
-                  <div class="graph-neighbor-pills">
-                    ${items.slice(0, 10).map((item) => `<button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(item.id)}">${escapeHtml(item.label || item.id)}</button>`).join("")}
-                  </div>
-                </section>
-              `).join("")}
-            </div>
-          ` : ""}
-          ${graph.relatedEdges.length ? renderSimpleTable(
-            ["\u5173\u7cfb", "\u6765\u6e90", "\u76ee\u6807"],
-            graph.relatedEdges.slice(0, 12).map((edge) => [
-              escapeHtml(humanizeCodeLabel(edge.edgeType || edge.group || "-")),
-              escapeHtml(graph.nodeMap.get(edge.source)?.label || edge.source),
-              escapeHtml(graph.nodeMap.get(edge.target)?.label || edge.target),
-            ]),
-            { footer: graph.relatedEdges.length > 12 ? `\u5f53\u524d\u53ea\u5c55\u793a\u524d 12 \u6761\u5173\u8054\u8fb9\uff0c\u5171 ${graph.relatedEdges.length} \u6761\u3002` : "" },
-          ) : renderEmptyState("\u6682\u65e0\u5173\u8054\u8fb9", "\u5f53\u524d\u8282\u70b9\u5728\u53ef\u89c1\u56fe\u4e2d\u6ca1\u6709\u5173\u8054\u8fb9\u3002")}
-        </article>
-      </div>
-    </div>
-  `;
 }
 
 function renderGraphSection() {
@@ -3016,7 +2416,7 @@ function renderGraphSection() {
           <button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>
         </div>
       </article>
-      ${app.graphMeta ? renderLegacyCytoscapeGraph() : ""}
+      ${app.graphMeta ? renderInteractiveGraph() : ""}
     </div>
   `;
 }
@@ -3157,7 +2557,7 @@ function renderNewScene() {
   if (validationBox) validationBox.innerHTML = app.currentScene ? renderValidationPanel() : "";
   const graphBox = el("new-scene-graph");
   if (graphBox) graphBox.innerHTML = app.currentScene ? renderGraphSection() : "";
-  if (app.currentScene && app.graphMeta) requestAnimationFrame(() => mountLegacyCytoscapeGraph());
+  if (app.currentScene && app.graphMeta) requestAnimationFrame(() => mountInteractiveGraph());
 }
 
 function renderValidationPanel() {
@@ -3646,8 +3046,11 @@ function buildGraphSelectionScopeV2(selectedId, allNodes, allEdges) {
       directNeighborIds,
       edgeGroupCounts: { structure: 0, resource: 0, other: 0 },
       directEdgeGroupCounts: { structure: 0, resource: 0, other: 0 },
+      edgeTypeCounts: {},
       upstreamCount: 0,
       downstreamCount: 0,
+      upstreamNodeIds: [],
+      downstreamNodeIds: [],
       scopeHighlights: [],
     };
   }
@@ -3709,6 +3112,13 @@ function buildGraphSelectionScopeV2(selectedId, allNodes, allEdges) {
     if (edge.source === selectedId) downstreamNodeIds.add(edge.target);
   });
 
+  // 关系分解：按边类型统计（结构/资源/其他），供右侧"关系分解"面板与图例核对
+  const edgeTypeCounts = {};
+  scopeEdges.forEach((edge) => {
+    const key = edge.edgeType || edge.group || "unknown";
+    edgeTypeCounts[key] = (edgeTypeCounts[key] || 0) + 1;
+  });
+
   const orderIds = new Set(scopeNodes.filter((node) => node.type === 'order').map((node) => node.id));
   const scopeHighlights = [];
   if (selectedNode.type === 'order') {
@@ -3761,8 +3171,11 @@ function buildGraphSelectionScopeV2(selectedId, allNodes, allEdges) {
     directNeighborIds,
     edgeGroupCounts,
     directEdgeGroupCounts,
+    edgeTypeCounts,
     upstreamCount: upstreamNodeIds.size,
     downstreamCount: downstreamNodeIds.size,
+    upstreamNodeIds: Array.from(upstreamNodeIds),
+    downstreamNodeIds: Array.from(downstreamNodeIds),
     scopeHighlights,
   };
 }
@@ -3916,7 +3329,10 @@ function buildGraphViewModel() {
   const positions = {};
   visibleNodes.forEach((node) => {
     const base = layout.placed.get(node.id);
-    positions[node.id] = previousPositions[node.id] ? { ...previousPositions[node.id] } : { x: base?.x || 0, y: base?.y || 0 };
+    const prev = previousPositions[node.id];
+    positions[node.id] = prev
+      ? { x: prev.x, y: prev.y, r: base?.r || 18 }
+      : { x: base?.x || 0, y: base?.y || 0, r: base?.r || 18 };
   });
   app.graphView.positions = positions;
   app.selectedGraphNodeId = selectedId;
@@ -3981,10 +3397,11 @@ function buildGraphViewModel() {
   };
 }
 
+// —— 图谱 V2：泳道布局 + 三重编码 + 订单过滤 + 图例/统计/详情 ——
 function renderInteractiveGraph() {
   const graph = buildGraphViewModel();
   if (!graph || !graph.visibleNodes.length) {
-    return renderEmptyState("\u6682\u65e0\u56fe\u8c31\u8282\u70b9", "\u8bf7\u5148\u6784\u5efa\u56fe\u8c31\uff0c\u6216\u786e\u8ba4\u5f53\u524d\u5b9e\u4f8b\u5df2\u7ecf\u6b63\u786e\u52a0\u8f7d\u3002");
+    return renderEmptyState("暂无图谱节点", "请先构建图谱，或确认当前实例已正确加载。");
   }
 
   const nodeDegree = new Map(graph.visibleNodes.map((node) => [node.id, 0]));
@@ -3995,45 +3412,86 @@ function renderInteractiveGraph() {
 
   const selectedNode = graph.selectedNode;
   const selectedId = graph.selectedId;
+  const scope = graph.selectionScope || {};
+  const orderOption = selectedGraphOrderOption();
+  const orderEntityId = orderOption?.entity_id || entityIdFromGraphId(app.selectedGraphOrderId || "");
+  const orderColor = orderColorFor(orderEntityId);
+
+  // 面包屑统计基于当前已加载的订单簇（全量），而非可见局部图
+  const loadedCounts = {};
+  asArray(app.graphNodes).forEach((raw) => {
+    const type = String(raw.node_type || raw.type || "other").toLowerCase();
+    loadedCounts[type] = (loadedCounts[type] || 0) + 1;
+  });
+  const loadedEdgeCount = asArray(app.graphEdges).length;
+
+  const edgeMarkers = { structure: "graph-arrow-structure", resource: "graph-arrow-resource", other: "graph-arrow-other" };
+  const familyLabels = { plan: "规划链 · 冷色", resource: "资源 · 暖色", other: "其他关系" };
+
   const svg = `
-    <svg viewBox="0 0 ${graph.layout.width} ${graph.layout.height}" class="graph-svg interactive" data-graph-canvas role="img" aria-label="\u53ef\u4ea4\u4e92\u6709\u5411\u5f02\u6784\u56fe">
+    <svg viewBox="0 0 ${graph.layout.width} ${graph.layout.height}" class="graph-svg interactive" data-graph-canvas role="img" aria-label="可交互有向异构图">
       <defs>
         <pattern id="graph-grid-pattern" width="28" height="28" patternUnits="userSpaceOnUse">
           <path d="M 28 0 L 0 0 0 28" fill="none" stroke="rgba(163,178,193,0.22)" stroke-width="1"></path>
         </pattern>
-        <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ca0b5"></path>
+        <marker id="graph-arrow-structure" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d53c0"></path>
+        </marker>
+        <marker id="graph-arrow-resource" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2620a"></path>
+        </marker>
+        <marker id="graph-arrow-other" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa5b1"></path>
         </marker>
       </defs>
       <rect x="0" y="0" width="${graph.layout.width}" height="${graph.layout.height}" rx="26" fill="url(#graph-grid-pattern)" class="graph-canvas-bg"></rect>
       <g data-graph-viewport transform="${graphViewportTransform()}">
+        <g data-graph-lanes>
+          ${(graph.layout.families || []).map((fam) => `<text class="graph-family-label graph-family-${fam.family}" x="${fam.x + 6}" y="24">${escapeHtml(familyLabels[fam.family] || fam.family)}</text>`).join("")}
+          ${(graph.layout.lanes || []).map((lane) => `
+            <rect class="graph-lane graph-lane-${lane.family}" x="${lane.x}" y="${lane.y}" width="${lane.width}" height="${lane.height}" rx="16"></rect>
+            <text class="graph-lane-label" x="${lane.x + 16}" y="${lane.y + 26}">${escapeHtml(lane.label)}</text>
+            <text class="graph-lane-count" x="${lane.x + 16}" y="${lane.y + 42}">${formatInt(lane.count)} 个节点</text>
+          `).join("")}
+        </g>
         <g data-graph-links>
           ${graph.visibleEdges.map((edge) => {
             const source = graph.positions[edge.source];
             const target = graph.positions[edge.target];
+            if (!source || !target) return "";
             const highlighted = graph.highlightedNodeIds.has(edge.source) && graph.highlightedNodeIds.has(edge.target);
+            const group = ["structure", "resource", "other"].includes(edge.group) ? edge.group : "other";
             return `
-              <line
-                class="graph-link ${highlighted ? "highlighted" : ""} graph-link-${escapeHtml(edge.group)}"
+              <path
+                class="graph-link graph-link-${group} ${highlighted ? "highlighted" : ""}"
                 data-graph-link
                 data-source="${escapeHtml(edge.source)}"
                 data-target="${escapeHtml(edge.target)}"
-                x1="${source.x + 28}" y1="${source.y}"
-                x2="${target.x - 28}" y2="${target.y}"
-                marker-end="url(#graph-arrow)"
-              ></line>
+                d="${graphEdgePathD(source, target)}"
+                marker-end="url(#${edgeMarkers[group]})"
+              ></path>
             `;
           }).join("")}
         </g>
         <g data-graph-nodes>
           ${graph.visibleNodes.map((node) => {
             const pos = graph.positions[node.id];
+            if (!pos) return "";
+            const baseR = pos.r || GRAPH_NODE_SIZES[node.type] || GRAPH_NODE_SIZES.other;
             const isSelected = node.id === selectedId;
             const isNeighbor = graph.neighborIds.has(node.id) && !isSelected;
             const isScoped = graph.highlightedNodeIds.has(node.id);
+            const r = isSelected ? baseR + 4 : baseR;
+            const charFontSize = node.type === "operation" ? 9 : node.type === "order" ? 13 : 11;
+            const charDy = node.type === "tooling" ? Math.round(r * 0.3 + 4) : 4;
+            const labelY = Math.round((node.type === "order" ? r * 0.85 : r) + 15);
+            const orderRing = node.type === "order"
+              ? `<circle class="graph-node-order-ring" r="${(r * 1.25 + 7).toFixed(1)}" style="stroke:${orderColorFor(node.entity_id || entityIdFromGraphId(node.id))}"></circle>`
+              : "";
             return `
               <g
                 class="graph-node ${isSelected ? "selected" : isNeighbor ? "neighbor" : isScoped ? "scoped" : ""}"
+                data-type="${escapeHtml(node.type)}"
                 data-action="focus-graph-node"
                 data-id="${escapeHtml(node.id)}"
                 data-graph-node="${escapeHtml(node.id)}"
@@ -4044,11 +3502,12 @@ function renderInteractiveGraph() {
                 transform="translate(${pos.x} ${pos.y})"
                 style="cursor:pointer"
               >
-                <title>${escapeHtml(`${graphTypeLabel(node.type)}\n${node.label || node.id}\nID: ${node.id}\n\u5173\u8054\u5173\u7cfb: ${formatInt(nodeDegree.get(node.id) || 0)}`)}</title>
-                <circle class="graph-node-hitbox" r="28" fill="transparent"></circle>
-                <circle r="${isSelected ? 22 : 18}" fill="${graphTypeColor(node.type)}"></circle>
-                <text x="0" y="4" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">${escapeHtml(String(node.type).slice(0, 3).toUpperCase())}</text>
-                <text class="graph-node-label" x="0" y="34" text-anchor="middle">${escapeHtml(String(node.label).slice(0, 18))}</text>
+                <title>${escapeHtml(`${graphTypeLabel(node.type)}\n${node.label || node.id}\nID: ${node.id}\n关联关系: ${formatInt(nodeDegree.get(node.id) || 0)}`)}</title>
+                <circle class="graph-node-hitbox" r="${Math.max(r + 12, 28)}"></circle>
+                ${orderRing}
+                ${graphNodeShapeSVG(node.type, r, `class="graph-node-shape" fill="${graphTypeColor(node.type)}"`)}
+                <text class="graph-node-char" y="${charDy}" text-anchor="middle" font-size="${charFontSize}">${escapeHtml(GRAPH_TYPE_CHARS[node.type] || "·")}</text>
+                <text class="graph-node-label" y="${labelY}" text-anchor="middle">${escapeHtml(String(node.label).slice(0, 18))}</text>
               </g>
             `;
           }).join("")}
@@ -4081,102 +3540,234 @@ function renderInteractiveGraph() {
   }), { minX: Infinity, maxX: 0, minY: Infinity, maxY: 0, canvasWidth: graph.layout.width, canvasHeight: graph.layout.height });
   app.graphView.bounds = bounds;
 
+  const orderOptionsHtml = asArray(app.graphOrderOptions).map((raw) => {
+    const order = normalizeGraphNode(raw);
+    const entity = order.entity_id || "";
+    const label = order.label && order.label !== entity ? `${entity} · ${order.label}` : entity;
+    return `<option value="${escapeHtml(entity)}" ${entity === orderEntityId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+  const orderFilterBar = `
+    <label class="graph-search graph-order-select">
+      <span>按订单过滤</span>
+      <select data-graph-order-select>
+        ${orderOptionsHtml || `<option value="">${orderEntityId ? escapeHtml(orderEntityId) : "暂无订单"}</option>`}
+      </select>
+    </label>
+    <label class="graph-search graph-order-jump">
+      <span>其他订单</span>
+      <span class="graph-order-jump-row">
+        <input type="search" list="graph-order-options" data-graph-order-input placeholder="输入订单号，回车跳转" autocomplete="off">
+        <button class="btn btn-ghost" type="button" data-action="graph-order-search">跳转</button>
+      </span>
+    </label>
+    <datalist id="graph-order-options">
+      ${asArray(app.graphOrderOptions).map((raw) => {
+        const order = normalizeGraphNode(raw);
+        return `<option value="${escapeHtml(order.entity_id || "")}">${escapeHtml(order.label || order.entity_id || "")}</option>`;
+      }).join("")}
+    </datalist>
+  `;
+
+  const breadcrumb = `
+    <div class="graph-breadcrumb" aria-label="订单簇统计">
+      <span class="crumb crumb-order"><i style="background:${orderColor}"></i>订单 ${escapeHtml(orderEntityId || "未选择")}</span>
+      <span class="crumb-sep" aria-hidden="true">▸</span>
+      <span class="crumb">任务 ${formatInt(loadedCounts.task || 0)}</span>
+      <span class="crumb-sep" aria-hidden="true">▸</span>
+      <span class="crumb">工序 ${formatInt(loadedCounts.operation || 0)}</span>
+      <span class="crumb-sep" aria-hidden="true">▸</span>
+      <span class="crumb">机器/工装/人员 ${formatInt(loadedCounts.machine || 0)} / ${formatInt(loadedCounts.tooling || 0)} / ${formatInt(loadedCounts.personnel || 0)}</span>
+      <span class="crumb-sep" aria-hidden="true">▸</span>
+      <span class="crumb">关系 ${formatInt(loadedEdgeCount)}</span>
+    </div>
+  `;
+
   const stageNarrative = graph.orderScoped
-    ? `\u5f53\u524d\u56fe\u4e2d\u5c55\u793a ${formatInt(graph.selectedStats.displayedOrderCount)} / ${formatInt(graph.selectedStats.orderCount || graph.visibleOrderCount)} \u4e2a\u76f8\u5173\u8ba2\u5355\uff0c\u53f3\u4fa7\u7edf\u8ba1\u5df2\u6309\u5168\u90e8\u76f8\u5173\u5173\u7cfb\u8ba1\u7b97`
-    : "\u5f53\u524d\u89c6\u56fe\u652f\u6301\u6eda\u8f6e\u7f29\u653e\u3001\u62d6\u62fd\u5e73\u79fb\u548c\u8282\u70b9\u5fae\u8c03\u5e03\u5c40";
+    ? `当前图中展示 ${formatInt(graph.selectedStats.displayedOrderCount)} / ${formatInt(graph.selectedStats.orderCount || graph.visibleOrderCount)} 个相关订单，右侧统计已按全部相关关系计算`
+    : "当前视图支持滚轮缩放、拖拽平移和节点微调布局";
+  const culled = graph.culledNodeCount > 0 || graph.culledEdgeCount > 0;
+  const canvasStats = `
+    <div class="graph-canvas-stats">
+      <span>展示节点 <b>${formatInt(graph.visibleNodes.length)}</b> / ${formatInt(graph.totalNodeCount)}</span>
+      <span>展示边 <b>${formatInt(graph.visibleEdges.length)}</b> / ${formatInt(graph.totalEdgeCount)}</span>
+      <span>层级 <b>${formatInt((graph.layout.lanes || []).length)}</b> 条</span>
+      <span>当前订单 <b>${escapeHtml(orderEntityId || "-")}</b></span>
+      ${culled
+        ? `<span class="graph-canvas-stats-warn">已按焦点/上限收敛，省略 ${formatInt(graph.culledNodeCount)} 节点 · ${formatInt(graph.culledEdgeCount)} 边</span>`
+        : `<span class="graph-canvas-stats-note">${stageNarrative}</span>`}
+    </div>
+  `;
+
+  const legendTypes = GRAPH_NODE_ORDER.map((type) => `
+      <span class="legend-item"><svg class="legend-shape" viewBox="-12 -12 24 24" aria-hidden="true">${graphNodeShapeSVG(type, 8, `fill="${graphTypeColor(type)}"`)}</svg>${escapeHtml(graphTypeLabel(type))}</span>
+    `).join("");
+  const legendDock = `
+    <div class="graph-legend-dock">
+      <div class="legend-block">
+        <span class="legend-title">节点 · 颜色/形状/层级</span>
+        <div class="legend">${legendTypes}</div>
+      </div>
+      <div class="legend-block">
+        <span class="legend-title">关系 · 线型</span>
+        <div class="legend">
+          <span class="legend-item"><span class="legend-line legend-line-structure"></span>结构链路（实线）</span>
+          <span class="legend-item"><span class="legend-line legend-line-resource"></span>资源可行（虚线）</span>
+          <span class="legend-item"><span class="legend-line legend-line-other"></span>其他关系（点线）</span>
+        </div>
+      </div>
+      <div class="legend-block">
+        <span class="legend-title">跨视图联动</span>
+        <div class="legend">
+          <span class="legend-item"><span class="legend-order-ring" style="border-color:${orderColor}"></span>订单标识色与甘特条块同色</span>
+        </div>
+      </div>
+    </div>
+  `;
 
   const selectionHighlights = buildGraphSelectionHighlightsV2(graph);
   const selectedSummary = selectedNode ? `
     <div class="graph-selected-summary" data-graph-selected-summary>
       <div class="graph-selected-main">
-        <span class="graph-selected-badge" style="background:${graphTypeColor(selectedNode.type)}"></span>
+        <span class="graph-selected-badge-svg" aria-hidden="true">
+          <svg viewBox="-14 -14 28 28">${graphNodeShapeSVG(selectedNode.type, 10, `fill="${graphTypeColor(selectedNode.type)}"`)}</svg>
+        </span>
         <div>
           <div class="graph-selected-title">${escapeHtml(selectedNode.label || selectedNode.id)}</div>
-          <div class="graph-selected-meta">${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.entity_id || selectedNode.id || "-")}</div>
+          <div class="graph-selected-meta">
+            <span class="graph-type-badge" style="background:${graphTypeColor(selectedNode.type)}">${escapeHtml(graphTypeLabel(selectedNode.type))}</span>
+            <span>${escapeHtml(selectedNode.entity_id || selectedNode.id || "-")}</span>
+            ${selectedNode.type === "order" ? `<span class="graph-order-tag"><i class="graph-order-dot" style="background:${orderColorFor(selectedNode.entity_id || entityIdFromGraphId(selectedNode.id))}"></i>订单标识色</span>` : ""}
+          </div>
         </div>
       </div>
       <div class="graph-selected-stats">
-        <span>\u76f4\u63a5\u90bb\u5c45 ${formatInt(graph.selectedStats.directNeighborCount)}</span>
-        <span>\u4e0a\u6e38 / \u4e0b\u6e38 ${formatInt(graph.selectedStats.upstreamCount)} / ${formatInt(graph.selectedStats.downstreamCount)}</span>
-        <span>\u5168\u76f8\u5173\u8282\u70b9 ${formatInt(graph.selectedStats.relatedNodeCount)}</span>
-        <span>\u5168\u76f8\u5173\u8fb9 ${formatInt(graph.selectedStats.relatedEdgeCount)}</span>
-        <span>\u7ed3\u6784\u8fb9 ${formatInt(graph.selectedStats.structureEdgeCount)}</span>
-        <span>\u8d44\u6e90\u8fb9 ${formatInt(graph.selectedStats.resourceEdgeCount)}</span>
+        <span>直接邻居 ${formatInt(graph.selectedStats.directNeighborCount)}</span>
+        <span>上游 / 下游 ${formatInt(graph.selectedStats.upstreamCount)} / ${formatInt(graph.selectedStats.downstreamCount)}</span>
+        <span>全相关节点 ${formatInt(graph.selectedStats.relatedNodeCount)}</span>
+        <span>全相关边 ${formatInt(graph.selectedStats.relatedEdgeCount)}</span>
+        <span>结构边 ${formatInt(graph.selectedStats.structureEdgeCount)}</span>
+        <span>资源边 ${formatInt(graph.selectedStats.resourceEdgeCount)}</span>
       </div>
     </div>
-  ` : renderEmptyState("\u672a\u9009\u4e2d\u8282\u70b9", "\u70b9\u51fb\u5de6\u4fa7\u56fe\u4e2d\u7684\u8282\u70b9\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u8be5\u8282\u70b9\u76f8\u5173\u7684\u5b8c\u6574\u7edf\u8ba1\u4e0e\u5173\u7cfb\u8bf4\u660e\u3002");
+  ` : renderEmptyState("未选中节点", "点击左侧图中的节点后，这里会显示该节点相关的完整统计与关系说明。");
 
   const scopeOverview = selectedNode ? renderKeyValueGrid([
-    { label: "\u5168\u76f8\u5173\u8ba2\u5355", value: formatInt(graph.selectedStats.orderCount) },
-    { label: "\u5168\u76f8\u5173\u4efb\u52a1 / \u5de5\u5e8f", value: `${formatInt(graph.selectedStats.taskCount)} / ${formatInt(graph.selectedStats.operationCount)}` },
-    { label: "\u5168\u76f8\u5173\u673a\u5668 / \u5de5\u88c5 / \u4eba\u5458", value: `${formatInt(graph.selectedStats.machineCount)} / ${formatInt(graph.selectedStats.toolingCount)} / ${formatInt(graph.selectedStats.personnelCount)}` },
-    { label: "\u5f53\u524d\u56fe\u4e2d\u5c55\u793a\u8ba2\u5355", value: `${formatInt(graph.selectedStats.displayedOrderCount)} / ${formatInt(graph.selectedStats.orderCount)}` },
+    { label: "全相关订单", value: formatInt(graph.selectedStats.orderCount) },
+    { label: "全相关任务 / 工序", value: `${formatInt(graph.selectedStats.taskCount)} / ${formatInt(graph.selectedStats.operationCount)}` },
+    { label: "全相关机器 / 工装 / 人员", value: `${formatInt(graph.selectedStats.machineCount)} / ${formatInt(graph.selectedStats.toolingCount)} / ${formatInt(graph.selectedStats.personnelCount)}` },
+    { label: "当前图中展示订单", value: `${formatInt(graph.selectedStats.displayedOrderCount)} / ${formatInt(graph.selectedStats.orderCount)}` },
   ]) : "";
+
+  const updownList = (ids, emptyText) => {
+    const nodes = asArray(ids)
+      .map((id) => graph.nodeMap.get(id))
+      .filter(Boolean)
+      .sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id), "zh-CN"));
+    if (!nodes.length) return `<div class="graph-updown-empty">${emptyText}</div>`;
+    return `
+      ${nodes.slice(0, 6).map((node) => `
+        <button class="pill graph-node-pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(node.id)}">
+          <i style="background:${graphTypeColor(node.type)}"></i>${escapeHtml(String(node.label || node.id).slice(0, 14))}
+        </button>
+      `).join("")}
+      ${nodes.length > 6 ? `<span class="graph-updown-more">+${formatInt(nodes.length - 6)}</span>` : ""}
+    `;
+  };
+  const updownBlock = selectedNode ? `
+    <div class="graph-updown">
+      <section class="graph-updown-col">
+        <header>上游（入边） · ${formatInt(scope.upstreamCount || 0)}</header>
+        <div class="graph-updown-list">${updownList(scope.upstreamNodeIds, "无上游节点")}</div>
+      </section>
+      <section class="graph-updown-col">
+        <header>下游（出边） · ${formatInt(scope.downstreamCount || 0)}</header>
+        <div class="graph-updown-list">${updownList(scope.downstreamNodeIds, "无下游节点")}</div>
+      </section>
+    </div>
+  ` : "";
+
+  const relationRows = Object.entries(scope.edgeTypeCounts || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([edgeType, count]) => {
+      const group = graphEdgeGroupForType(edgeType);
+      return `
+        <div class="graph-relation-row">
+          <span class="legend-line legend-line-${group}"></span>
+          <span class="graph-relation-name">${escapeHtml(graphEdgeTypeLabel(edgeType))}</span>
+          <span class="graph-relation-group">${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}</span>
+          <b>${formatInt(count)}</b>
+        </div>
+      `;
+    }).join("");
+  const relationBlock = selectedNode && relationRows ? `
+    <div class="graph-relation-breakdown">
+      <div class="graph-filter-title">关系分解（按边类型）</div>
+      ${relationRows}
+    </div>
+  ` : "";
 
   return `
     <div class="surface-card graph-workbench">
       <div class="card-head">
-        <h3>\u53ef\u4ea4\u4e92\u6709\u5411\u5f02\u6784\u56fe</h3>
-        <p>\u4fdd\u7559\u8ba2\u5355\u3001\u4efb\u52a1\u3001\u5de5\u5e8f\u3001\u673a\u5668\u3001\u5de5\u88c5\u3001\u4eba\u5458\u7b49\u5168\u90e8\u5173\u7cfb\u7c7b\u578b\uff0c\u5de6\u4fa7\u56fe\u8d1f\u8d23\u5c55\u793a\uff0c\u53f3\u4fa7\u9762\u677f\u4e13\u6ce8\u8be5\u8282\u70b9\u7684\u5b8c\u6574\u5173\u8054\u7edf\u8ba1\u4e0e\u89e3\u91ca\u3002</p>
+        <h3>可交互有向异构图</h3>
+        <p>六条层级泳道（规划链冷色 → 资源暖色），节点按颜色+形状+尺寸三重编码；订单标识色与甘特条块跨视图联动。</p>
       </div>
       <div class="graph-toolbar">
         <div class="inline-actions">
-          <button class="btn ${app.graphView.mode === "focus" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="focus">\u7126\u70b9\u90bb\u57df</button>
-          <button class="btn ${app.graphView.mode === "all" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="all">\u5168\u5173\u7cfb\u89c6\u56fe</button>
-          <button class="btn btn-ghost" type="button" data-action="fit-graph-view">\u9002\u914d\u89c6\u56fe</button>
-          <button class="btn btn-ghost" type="button" data-action="reset-graph-view">\u91cd\u7f6e\u89c6\u56fe</button>
+          <button class="btn ${app.graphView.mode === "focus" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
+          <button class="btn ${app.graphView.mode === "all" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
+          <button class="btn btn-ghost" type="button" data-action="fit-graph-view">适配视图</button>
+          <button class="btn btn-ghost" type="button" data-action="reset-graph-view">重置视图</button>
           <button class="btn btn-ghost" type="button" data-action="zoom-graph-out">-</button>
-          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen">\u5168\u5c4f\u67e5\u770b</button>
+          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen">全屏查看</button>
           <span class="graph-zoom-pill" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
           <button class="btn btn-ghost" type="button" data-action="zoom-graph-in">+</button>
         </div>
+        ${orderFilterBar}
         <label class="graph-search">
-          <span>\u641c\u7d22\u8282\u70b9</span>
-          <input type="search" value="${escapeHtml(app.graphView.search || "")}" data-graph-search placeholder="\u641c\u7d22\u8ba2\u5355\u3001\u4efb\u52a1\u3001\u5de5\u5e8f\u6216\u8d44\u6e90">
-        </label>
-        <label class="graph-search graph-order-limit">
-          <span>\u6700\u591a\u5c55\u793a\u8ba2\u5355\u6570</span>
-          <input type="number" min="1" max="20" step="1" value="${escapeHtml(String(app.graphView.maxOrders || 6))}" id="graph-max-orders">
+          <span>搜索节点</span>
+          <input type="search" value="${escapeHtml(app.graphView.search || "")}" data-graph-search placeholder="搜索订单、任务、工序或资源">
         </label>
       </div>
-      <div class="graph-stage-meta">
-        <span>\u5c55\u793a\u8282\u70b9 ${formatInt(graph.visibleNodes.length)} / ${formatInt(graph.totalNodeCount)}</span>
-        <span>\u5c55\u793a\u8fb9 ${formatInt(graph.visibleEdges.length)} / ${formatInt(graph.totalEdgeCount)}</span>
-        <span>${stageNarrative}</span>
-      </div>
+      ${breadcrumb}
       <div class="graph-filter-grid">
         <section class="graph-filter-group">
-          <div class="graph-filter-title">\u8282\u70b9\u5c42\u7ea7</div>
+          <div class="graph-filter-title">节点层级</div>
           <div class="filter-chip-row">${nodeTypeFilters}</div>
         </section>
         <section class="graph-filter-group">
-          <div class="graph-filter-title">\u5173\u7cfb\u5c42\u7ea7</div>
+          <div class="graph-filter-title">关系层级</div>
           <div class="filter-chip-row">${edgeGroupFilters}</div>
         </section>
       </div>
       <div class="split-panel graph-split">
         <article class="surface-card graph-stage-card">
+          ${canvasStats}
           <div class="graph-hover-preview" data-graph-hover-preview>
-            ${selectedNode ? `\u5f53\u524d\u9009\u4e2d\uff1a${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / \u5173\u8054\u5173\u7cfb ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "\u5c06\u9f20\u6807\u60ac\u6d6e\u5230\u8282\u70b9\u4e0a\uff0c\u53ef\u5feb\u901f\u9884\u89c8\u8be5\u8282\u70b9\u540d\u79f0\u3001\u7c7b\u578b\u4e0e\u5173\u8054\u5173\u7cfb\u5f3a\u5ea6\u3002"}
+            ${selectedNode ? `当前选中：${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / 关联关系 ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "将鼠标悬浮到节点上，可快速预览该节点名称、类型与关联关系强度。"}
           </div>
           <div class="graph-shell">${svg}</div>
+          ${legendDock}
         </article>
         <article class="surface-card graph-detail-card">
           <div class="card-head">
-            <h3>\u8282\u70b9\u8be6\u60c5\u4e0e\u5173\u7cfb\u89e3\u91ca</h3>
-            <p>\u53f3\u4fa7\u6240\u6709\u7edf\u8ba1\u90fd\u57fa\u4e8e\u201c\u9009\u4e2d\u8282\u70b9\u7684\u5b8c\u6574\u76f8\u5173\u4f5c\u7528\u57df\u201d\u8ba1\u7b97\uff0c\u800c\u4e0d\u662f\u53ea\u57fa\u4e8e\u5de6\u4fa7\u53ef\u89c1\u5c40\u90e8\u56fe\u3002</p>
+            <h3>节点详情与关系解释</h3>
+            <p>右侧所有统计都基于“选中节点的完整相关作用域”计算，而不是只基于左侧可见局部图。</p>
           </div>
           ${selectedSummary}
+          ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : renderEmptyState("未选中节点", "请先在左侧图中点击一个节点。")}
+          ${updownBlock}
+          ${relationBlock}
           ${scopeOverview}
           ${selectionHighlights.length ? renderKeyValueGrid(selectionHighlights) : ""}
-          ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : renderEmptyState("\u672a\u9009\u4e2d\u8282\u70b9", "\u8bf7\u5148\u5728\u5de6\u4fa7\u56fe\u4e2d\u70b9\u51fb\u4e00\u4e2a\u8282\u70b9\u3002")}
           ${Object.keys(graph.relatedByType).length ? `
             <div class="graph-neighbor-groups">
               ${Object.entries(graph.relatedByType).map(([type, items]) => `
                 <section class="graph-neighbor-group">
                   <header>
-                    <strong>${escapeHtml(graphTypeLabel(type))}</strong>
-                    <span>${formatInt(items.length)} \u4e2a</span>
+                    <strong><i class="graph-order-dot" style="background:${graphTypeColor(type)}"></i>${escapeHtml(graphTypeLabel(type))}</strong>
+                    <span>${formatInt(items.length)} 个</span>
                   </header>
                   <div class="graph-neighbor-pills">
                     ${items.slice(0, 10).map((item) => `<button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(item.id)}">${escapeHtml(item.label || item.id)}</button>`).join("")}
@@ -4186,14 +3777,14 @@ function renderInteractiveGraph() {
             </div>
           ` : ""}
           ${graph.relatedEdges.length ? renderSimpleTable(
-            ["\u5173\u7cfb", "\u6765\u6e90", "\u76ee\u6807"],
+            ["关系", "来源", "目标"],
             graph.relatedEdges.slice(0, 16).map((edge) => [
-              escapeHtml(humanizeCodeLabel(edge.edgeType || edge.group || "-")),
+              escapeHtml(graphEdgeTypeLabel(edge.edgeType || edge.group || "-")),
               escapeHtml(graph.nodeMap.get(edge.source)?.label || edge.source),
               escapeHtml(graph.nodeMap.get(edge.target)?.label || edge.target),
             ]),
-            { footer: graph.relatedEdges.length > 16 ? `\u5f53\u524d\u53ea\u5c55\u793a\u524d 16 \u6761\u5173\u8054\u8fb9\uff0c\u5171 ${graph.relatedEdges.length} \u6761\u3002` : "" },
-          ) : renderEmptyState("\u6682\u65e0\u5173\u8054\u8fb9", "\u5f53\u524d\u8282\u70b9\u5728\u5168\u76f8\u5173\u4f5c\u7528\u57df\u4e2d\u6ca1\u6709\u53ef\u5c55\u793a\u7684\u5173\u7cfb\u8fb9\u3002")}
+            { footer: graph.relatedEdges.length > 16 ? `当前只展示前 16 条关联边，共 ${graph.relatedEdges.length} 条。` : "" },
+          ) : renderEmptyState("暂无关联边", "当前节点在全相关作用域中没有可展示的关系边。")}
         </article>
       </div>
     </div>
@@ -4280,13 +3871,20 @@ function mountInteractiveGraph() {
       dragMoved = false;
       svg.classList.add("panning");
     }
-    svg.setPointerCapture(event.pointerId);
+    // 注意：这里不做 setPointerCapture——按下即捕获会让随后 click 事件
+    // 重定向到 svg 本身（Chrome 行为），导致"点击节点选中"永远落空；
+    // 改为首次位移超阈值时再捕获（见 pointermove），纯点击不捕获。
   });
 
   svg.addEventListener("pointermove", (event) => {
     if (!drag) return;
+    if (Math.abs(event.clientX - drag.startX) > 2 || Math.abs(event.clientY - drag.startY) > 2) {
+      dragMoved = true;
+      if (event.pointerId != null && !svg.hasPointerCapture(event.pointerId)) {
+        try { svg.setPointerCapture(event.pointerId); } catch (_) { /* 忽略捕获失败 */ }
+      }
+    }
     if (drag.type === "pan") {
-      if (Math.abs(event.clientX - drag.startX) > 2 || Math.abs(event.clientY - drag.startY) > 2) dragMoved = true;
       app.graphView.panX = drag.originPanX + (event.clientX - drag.startX) * drag.scales.x;
       app.graphView.panY = drag.originPanY + (event.clientY - drag.startY) * drag.scales.y;
       applyGraphViewportState(root);
@@ -4294,7 +3892,6 @@ function mountInteractiveGraph() {
     }
     const position = app.graphView.positions[drag.id];
     if (!position) return;
-    if (Math.abs(event.clientX - drag.startX) > 2 || Math.abs(event.clientY - drag.startY) > 2) dragMoved = true;
     position.x = drag.origin.x + ((event.clientX - drag.startX) * drag.scales.x) / app.graphView.zoom;
     position.y = drag.origin.y + ((event.clientY - drag.startY) * drag.scales.y) / app.graphView.zoom;
     applyGraphNodePositions(root);
@@ -4331,180 +3928,10 @@ function mountInteractiveGraph() {
   });
 }
 
-function legacyGraphDataset() {
-  const allNodes = asArray(app.graphNodes).map(normalizeGraphNode).filter((node) => node.id);
-  const allEdges = asArray(app.graphEdges).map(normalizeGraphEdge).filter((edge) => edge.source && edge.target);
-  const nodeIds = new Set(allNodes.map((node) => node.id));
-  return {
-    nodes: allNodes,
-    edges: allEdges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)),
-  };
-}
-
 function selectedGraphOrderOption() {
   return asArray(app.graphOrderOptions).find((node) => {
     return normalizeGraphNode(node).id === app.selectedGraphOrderId;
   }) || null;
-}
-
-function legacyGraphDetailContent(selectedNode, selectedEdges) {
-  return `
-    <div class="card-head">
-      <div><h3>节点详情</h3><p>点击左侧节点后，这里会同步显示属性与直接关系。</p></div>
-      ${renderCollapseButton("toggle-graph-detail", !!app.graphDetailCollapsed, "节点详情")}
-    </div>
-    <div class="collapsible-body">
-      ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, selectedEdges)) : ""}
-      ${selectedEdges.length ? renderSimpleTable(
-        ["关系", "来源", "目标"],
-        selectedEdges.slice(0, 16).map((edge) => [
-          escapeHtml(humanizeCodeLabel(edge.edgeType || "-")),
-          escapeHtml(edge.source),
-          escapeHtml(edge.target),
-        ]),
-        { footer: selectedEdges.length > 16 ? `当前节点共 ${selectedEdges.length} 条直接关系，仅展示前 16 条。` : "" },
-      ) : renderEmptyState("暂无直接关系", "当前节点在已加载样本中没有直接关系。")}
-    </div>
-  `;
-}
-
-function legacyGraphSelectionContent(selectedNode, selectedEdges, nodes) {
-  if (!selectedNode) return '<span class="subtle-note">尚未选中节点</span>';
-
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const relationButtons = selectedEdges.slice(0, 12).map((edge) => {
-    const isOutgoing = edge.source === selectedNode.id;
-    const neighborId = isOutgoing ? edge.target : edge.source;
-    const neighbor = nodeById.get(neighborId);
-    const neighborLabel = neighbor?.label || neighbor?.entity_id || neighborId;
-    const direction = isOutgoing ? "→" : "←";
-    return `
-      <button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(neighborId)}" title="选中关联节点 ${escapeHtml(neighborLabel)}">
-        ${escapeHtml(humanizeCodeLabel(edge.edgeType || "关系"))} ${direction} ${escapeHtml(neighborLabel)}
-      </button>
-    `;
-  }).join("");
-
-  return `
-    <span class="pill active" title="当前选中节点">
-      当前：${escapeHtml(graphTypeLabel(selectedNode.type))} · ${escapeHtml(selectedNode.label || selectedNode.entity_id || selectedNode.id)}
-    </span>
-    ${relationButtons || '<span class="subtle-note">当前节点没有直接关系</span>'}
-    ${selectedEdges.length > 12 ? `<span class="subtle-note">另有 ${formatInt(selectedEdges.length - 12)} 条直接关系</span>` : ""}
-  `;
-}
-
-function syncGraphDetailCollapse() {
-  const collapsed = !!app.graphDetailCollapsed;
-  document.querySelectorAll(".graph-detail-card").forEach((card) => {
-    card.classList.toggle("is-collapsed", collapsed);
-    const button = card.querySelector('[data-action="toggle-graph-detail"]');
-    if (!button) return;
-    const label = `${collapsed ? "展开" : "折叠"}节点详情`;
-    button.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    button.setAttribute("aria-label", label);
-    button.setAttribute("title", label);
-  });
-  app.cyGraphInstance?.resize();
-}
-
-function focusLegacyCytoscapeNode(nodeId, options = {}) {
-  const cy = app.cyGraphInstance;
-  const node = cy?.getElementById(nodeId || "");
-  if (!node?.length) return false;
-
-  app.selectedGraphNodeId = node.id();
-  cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
-  const neighborhood = node.neighborhood();
-  node.addClass("cy-selected");
-  neighborhood.nodes().addClass("cy-neighbor");
-  node.connectedEdges().addClass("cy-neighbor-edge");
-
-  const { nodes, edges } = legacyGraphDataset();
-  const selectedNode = nodes.find((item) => item.id === node.id()) || null;
-  const selectedEdges = edges.filter((edge) => edge.source === node.id() || edge.target === node.id());
-  const root = document.fullscreenElement?.classList.contains("legacy-graph-workbench")
-    ? document.fullscreenElement
-    : document.querySelector(".page.active .legacy-graph-workbench");
-  const detail = root?.querySelector(".graph-detail-card");
-  if (detail) detail.innerHTML = legacyGraphDetailContent(selectedNode, selectedEdges);
-  const selection = root?.querySelector("[data-graph-selection]");
-  if (selection) selection.innerHTML = legacyGraphSelectionContent(selectedNode, selectedEdges, nodes);
-  if (options.fit) cy.animate({ fit: { eles: node.union(neighborhood), padding: 70 } }, { duration: 250 });
-  return true;
-}
-
-function renderLegacyCytoscapeGraph() {
-  const { nodes, edges } = legacyGraphDataset();
-  if (!nodes.length) {
-    return renderEmptyState("暂无图谱节点", "请先构建图谱，或确认当前实例已正确加载。");
-  }
-
-  const selectedId = nodes.some((node) => node.id === app.selectedGraphNodeId)
-    ? app.selectedGraphNodeId
-    : nodes[0].id;
-  app.selectedGraphNodeId = selectedId;
-  const selectedNode = nodes.find((node) => node.id === selectedId) || null;
-  const selectedEdges = edges.filter((edge) => edge.source === selectedId || edge.target === selectedId);
-  const selectedOrder = selectedGraphOrderOption();
-  const selectedOrderValue = selectedOrder
-    ? normalizeGraphNode(selectedOrder).entity_id
-    : entityIdFromGraphId(app.selectedGraphOrderId || "");
-
-  return `
-    <div class="surface-card graph-workbench legacy-graph-workbench">
-      <div class="card-head graph-card-head">
-        <div>
-          <h3>订单关联图谱</h3>
-          <p>从上到下展开 · 仅展示当前订单完整关联</p>
-        </div>
-        <div class="graph-stage-meta">
-          <span>当前订单 ${escapeHtml(selectedOrderValue || "-")}</span>
-          <span>关联节点 ${formatInt(nodes.length)} · 关联边 ${formatInt(edges.length)}</span>
-          <span>单击节点查看邻域，双击节点聚焦</span>
-        </div>
-      </div>
-      <div class="graph-toolbar legacy-graph-toolbar">
-        <div class="graph-order-bar">
-          <label class="graph-order-filter">
-            <span>筛选订单</span>
-            <input type="search" list="graph-order-options" data-cy-order-input placeholder="输入或下拉选择订单号" autocomplete="off" value="${escapeHtml(selectedOrderValue || "")}">
-            <datalist id="graph-order-options">
-              ${asArray(app.graphOrderOptions).map((node) => {
-                const order = normalizeGraphNode(node);
-                return `<option value="${escapeHtml(order.entity_id)}">${escapeHtml(order.label || order.entity_id)}</option>`;
-              }).join("")}
-            </datalist>
-          </label>
-          <button class="btn btn-primary" type="button" data-cy-order-search>搜索</button>
-        </div>
-        <div class="graph-toolbar-actions">
-          <button class="btn btn-ghost" type="button" data-cy-fit>重置视图</button>
-          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen" aria-pressed="false">全屏查看</button>
-        </div>
-      </div>
-      <div class="graph-neighbor-pills legacy-graph-shortcuts" data-graph-selection aria-label="当前选中节点与直接关系">
-        ${legacyGraphSelectionContent(selectedNode, selectedEdges, nodes)}
-      </div>
-      <div class="split-panel graph-split">
-        <article class="surface-card graph-stage-card">
-          <div class="graph-shell legacy-graph-shell"><div class="cy-graph" data-cy-graph></div></div>
-          <div class="legend graph-legend">
-            ${GRAPH_NODE_ORDER.map((type) => `
-              <span class="legend-item"><span class="legend-swatch" style="background:${graphTypeColor(type)}"></span>${escapeHtml(graphTypeLabel(type))}</span>
-            `).join("")}
-          </div>
-        </article>
-        <article class="surface-card graph-detail-card ${app.graphDetailCollapsed ? "is-collapsed" : ""}">
-          ${legacyGraphDetailContent(selectedNode, selectedEdges)}
-        </article>
-      </div>
-      <div class="cy-graph-accessibility" aria-hidden="true">
-        ${nodes.map((node) => `<button type="button" data-action="focus-graph-node" data-id="${escapeHtml(node.id)}" data-graph-node="${escapeHtml(node.id)}" data-node-label="${escapeHtml(node.label || node.id)}" data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}"></button>`).join("")}
-        ${edges.map((edge) => `<span data-graph-link data-source="${escapeHtml(edge.source)}" data-target="${escapeHtml(edge.target)}"></span>`).join("")}
-      </div>
-    </div>
-  `;
 }
 
 function mountGantts() {
@@ -4537,10 +3964,14 @@ function mountGantts() {
         moveable: true,
         horizontalScroll: true,
         stack: false,
-        margin: { item: 6, axis: 8 },
+        // 行高加大：内容留白 + 条目纵向间距，条块圆角/轻投影由 CSS 承担
+        margin: { item: { horizontal: 4, vertical: 8 }, axis: 10 },
         orientation: { axis: "top" },
         zoomMin: 1000 * 60 * 30,
         zoomMax: 1000 * 60 * 60 * 24 * 90,
+        // 关闭内置真实当前时间线（相对小时基准下无意义），"现在"线由 data.nowISO 按进度分界注入
+        showCurrentTime: false,
+        groupOrder: (a, b) => (a.seq || 0) - (b.seq || 0),
         // 筛选无命中时 window 为 null，交给 vis 自适应空视图
         start: data.window ? data.window.start : undefined,
         end: data.window ? data.window.end : undefined,
@@ -4553,158 +3984,12 @@ function mountGantts() {
         },
       }
     );
+    if (data.nowISO) {
+      try { timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) { /* 忽略现在线注入失败 */ }
+    }
     app.ganttInstances.push({ canvasId: el.id, el, timeline });
   });
 }
-
-function mountLegacyCytoscapeGraph() {
-  const container = document.querySelector(".page.active [data-cy-graph]");
-  if (!container || container.dataset.bound === "1") return;
-  container.dataset.bound = "1";
-
-  if (typeof window.cytoscape !== "function") {
-    container.innerHTML = '<div class="empty-state"><h3>图谱组件加载失败</h3><p>请确认 /static/vendor 下的 Cytoscape 运行库完整。</p></div>';
-    return;
-  }
-
-  if (app.cyGraphInstance) app.cyGraphInstance.destroy();
-  const root = container.closest(".legacy-graph-workbench");
-  const { nodes, edges } = legacyGraphDataset();
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const elements = [
-    ...nodes.map((node) => ({
-      data: {
-        id: node.id,
-        label: node.label || node.entity_id || node.id,
-        node_type: node.type,
-        entity_id: node.entity_id || "",
-      },
-    })),
-    ...edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)).map((edge, index) => ({
-      data: {
-        id: `cy-edge-${edge.id || index}`,
-        source: edge.source,
-        target: edge.target,
-        edge_type: edge.edgeType,
-        edge_group: edge.group,
-      },
-    })),
-  ];
-
-  const cy = window.cytoscape({
-    container,
-    elements,
-    style: [
-      { selector: "node", style: { "label": "data(label)", "font-size": 9, "color": "#1f3b53", "text-valign": "bottom", "text-margin-y": 7, "text-max-width": 100, "text-wrap": "ellipsis", "width": 24, "height": 24, "border-width": 2, "border-color": "#243b53" } },
-      { selector: 'node[node_type="order"]', style: { "background-color": graphTypeColor("order"), "shape": "diamond", "width": 38, "height": 38, "font-size": 11, "font-weight": 700 } },
-      { selector: 'node[node_type="task"]', style: { "background-color": graphTypeColor("task"), "shape": "round-rectangle", "width": 32, "height": 22 } },
-      { selector: 'node[node_type="operation"]', style: { "background-color": graphTypeColor("operation"), "shape": "ellipse", "width": 19, "height": 19, "font-size": 8 } },
-      { selector: 'node[node_type="machine"]', style: { "background-color": graphTypeColor("machine"), "shape": "hexagon", "width": 32, "height": 32 } },
-      { selector: 'node[node_type="tooling"]', style: { "background-color": graphTypeColor("tooling"), "shape": "round-diamond", "width": 29, "height": 29 } },
-      { selector: 'node[node_type="personnel"]', style: { "background-color": graphTypeColor("personnel"), "shape": "pentagon", "width": 29, "height": 29 } },
-      { selector: "edge", style: { "width": 1.4, "line-color": "#5b7387", "target-arrow-color": "#5b7387", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 0.7, "opacity": 0.9 } },
-      { selector: 'edge[edge_group="structure"]', style: { "line-color": "#0f4c81", "target-arrow-color": "#0f4c81", "opacity": 0.95 } },
-      { selector: 'edge[edge_type="operation_sequence"]', style: { "width": 2.4, "line-color": "#0b5f8a", "target-arrow-color": "#0b5f8a", "opacity": 0.95 } },
-      { selector: 'edge[edge_group="resource"]', style: { "line-style": "dashed", "line-color": "#b76800", "target-arrow-color": "#b76800", "opacity": 0.8 } },
-      { selector: ".cy-selected", style: { "border-width": 5, "border-color": "#102f4c", "width": 46, "height": 46, "font-size": 12, "font-weight": 700, "z-index": 9999 } },
-      { selector: ".cy-neighbor", style: { "border-width": 3, "border-color": "#0f4c81", "opacity": 1, "z-index": 100 } },
-      { selector: ".cy-neighbor-edge", style: { "width": 3, "opacity": 1, "z-index": 100 } },
-      { selector: ".cy-dimmed", style: { "opacity": 0.1 } },
-      { selector: ".cy-search-match", style: { "border-width": 5, "border-color": "#d97706", "width": 42, "height": 42, "z-index": 9999 } },
-    ],
-    minZoom: 0.05,
-    maxZoom: 5,
-    boxSelectionEnabled: false,
-  });
-  app.cyGraphInstance = cy;
-
-  const enforceSerialTopToBottom = () => {
-    const sequenceEdges = cy.edges('[edge_type="operation_sequence"]');
-    for (let pass = 0; pass < cy.nodes('[node_type="operation"]').length; pass += 1) {
-      let moved = false;
-      sequenceEdges.forEach((edge) => {
-        const source = edge.source();
-        const target = edge.target();
-        if (target.position("y") > source.position("y")) return;
-        target.position("y", source.position("y") + 150);
-        moved = true;
-      });
-      if (!moved) break;
-    }
-  };
-
-  const runLayout = () => {
-    try {
-      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 150, nodeSep: 28, edgeSep: 14, ranker: "longest-path", padding: 40, fit: true, animate: false }).run();
-    } catch (error) {
-      console.warn("Dagre layout unavailable, falling back to breadthfirst", error);
-      cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: true }).run();
-    }
-    enforceSerialTopToBottom();
-    cy.fit(undefined, 40);
-  };
-  runLayout();
-  const initial = cy.getElementById(app.selectedGraphNodeId || "");
-  if (initial.length) {
-    focusLegacyCytoscapeNode(initial.id());
-  }
-  cy.fit(undefined, 40);
-
-  cy.on("tap", "node", (event) => {
-    focusLegacyCytoscapeNode(event.target.id());
-  });
-  cy.on("tap", "edge", (event) => {
-    const edge = event.target;
-    const source = edge.source();
-    focusLegacyCytoscapeNode(source.id());
-    edge.removeClass("cy-dimmed").addClass("cy-neighbor-edge");
-    edge.target().removeClass("cy-dimmed").addClass("cy-neighbor");
-  });
-  cy.on("dbltap", "node", (event) => {
-    cy.animate({ fit: { eles: event.target.union(event.target.neighborhood()), padding: 70 } }, { duration: 350 });
-  });
-  cy.on("tap", (event) => {
-    if (event.target !== cy) return;
-    cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed cy-search-match");
-  });
-
-  const orderInput = root?.querySelector("[data-cy-order-input]");
-  const runOrderSearch = async (query) => {
-    const value = String(query || "").trim();
-    if (!value) {
-      toast("请输入或选择订单号", "warning");
-      return;
-    }
-    const currentEntityId = entityIdFromGraphId(app.selectedGraphOrderId || "");
-    if (value === app.selectedGraphOrderId || value === currentEntityId) return;
-    try {
-      const payload = await api.searchGraphOrder(value);
-      app.graphNodes = asArray(payload?.nodes);
-      app.graphEdges = asArray(payload?.edges);
-      app.selectedGraphOrderId = payload?.order_id || `O:${value}`;
-      app.selectedGraphNodeId = app.selectedGraphOrderId;
-      resetGraphView({ preserveFilters: true });
-      await renderCurrentPage();
-    } catch (error) {
-      toast(error.message || `没有找到该订单：${value}`, "warning");
-    }
-  };
-  root?.querySelector("[data-cy-order-search]")?.addEventListener("click", () => {
-    runOrderSearch(orderInput?.value);
-  });
-  orderInput?.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    runOrderSearch(orderInput.value);
-  });
-  // 从下拉列表中选中订单时直接加载，无需再点搜索；失焦时的空值不提示
-  orderInput?.addEventListener("change", (event) => {
-    const value = String(event.target.value || "").trim();
-    if (value) runOrderSearch(value);
-  });
-  root?.querySelector("[data-cy-fit]")?.addEventListener("click", () => cy.fit(undefined, 40));
-}
-
 
 async function renderCurrentPage() {
   ensureReviewSelection();
@@ -4972,6 +4257,28 @@ async function loadGraphOrder(orderId) {
   app.selectedGraphOrderId = payload?.order_id || `O:${entityIdFromGraphId(orderId)}`;
   app.selectedGraphNodeId = app.selectedGraphOrderId;
   resetGraphView({ preserveFilters: true });
+}
+
+// 订单过滤：下拉仅覆盖前 200 条订单，其余订单通过搜索按后端解析加载并聚焦该订单簇
+async function searchGraphOrderAndRender(query) {
+  const value = String(query || "").trim();
+  if (!value) {
+    toast("请输入或选择订单号", "warning");
+    return;
+  }
+  const currentEntityId = entityIdFromGraphId(app.selectedGraphOrderId || "");
+  if (value === app.selectedGraphOrderId || value === currentEntityId) return;
+  try {
+    const payload = await api.searchGraphOrder(value);
+    app.graphNodes = asArray(payload?.nodes);
+    app.graphEdges = asArray(payload?.edges);
+    app.selectedGraphOrderId = payload?.order_id || `O:${value}`;
+    app.selectedGraphNodeId = app.selectedGraphOrderId;
+    resetGraphView({ preserveFilters: true });
+    await renderCurrentPage();
+  } catch (error) {
+    toast(error.message || `没有找到该订单：${value}`, "warning");
+  }
 }
 
 async function initializeGraphOrderView(meta, preferredOrderId = null) {
@@ -5497,9 +4804,14 @@ async function handleAction(action, target) {
   if (action === "goto-new-scene") return navigate("new-scene");
   if (action === "goto-dashboard") return navigate("dashboard");
   if (action === "goto-review") return navigate("solution-review");
+  if (action === "graph-order-search") {
+    const root = target.closest(".graph-workbench");
+    const input = root?.querySelector("[data-graph-order-input]");
+    await searchGraphOrderAndRender(input?.value);
+    return;
+  }
   if (action === "focus-graph-node") {
     if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
-    if (target.closest(".legacy-graph-workbench") && focusLegacyCytoscapeNode(target.dataset.id, { fit: true })) return;
     app.selectedGraphNodeId = target.dataset.id;
     return renderCurrentPage();
   }
@@ -5563,11 +4875,6 @@ async function handleAction(action, target) {
     app.validationCollapsed = !app.validationCollapsed;
     const box = el("new-scene-validation");
     if (box) box.innerHTML = app.currentScene ? renderValidationPanel() : "";
-    return;
-  }
-  if (action === "toggle-graph-detail") {
-    app.graphDetailCollapsed = !app.graphDetailCollapsed;
-    syncGraphDetailCollapse();
     return;
   }
   if (action === "export-validation") {
@@ -5660,15 +4967,6 @@ function bindGlobalEvents() {
       button.textContent = active ? "退出全屏" : "全屏查看";
       button.setAttribute("aria-pressed", active ? "true" : "false");
     });
-    const resizeGraph = () => {
-      const cy = app.cyGraphInstance;
-      if (!cy) return;
-      cy.resize();
-      const selected = cy.getElementById(app.selectedGraphNodeId || "");
-      if (selected.length) cy.fit(selected.union(selected.neighborhood()), fullscreenGraph ? 110 : 70);
-    };
-    window.requestAnimationFrame(resizeGraph);
-    window.setTimeout(resizeGraph, 120);
   });
 
   document.addEventListener("click", async (event) => {
@@ -5754,6 +5052,10 @@ function bindGlobalEvents() {
       app.ganttOrderFilter[target.dataset.canvas] = target.value;
       return renderCurrentPage();
     }
+    if (target.matches("[data-gantt-group-mode]")) {
+      app.ganttGroupMode[target.dataset.canvas] = target.value;
+      return renderCurrentPage();
+    }
     if (target.matches("[data-gantt-machine-type]")) {
       const canvasId = target.dataset.canvas;
       const filter = getGanttMachineFilter(canvasId);
@@ -5799,6 +5101,15 @@ function bindGlobalEvents() {
       else filter.to = target.value;
       app.ganttEntryFilter[canvasId] = filter;
       return renderCurrentPage();
+    }
+    if (target.matches("[data-graph-order-select]")) {
+      await loadGraphOrder(target.value);
+      return renderCurrentPage();
+    }
+    if (target.matches("[data-graph-order-input]")) {
+      const value = String(target.value || "").trim();
+      if (value) await searchGraphOrderAndRender(value);
+      return;
     }
     if (target.matches("[data-heuristic-rule]")) {
       app.heuristicSelection = Array.from(document.querySelectorAll("[data-heuristic-rule]"))
@@ -5855,11 +5166,6 @@ function bindGlobalEvents() {
           searchInput.setSelectionRange(end, end);
         }
       }, 0);
-    }
-    if (target.matches("#graph-max-orders")) {
-      app.graphView.maxOrders = Math.max(1, Math.min(20, Number(target.value || app.graphView.maxOrders || 6)));
-      renderCurrentPage();
-      return;
     }
     if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression")) {
       collectOptimizeForm();

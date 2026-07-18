@@ -1074,31 +1074,6 @@ a {
   pointer-events: none;
 }
 
-.legacy-graph-shell {
-  min-height: 650px;
-  padding: 0;
-}
-
-.cy-graph {
-  width: 100%;
-  height: 650px;
-  border-radius: inherit;
-}
-
-.legacy-graph-toolbar > label {
-  display: grid;
-  gap: 6px;
-  color: var(--text-soft);
-  font-size: 12px;
-}
-
-.graph-detail-card.is-collapsed .card-head p {
-  display: none;
-}
-
-.cy-graph-accessibility {
-  display: none;
-}
 
 .graph-workbench {
   display: grid;
@@ -1119,44 +1094,6 @@ a {
   min-height: calc(100vh - 340px);
 }
 
-.legacy-graph-workbench:fullscreen {
-  box-sizing: border-box;
-  width: 100vw;
-  height: 100vh;
-  max-width: none;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
-  overflow: hidden;
-  border: 0;
-  border-radius: 0;
-}
-
-.legacy-graph-workbench:fullscreen .legacy-graph-toolbar {
-  flex-wrap: nowrap;
-}
-
-.legacy-graph-workbench:fullscreen .graph-split {
-  min-height: 0;
-  height: 100%;
-}
-
-.legacy-graph-workbench:fullscreen .graph-stage-card {
-  grid-template-rows: minmax(0, 1fr) auto;
-  align-content: stretch;
-  min-height: 0;
-  height: 100%;
-}
-
-.legacy-graph-workbench:fullscreen .legacy-graph-shell,
-.legacy-graph-workbench:fullscreen .cy-graph {
-  min-height: 0;
-  height: 100%;
-}
-
-.legacy-graph-workbench:fullscreen .graph-detail-card {
-  min-height: 0;
-  height: 100%;
-  overflow: auto;
-}
 
 .graph-toolbar {
   display: flex;
@@ -1178,31 +1115,6 @@ a {
   width: 100%;
 }
 
-.graph-order-bar {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.graph-order-bar > label {
-  display: grid;
-  gap: 6px;
-  color: var(--text-soft);
-  font-size: 12px;
-}
-
-.graph-order-bar input[type="search"] {
-  min-width: 170px;
-  padding: 6px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: #fff;
-}
-
-.graph-order-bar .btn {
-  align-self: flex-end;
-}
 
 .graph-toolbar-actions {
   display: flex;
@@ -1286,11 +1198,6 @@ a {
   align-items: stretch;
 }
 
-/* 节点详情折叠后，图谱画布占据剩余宽度 */
-.graph-split:has(.graph-detail-card.is-collapsed) {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
 .graph-stage-card,
 .graph-detail-card {
   display: grid;
@@ -1309,10 +1216,6 @@ a {
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
-}
-
-.graph-card-head .graph-stage-meta {
-  justify-content: flex-end;
 }
 
 .graph-hover-preview {
@@ -1338,14 +1241,6 @@ a {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.graph-selected-badge {
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  box-shadow: 0 0 0 4px rgba(15, 76, 129, 0.08);
-  flex: 0 0 auto;
 }
 
 .graph-selected-title {
@@ -1376,31 +1271,6 @@ a {
   font-size: 12px;
 }
 
-.graph-order-limit {
-  min-width: 168px;
-}
-
-.graph-order-limit input {
-  min-width: 88px;
-}
-
-.graph-stage-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  color: var(--text-soft);
-  font-size: 12px;
-}
-
-.graph-stage-meta span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(12, 33, 54, 0.05);
-}
-
 .graph-svg.interactive {
   user-select: none;
   touch-action: none;
@@ -1421,27 +1291,34 @@ a {
 }
 
 .graph-link {
-  stroke: #c4d0db;
+  stroke: #9aa5b1;
   stroke-width: 1.35;
-  opacity: 0.68;
+  opacity: 0.66;
+  fill: none;
 }
 
-.graph-link.highlighted {
-  stroke: #0f4c81;
-  stroke-width: 2.3;
-  opacity: 0.95;
-}
+.graph-link-structure { stroke: #1d53c0; }
 
 .graph-link-resource {
-  stroke-dasharray: 6 4;
+  stroke: #c2620a;
+  stroke-dasharray: 7 4;
 }
 
 .graph-link-other {
-  opacity: 0.4;
+  stroke: #9aa5b1;
+  stroke-dasharray: 2 4;
+  opacity: 0.45;
 }
 
-.graph-node circle {
-  stroke: rgba(255, 255, 255, 0.82);
+.graph-link.highlighted {
+  stroke-width: 2.4;
+  opacity: 0.95;
+}
+
+.graph-link-other.highlighted { stroke: #6b7a8c; }
+
+.graph-node .graph-node-shape {
+  stroke: rgba(255, 255, 255, 0.85);
   stroke-width: 2;
   filter: drop-shadow(0 8px 18px rgba(16, 46, 78, 0.16));
 }
@@ -1452,19 +1329,25 @@ a {
   fill: rgba(255, 255, 255, 0.001);
 }
 
-.graph-node.selected circle {
-  stroke: rgba(11, 46, 79, 0.9);
+.graph-node.selected .graph-node-shape {
+  stroke: rgba(11, 46, 79, 0.92);
   stroke-width: 3;
-  filter: drop-shadow(0 14px 24px rgba(15, 76, 129, 0.24));
+  filter: drop-shadow(0 14px 24px rgba(15, 76, 129, 0.26));
 }
 
-.graph-node.neighbor circle {
-  stroke: rgba(15, 76, 129, 0.45);
+.graph-node.neighbor .graph-node-shape {
+  stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 3;
+}
+
+.graph-node.scoped:not(.selected):not(.neighbor) .graph-node-shape {
+  stroke: rgba(15, 76, 129, 0.4);
 }
 
 .graph-node-label {
   fill: #32485a;
   font-size: 10px;
+  transition: opacity 0.15s var(--ease);
 }
 
 .graph-zoom-pill {
@@ -1479,10 +1362,6 @@ a {
   color: var(--text);
 }
 
-.graph-legend {
-  gap: 10px 18px;
-}
-
 .legend-line {
   width: 22px;
   height: 0;
@@ -1491,25 +1370,17 @@ a {
 }
 
 .legend-line-structure {
-  border-top-color: #0f4c81;
+  border-top-color: #1d53c0;
 }
 
 .legend-line-resource {
-  border-top-color: #667a8f;
+  border-top-color: #c2620a;
   border-top-style: dashed;
 }
 
 .legend-line-other {
-  border-top-color: #9caebe;
-}
-
-.graph-footnote {
-  border-radius: 14px;
-  padding: 12px 14px;
-  background: rgba(12, 33, 54, 0.04);
-  color: var(--text-soft);
-  font-size: 12px;
-  line-height: 1.6;
+  border-top-color: #9aa5b1;
+  border-top-style: dotted;
 }
 
 .graph-neighbor-groups {
@@ -1522,25 +1393,6 @@ a {
   border-radius: 14px;
   padding: 12px;
   background: rgba(250, 252, 254, 0.88);
-}
-
-.neighbor-pill-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.neighbor-pill {
-  border: 1px solid rgba(15, 76, 129, 0.16);
-  background: rgba(15, 76, 129, 0.06);
-  color: var(--text);
-  border-radius: 999px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-
-.neighbor-pill:hover {
-  background: rgba(15, 76, 129, 0.12);
 }
 
 .tag-row {
@@ -1925,10 +1777,6 @@ a {
   .graph-search {
     min-width: 0;
   }
-
-  .graph-order-bar {
-    min-width: 0;
-  }
 }
 
 /* === 导入进度（阶段一：Loading 状态） === */
@@ -2310,4 +2158,225 @@ a {
 /* 构建图谱按钮与上方内容留间隔 */
 .form-actions--gap {
   margin-top: 16px;
+}
+
+/* === 图谱 V2：层级泳道 / 图例坞 / 图级统计条 / 面包屑 / 详情面板 === */
+.graph-lane { stroke-width: 1; }
+.graph-lane-plan { fill: rgba(47, 111, 235, 0.05); stroke: rgba(47, 111, 235, 0.16); }
+.graph-lane-resource { fill: rgba(194, 98, 10, 0.05); stroke: rgba(194, 98, 10, 0.16); }
+.graph-lane-other { fill: rgba(100, 116, 139, 0.05); stroke: rgba(100, 116, 139, 0.16); }
+.graph-lane-label { font-size: 13px; font-weight: 700; fill: var(--text); }
+.graph-lane-count { font-size: 10px; fill: var(--text-faint); }
+.graph-family-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; }
+.graph-family-plan { fill: #2f6feb; }
+.graph-family-resource { fill: #c2620a; }
+.graph-family-other { fill: var(--text-faint); }
+
+.graph-node-char { fill: #fff; font-weight: 700; pointer-events: none; }
+.graph-node-order-ring { fill: none; stroke-width: 3; opacity: 0.9; }
+.graph-node[data-type="operation"] .graph-node-label { opacity: 0; }
+.graph-node[data-type="operation"].selected .graph-node-label,
+.graph-node[data-type="operation"].neighbor .graph-node-label,
+.graph-node[data-type="operation"]:hover .graph-node-label { opacity: 1; }
+
+.graph-canvas-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-strong);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+.graph-canvas-stats b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.graph-canvas-stats-warn { color: var(--warning); }
+.graph-canvas-stats-note { color: var(--text-faint); }
+
+.graph-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.graph-breadcrumb .crumb { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text); }
+.graph-breadcrumb .crumb-order { font-weight: 650; }
+.graph-breadcrumb .crumb-order i,
+.graph-order-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.graph-breadcrumb .crumb-sep { color: var(--text-faint); }
+
+.graph-legend-dock {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-strong);
+}
+.graph-legend-dock .legend { margin-bottom: 0; }
+.legend-block .legend-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.legend-shape { width: 18px; height: 18px; flex: 0 0 auto; }
+.legend-order-ring {
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 3px solid;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.graph-order-select select { min-width: 200px; }
+.graph-order-jump-row { display: flex; gap: 6px; }
+.graph-order-jump-row input { min-width: 150px; }
+.graph-order-jump-row .btn { align-self: stretch; }
+
+.graph-selected-badge-svg {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  filter: drop-shadow(0 4px 10px rgba(16, 46, 78, 0.18));
+}
+.graph-selected-badge-svg svg { width: 100%; height: 100%; }
+.graph-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.graph-selected-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.graph-order-tag { display: inline-flex; align-items: center; gap: 4px; color: var(--text-faint); font-size: 11px; }
+
+.graph-updown { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.graph-updown-col {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  background: var(--surface-strong);
+}
+.graph-updown-col header { font-size: 11px; font-weight: 600; color: var(--text-soft); margin-bottom: 8px; }
+.graph-updown-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.graph-updown-empty { color: var(--text-faint); font-size: 12px; }
+.graph-updown-more { color: var(--text-faint); font-size: 11px; font-family: var(--font-mono); }
+.graph-node-pill { display: inline-flex; align-items: center; gap: 6px; }
+.graph-node-pill i { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+
+.graph-relation-breakdown {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  background: var(--surface-strong);
+}
+.graph-relation-breakdown .graph-filter-title { margin-bottom: 0; }
+.graph-relation-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.graph-relation-row b { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text); }
+.graph-relation-group {
+  font-size: 10px;
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* === 甘特 V2：订单层级分组 / 订单色条块 / 现在线 / 行高与时间轴 === */
+.gantt-canvas .vis-item {
+  border: 1px solid rgba(9, 10, 14, 0.14);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+.gantt-canvas .vis-item .vis-item-content { padding: 5px 9px; font-weight: 700; }
+.gantt-canvas .vis-labelset .vis-label .vis-inner { padding: 8px 10px; }
+.gantt-canvas .vis-labelset .vis-label.vis-nested-group .vis-inner { padding-left: 22px; }
+
+.gantt-canvas .vis-labelset .vis-label.gantt-group-order {
+  background: var(--surface-strong);
+  border-bottom: 1px solid var(--line-strong);
+}
+.gantt-canvas .vis-labelset .vis-label.gantt-group-order .vis-inner {
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gantt-canvas .vis-labelset .vis-label.gantt-group-task .vis-inner { color: var(--text-soft); font-weight: 600; }
+.gantt-canvas .vis-labelset .vis-label.gantt-group-op .vis-inner { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+.gantt-canvas .gantt-op-machine { color: var(--text-faint); font-size: 10.5px; }
+.gantt-canvas .gantt-group-count { margin-left: 6px; color: var(--text-faint); font-size: 10px; font-weight: 400; }
+.gantt-canvas .gantt-order-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.gantt-canvas .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
+.gantt-canvas .vis-time-axis .vis-grid.vis-major { border-color: var(--line-strong); }
+.gantt-canvas .vis-time-axis .vis-text { color: var(--text-soft); font-size: 11px; }
+.gantt-canvas .vis-time-axis .vis-text.vis-major { color: var(--text); font-weight: 600; }
+.gantt-canvas .vis-custom-time.sched-now {
+  background-color: var(--danger);
+  width: 2px;
+  cursor: default;
+  z-index: 2;
+}
+
+.legend-swatch.order-dot { width: 12px; height: 12px; border-radius: 999px; }
+.legend-swatch.now-line { width: 3px; height: 14px; border-radius: 1px; background: var(--danger); }
+.timeline-summary-card .gantt-order-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
+@media (max-width: 1080px) {
+  .graph-updown { grid-template-columns: 1fr; }
+  .graph-legend-dock { grid-template-columns: 1fr; }
+  .graph-order-select select { min-width: 140px; }
+}
+
+/* 右栏详情很长时，左侧画布卡住跟随视口，避免下半截留白 */
+.graph-split .graph-stage-card {
+  position: sticky;
+  top: 12px;
+  align-self: start;
 }
