@@ -134,6 +134,64 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
               new Set(ranked.map((item) => item.order_id)).size,
               ranked.length
             );
+            assert.strictEqual(ranked[1].order_name, "重复最近");
+            assert.strictEqual(ranked[2].order_name, "重复较早");
+            """
+        )
+
+    def test_text_order_query_uses_authoritative_records_not_stale_pins(self):
+        self._run_node(
+            """
+            const ranked = runtime.rankOrders([
+              {order_id: "O-1", order_name: "Alpha"},
+              {order_id: "O-2", order_name: "Alphanumeric"}
+            ], "alpha", 50, {
+              current: {order_id: "O-1", order_name: ""},
+              recent: [{order_id: "O-2", order_name: "旧名称"}]
+            });
+            assert.deepStrictEqual(
+              ranked.map((item) => [item.order_id, item.order_name]),
+              [["O-1", "Alpha"], ["O-2", "Alphanumeric"]]
+            );
+            """
+        )
+
+    def test_real_focus_and_click_events_use_shared_binding_without_double_search(self):
+        self._run_node(
+            """
+            const timers = [];
+            const target = new EventTarget();
+            const queries = [];
+            const controller = runtime.createOrderComboboxController({
+              schedule(fn) {
+                const handle = {fn, cancelled: false};
+                timers.push(handle);
+                return handle;
+              },
+              cancelSchedule(handle) {
+                if (handle) handle.cancelled = true;
+              },
+              search: async (query) => {
+                queries.push(query);
+                return [{order_id: "O-1", order_name: "Alpha"}];
+              },
+              select: async () => {}
+            });
+            const unbind = runtime.bindOrderComboboxOpen(target, controller);
+
+            target.dispatchEvent(new Event("focus"));
+            target.dispatchEvent(new Event("click"));
+            assert.strictEqual(timers.length, 1);
+            timers.shift().fn();
+            await Promise.resolve();
+            await Promise.resolve();
+            assert.deepStrictEqual(queries, [""]);
+            assert.strictEqual(controller.getState().open, true);
+
+            unbind();
+            controller.close();
+            target.dispatchEvent(new Event("focus"));
+            assert.strictEqual(timers.length, 0);
             """
         )
 
@@ -427,6 +485,36 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
+    def test_review_failure_notes_are_precise_generic_and_escaped(self):
+        self._run_node(
+            """
+            const partial = runtime.renderReviewFailureNotes({
+              failedIds: ["RULE:OLD", "RULE:MISSING"],
+              failureMessages: {
+                "RULE:OLD": '请先计算 <script>alert("x")</script>'
+              },
+              selected: [
+                {id: "RULE:OLD", name: "旧规则 <b>"},
+                {id: "RULE:MISSING", name: "无消息规则"}
+              ],
+              hasData: true
+            });
+            assert(partial.includes("请先计算 &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"));
+            assert(partial.includes("旧规则 &lt;b&gt;"));
+            assert(partial.includes("无消息规则 在该订单下无可回放"));
+            assert(!partial.includes("所选方案在当前订单下暂无可展示"));
+            assert(!partial.includes("<script>"));
+
+            const noData = runtime.renderReviewFailureNotes({
+              failedIds: [],
+              failureMessages: {},
+              selected: [],
+              hasData: false
+            });
+            assert(noData.includes("所选方案在当前订单下暂无可展示"));
+            """
+        )
+
     def test_data_requests_cancel_stale_work_and_cache_completed_payloads(self):
         self._run_node(
             """
@@ -690,8 +778,38 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
               dataSize: 0,
               orderSize: 0,
               dataKeys: [],
-              orderKeys: []
+              orderKeys: [],
+              limits: {data: 2, orders: 2}
             });
+            """
+        )
+
+    def test_invalid_and_fractional_cache_limits_are_finite_positive_integers(self):
+        self._run_node(
+            """
+            const makeClient = (dataCacheLimit, orderCacheLimit) =>
+              runtime.createClient({
+                dataCacheLimit,
+                orderCacheLimit,
+                fetchReviewData: async () => ({schemes: {}}),
+                fetchOrders: async () => ({orders: []})
+              });
+            assert.deepStrictEqual(
+              makeClient(Infinity, NaN).cacheStats().limits,
+              {data: 12, orders: 100}
+            );
+            assert.deepStrictEqual(
+              makeClient(0, -4).cacheStats().limits,
+              {data: 12, orders: 100}
+            );
+            assert.deepStrictEqual(
+              makeClient(2.9, 3.8).cacheStats().limits,
+              {data: 2, orders: 3}
+            );
+            assert.deepStrictEqual(
+              makeClient(1000000, 1000000).cacheStats().limits,
+              {data: 1000, orders: 1000}
+            );
             """
         )
 

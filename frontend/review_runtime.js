@@ -62,10 +62,16 @@
         return true;
       });
     };
+    const authoritative = unique(orders || []);
     if (!needle) {
-      const pinnedOrders = unique(pinned);
+      const authoritativeById = new Map(
+        authoritative.map((item) => [String(item.order_id), item])
+      );
+      const pinnedOrders = unique(pinned).map(
+        (item) => authoritativeById.get(String(item.order_id)) || item
+      );
       const pinnedIds = new Set(pinnedOrders.map((item) => String(item.order_id)));
-      const remaining = unique(orders || [])
+      const remaining = authoritative
         .filter((item) => !pinnedIds.has(String(item.order_id)))
         .sort((a, b) =>
           String(a.order_id).localeCompare(String(b.order_id), "zh-CN", {
@@ -83,7 +89,7 @@
       if (name.includes(needle)) return 3;
       return 4;
     };
-    return unique([...pinned, ...(orders || [])])
+    return authoritative
       .filter((item) => bucket(item) < 4)
       .slice()
       .sort(
@@ -94,6 +100,51 @@
           })
       )
       .slice(0, maxResults);
+  }
+
+  function bindOrderComboboxOpen(target, controller) {
+    const open = () => controller.open();
+    target.addEventListener("focus", open);
+    target.addEventListener("click", open);
+    return () => {
+      target.removeEventListener("focus", open);
+      target.removeEventListener("click", open);
+    };
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function renderReviewFailureNotes({
+    failedIds,
+    failureMessages,
+    selected,
+    hasData,
+  }) {
+    const selectedItems = Array.isArray(selected) ? selected : [];
+    const messages = failureMessages || {};
+    const failedNote = (Array.isArray(failedIds) ? failedIds : [])
+      .map((failedId) => {
+        const failedName =
+          selectedItems.find((item) => item.id === failedId)?.name || failedId;
+        const failureMessage = messages[failedId];
+        if (failureMessage) {
+          return `<p class="gantt-note"><strong>${escapeHtml(
+            failedName
+          )}</strong>：${escapeHtml(failureMessage)}</p>`;
+        }
+        return `<p class="gantt-note">${escapeHtml(
+          failedName
+        )} 在该订单下无可回放的排产，未在下方甘特显示。</p>`;
+      })
+      .join("");
+    if (hasData) return failedNote;
+    return `${failedNote}<p class="gantt-note">所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p>`;
   }
 
   function createOrderComboboxController({
@@ -296,8 +347,13 @@
   }) {
     const dataCache = new Map();
     const orderCache = new Map();
-    const normalizedDataLimit = Math.max(1, Number(dataCacheLimit) || 12);
-    const normalizedOrderLimit = Math.max(1, Number(orderCacheLimit) || 100);
+    const normalizeCacheLimit = (value, fallback) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+      return Math.min(1000, Math.max(1, Math.floor(numeric)));
+    };
+    const normalizedDataLimit = normalizeCacheLimit(dataCacheLimit, 12);
+    const normalizedOrderLimit = normalizeCacheLimit(orderCacheLimit, 100);
     let dataController = null;
     let orderController = null;
     let dataGeneration = 0;
@@ -409,6 +465,10 @@
         orderSize: orderCache.size,
         dataKeys: Array.from(dataCache.keys()),
         orderKeys: Array.from(orderCache.keys()),
+        limits: {
+          data: normalizedDataLimit,
+          orders: normalizedOrderLimit,
+        },
       };
     }
 
@@ -421,6 +481,8 @@
     selectionKey,
     scheduleKey,
     rankOrders,
+    bindOrderComboboxOpen,
+    renderReviewFailureNotes,
     createOrderComboboxController,
     handleOrderComboboxKey,
     createClient,

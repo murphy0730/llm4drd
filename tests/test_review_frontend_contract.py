@@ -94,24 +94,29 @@ class ReviewFrontendContractTests(unittest.TestCase):
         mount_start = JS.index("function mountOrderComboboxes()")
         mount_end = JS.index("\nfunction formatNumber", mount_start)
         mount_source = JS[mount_start:mount_end]
-        self.assertIn('input.addEventListener("focus"', mount_source)
-        self.assertIn('input.addEventListener("click"', mount_source)
-        self.assertGreaterEqual(mount_source.count("controller.open()"), 2)
+        self.assertIn("ReviewRuntime.bindOrderComboboxOpen(input, controller)", mount_source)
         self.assertIn("orderComboboxRecent", JS)
         reset_start = JS.index("function resetInstanceDerivedState()")
         reset_end = JS.index("\nfunction ", reset_start)
         self.assertIn("app.orderComboboxRecent.clear()", JS[reset_start:reset_end])
 
+    def test_order_combobox_recent_keys_cover_all_three_data_contexts(self):
+        for context in (
+            'contextKey: `local::${app.currentSceneId || "current-instance"}::${id}::${ReviewRuntime.normalizeIds(options.solutionIds).join(",")}`',
+            'contextKey: `plan::${taskId}::${solutionId}`',
+            'contextKey: `review::${ReviewRuntime.selectionKey(taskId, ids)}`',
+        ):
+            self.assertIn(context, JS)
+        self.assertIn("source.recentKey", JS)
+        self.assertIn("config.contextKey", JS)
+
     def test_review_gantt_preserves_escaped_backend_failure_messages(self):
         start = JS.index("function reviewGanttStatusHtml(")
         end = JS.index("\nfunction renderReviewGantt(", start)
         source = JS[start:end]
-        self.assertIn("state.failureMessages", source)
-        self.assertIn("failedId", source)
-        self.assertIn("escapeHtml(failureMessage)", source)
-        self.assertIn("在该订单下无可回放", source)
-        self.assertNotIn("escapeHtml(failedNames.join", source)
-        self.assertIn("if (data) return failedNote;", source)
+        self.assertIn("ReviewRuntime.renderReviewFailureNotes({", source)
+        self.assertIn("failureMessages: state.failureMessages", source)
+        self.assertIn("hasData: Boolean(data)", source)
 
     def test_review_commits_are_guarded_by_request_generation_and_schedule(self):
         self.assertIn("let reviewReadRequestGeneration = 0", JS)

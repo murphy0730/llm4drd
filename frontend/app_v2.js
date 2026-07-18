@@ -445,20 +445,21 @@ function orderComboboxLabel(order) {
   return [order.order_id, order.order_name].filter(Boolean).join(" · ");
 }
 
-function rememberOrderComboboxSelection(id, order) {
-  if (!id || !order?.order_id) return;
+function rememberOrderComboboxSelection(recentKey, order) {
+  if (!recentKey || !order?.order_id) return;
   const recent = [
     order,
-    ...asArray(app.orderComboboxRecent.get(id)),
+    ...asArray(app.orderComboboxRecent.get(recentKey)),
   ].filter((item, index, items) =>
     items.findIndex((candidate) => candidate.order_id === item.order_id) === index
   ).slice(0, ORDER_RECENT_LIMIT);
-  app.orderComboboxRecent.set(id, recent);
+  app.orderComboboxRecent.set(recentKey, recent);
 }
 
 function renderOrderCombobox(config) {
-  rememberOrderComboboxSelection(config.id, config.selected);
-  app.orderComboboxSources.set(config.id, config);
+  const recentKey = `${config.id}::${config.contextKey}`;
+  rememberOrderComboboxSelection(recentKey, config.selected);
+  app.orderComboboxSources.set(config.id, { ...config, recentKey });
   const listId = `${config.id}-list`;
   return `
     <div class="order-combobox" data-order-combobox="${escapeHtml(config.id)}">
@@ -509,10 +510,10 @@ function mountOrderComboboxes() {
     controller = ReviewRuntime.createOrderComboboxController({
       search: source.search,
       current: source.selected,
-      recent: app.orderComboboxRecent.get(source.id) || [],
+      recent: app.orderComboboxRecent.get(source.recentKey) || [],
       select: async (order) => {
         input.value = orderComboboxLabel(order);
-        rememberOrderComboboxSelection(source.id, order);
+        rememberOrderComboboxSelection(source.recentKey, order);
         await source.select(order);
       },
       delay: ORDER_SEARCH_DEBOUNCE_MS,
@@ -528,12 +529,7 @@ function mountOrderComboboxes() {
     input.addEventListener("input", () => {
       controller.input(input.value);
     });
-    input.addEventListener("focus", () => {
-      controller.open();
-    });
-    input.addEventListener("click", () => {
-      controller.open();
-    });
+    ReviewRuntime.bindOrderComboboxOpen(input, controller);
   });
 }
 
@@ -2082,6 +2078,9 @@ function renderTimeline(entries, options = {}) {
       ${renderOrderCombobox({
         id: orderComboboxId,
         selected: selectedOrderItem,
+        ...(serverMode
+          ? { contextKey: `plan::${taskId}::${solutionId}` }
+          : { contextKey: `local::${app.currentSceneId || "current-instance"}::${id}::${ReviewRuntime.normalizeIds(options.solutionIds).join(",")}` }),
         search: serverMode
           ? async (query, signal) => {
             const payload = await api.searchReviewOrders(taskId, [solutionId], query, signal);
@@ -3186,6 +3185,7 @@ function reviewGanttControlsHtml() {
       ${renderOrderCombobox({
         id: "gantt-review-compare-order",
         selected: { order_id: selectedOrder, order_name: "" },
+        contextKey: `review::${ReviewRuntime.selectionKey(taskId, ids)}`,
         search: async (query, signal) => {
           const result = await reviewDataClient.searchOrders({ taskId, ids, query }, signal);
           return result.cancelled ? [] : result.orders;
@@ -3217,17 +3217,12 @@ function reviewGanttStatusHtml(selected, data) {
   if (state.error) {
     return `<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div>`;
   }
-  const failedNotes = asArray(state.failedIds).map((failedId) => {
-    const failedName = selected.find((item) => item.id === failedId)?.name || failedId;
-    const failureMessage = state.failureMessages?.[failedId];
-    if (failureMessage) {
-      return `<p class="gantt-note"><strong>${escapeHtml(failedName)}</strong>：${escapeHtml(failureMessage)}</p>`;
-    }
-    return `<p class="gantt-note">${escapeHtml(failedName)} 在该订单下无可回放的排产，未在下方甘特显示。</p>`;
+  return ReviewRuntime.renderReviewFailureNotes({
+    failedIds: state.failedIds,
+    failureMessages: state.failureMessages,
+    selected,
+    hasData: Boolean(data),
   });
-  const failedNote = failedNotes.join("");
-  if (data) return failedNote;
-  return `${failedNote}<p class="gantt-note">所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p>`;
 }
 
 function renderReviewGantt(selected) {
