@@ -357,7 +357,7 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                     };
                 }"""
             )
-            percent_ok = bool(utilization["cells"]) and all(
+            percent_ok = len(utilization["cells"]) == 8 and all(
                 PERCENT_RE.fullmatch(value) for value in utilization["cells"]
             )
             checks.append(Check(
@@ -366,19 +366,29 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 f'{len(utilization["cells"])} cells',
                 {"cells": utilization["cells"]},
             ))
-            headers_ok = bool(utilization["headerEvidence"]) and all(
-                item["scrollWidth"] <= item["clientWidth"] + 1
-                and item["scrollHeight"] <= item["clientHeight"] + 1
-                and item["height"] >= 44
-                and item["lineCount"] >= 2
-                and item["textBoundsInsideHeader"]
-                and item["titleMatches"]
-                and len(item["text"]) >= 20
-                for item in utilization["headerEvidence"]
-            ) and all(
-                item["fullyVisible"] for item in utilization["laterHeaderRects"]
-            ) and all(
-                item["fullyVisible"] for item in utilization["laterCellRects"]
+            headers_ok = (
+                len(utilization["headerEvidence"]) == 4
+                and all(
+                    item["scrollWidth"] <= item["clientWidth"] + 1
+                    and item["scrollHeight"] <= item["clientHeight"] + 1
+                    and item["height"] >= 44
+                    and item["lineCount"] >= 2
+                    and item["textBoundsInsideHeader"]
+                    and item["titleMatches"]
+                    and len(item["text"]) >= 20
+                    for item in utilization["headerEvidence"]
+                )
+                and len(utilization["laterHeaderRects"]) == 2
+                and all(
+                    item["fullyVisible"]
+                    for item in utilization["laterHeaderRects"]
+                )
+                and len(utilization["laterCellRects"]) == 4
+                and all(
+                    item["fullyVisible"]
+                    for item in utilization["laterCellRects"]
+                )
+                and abs(utilization["machineTypeWidth"] - 132) <= 1.5
             )
             checks.append(Check(
                 "utilization_headers_unclipped",
@@ -445,6 +455,7 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
             ))
 
             first_delayed = True
+            delayed_request = None
             first_intercepted = asyncio.Event()
             first_lifecycle_done = asyncio.Event()
             first_lifecycle = {
@@ -453,6 +464,7 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
                 "routeReleaseError": None,
                 "outcome": None,
                 "failure": None,
+                "identityMatched": False,
             }
 
             def is_delayed_first(request) -> bool:
@@ -467,9 +479,11 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
             def record_first_lifecycle(request, outcome: str) -> None:
                 if (
                     first_lifecycle["outcome"] is not None
-                    or not is_delayed_first(request)
+                    or delayed_request is None
+                    or request is not delayed_request
                 ):
                     return
+                first_lifecycle["identityMatched"] = True
                 first_lifecycle["outcome"] = outcome
                 first_lifecycle["failure"] = (
                     request.failure if outcome == "failed" else None
@@ -487,9 +501,10 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
             )
 
             async def delay_first_order(route, request):
-                nonlocal first_delayed
+                nonlocal first_delayed, delayed_request
                 if first_delayed and is_delayed_first(request):
                     first_delayed = False
+                    delayed_request = request
                     first_lifecycle["url"] = request.url
                     first_lifecycle["interceptedAt"] = time.perf_counter()
                     first_intercepted.set()
@@ -538,6 +553,7 @@ async def verify(base_url: str, channel: str | None, headed: bool) -> list[Check
             rapid_ok = (
                 first_intercepted.is_set()
                 and first_lifecycle_done.is_set()
+                and first_lifecycle["identityMatched"]
                 and first_lifecycle["outcome"] in {"finished", "failed"}
                 and final_state["orderId"] == "ORD-GAMMA-300"
                 and "ORD-GAMMA-300" in final_state["inputValue"]
