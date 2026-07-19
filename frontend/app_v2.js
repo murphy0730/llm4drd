@@ -465,11 +465,12 @@ function renderOrderCombobox(config) {
   rememberOrderComboboxSelection(recentKey, config.selected);
   app.orderComboboxSources.set(config.id, { ...config, recentKey });
   const listId = `${config.id}-list`;
+  const labelOf = config.label || orderComboboxLabel;
   return `
     <div class="order-combobox" data-order-combobox="${escapeHtml(config.id)}">
       <input type="search" role="combobox" aria-autocomplete="list"
         aria-expanded="false" aria-controls="${escapeHtml(listId)}"
-        value="${escapeHtml(orderComboboxLabel(config.selected))}" placeholder="输入订单号模糊搜索">
+        value="${escapeHtml(labelOf(config.selected))}" placeholder="输入订单号模糊搜索">
       <div class="order-combobox-list" id="${escapeHtml(listId)}"
         role="listbox" hidden></div>
     </div>
@@ -489,12 +490,13 @@ function mountOrderComboboxes() {
     if (!source || !input || !list) return;
     container.dataset.orderComboboxBound = "1";
 
+    const labelOf = source.label || orderComboboxLabel;
     let controller;
     const renderState = (state) => {
       list.innerHTML = state.results.map((order, index) => {
         const optionId = `${source.id}-option-${index}`;
         const active = index === state.activeIndex;
-        return `<button type="button" id="${escapeHtml(optionId)}" class="order-combobox-option${active ? " is-active" : ""}" role="option" aria-selected="${active ? "true" : "false"}" data-order-result="${index}">${escapeHtml(orderComboboxLabel(order))}</button>`;
+        return `<button type="button" id="${escapeHtml(optionId)}" class="order-combobox-option${active ? " is-active" : ""}" role="option" aria-selected="${active ? "true" : "false"}" data-order-result="${index}">${escapeHtml(labelOf(order))}</button>`;
       }).join("");
       list.hidden = !state.open;
       input.setAttribute("aria-expanded", state.open ? "true" : "false");
@@ -516,7 +518,7 @@ function mountOrderComboboxes() {
       current: source.selected,
       recent: app.orderComboboxRecent.read(source.recentKey),
       select: async (order) => {
-        input.value = orderComboboxLabel(order);
+        input.value = labelOf(order);
         rememberOrderComboboxSelection(source.recentKey, order);
         await source.select(order);
       },
@@ -3190,6 +3192,7 @@ function reviewGanttControlsHtml() {
         id: "gantt-review-compare-order",
         selected: { order_id: selectedOrder, order_name: "" },
         contextKey: `review::${ReviewRuntime.selectionKey(taskId, ids)}`,
+        label: (order) => (order && order.order_id ? String(order.order_id) : ""),
         search: async (query, signal) => {
           const result = await reviewDataClient.searchOrders({ taskId, ids, query }, signal);
           return result.cancelled ? [] : result.orders;

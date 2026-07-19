@@ -902,17 +902,16 @@ a {
 .chip.is-baseline { color: var(--text-faint); background: var(--surface-strong, #f4f6f9); }
 .chip.is-baseline .chip-badge { color: var(--text-faint); }
 
-/* 机器分类利用率表：固定列宽收敛，4 方案对比不出横向滚动 */
-.util-table { table-layout: fixed; }
+/* 机器分类利用率表：方案列宽按内容自适应，表格内容全部居中 */
+.util-table { table-layout: auto; width: auto; }
 .util-col-type { width: 132px; }
-.util-table th, .util-table td { padding: 8px 10px; }
+.util-table th, .util-table td { padding: 8px 10px; text-align: center; }
 .util-table .util-plan-name {
   display: inline;
   overflow: visible;
   white-space: normal;
   word-break: break-word;
 }
-.util-table td:not(:first-child), .util-table th:not(:first-child) { text-align: right; }
 
 .table-shell {
   overflow: auto;
