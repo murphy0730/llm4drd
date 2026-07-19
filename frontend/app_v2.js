@@ -1863,16 +1863,15 @@ function renderTimeline(entries, options = {}) {
   app.pendingGantts.set(id, { entries: visibleEntries, options: { ...options, canvasId: id, groupMode }, data });
 
   const selectedOrderColor = selectedOrder === "__all__" ? null : orderColorFor(selectedOrder);
+  const orderComboItems = [
+    ...(allowAll ? [{ value: "__all__", label: `全部订单（${formatInt(allEntries.length)} 道工序）` }] : []),
+    ...orderOptions.map((orderId) => ({ value: orderId, label: orderId })),
+  ];
+  const selectedOrderLabel = selectedOrder === "__all__" ? "全部订单" : String(selectedOrder ?? "");
   const orderSelector = orderOptions.length > 1 || !allowAll ? `
     <div class="field-inline">
       <span>订单</span>
-      <select data-gantt-order-select data-canvas="${escapeHtml(id)}" ${serverMode ? 'data-gantt-server-order="1"' : ""}>
-        ${allowAll ? `<option value="__all__" ${selectedOrder === "__all__" ? "selected" : ""}>全部订单（${formatInt(allEntries.length)} 道工序）</option>` : ""}
-        ${orderOptions.map((orderId) => {
-          const name = orderNames.get(orderId);
-          return `<option value="${escapeHtml(orderId)}" ${orderId === selectedOrder ? "selected" : ""}>${escapeHtml(name && name !== orderId ? `${orderId} · ${name}` : orderId)}</option>`;
-        }).join("")}
-      </select>
+      ${renderOrderCombobox({ role: "gantt", canvasId: id, serverMode, items: orderComboItems, selectedValue: selectedOrder, selectedLabel: selectedOrderLabel })}
       <span>分组</span>
       <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
         <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
@@ -2975,9 +2974,12 @@ function renderReviewGantt(selected) {
   const orderSelector = orders.length ? `
     <div class="field-inline">
       <span>订单</span>
-      <select data-review-gantt-order>
-        ${orders.map((o) => `<option value="${escapeHtml(o.order_id)}" ${o.order_id === selectedOrder ? "selected" : ""}>${escapeHtml(o.order_name && o.order_name !== o.order_id ? `${o.order_id} · ${o.order_name}` : o.order_id)}</option>`).join("")}
-      </select>
+      ${renderOrderCombobox({
+        role: "review",
+        items: orders.map((o) => ({ value: o.order_id, label: o.order_id })),
+        selectedValue: selectedOrder,
+        selectedLabel: String(selectedOrder ?? ""),
+      })}
     </div>
   ` : "";
   const legend = `
@@ -5482,6 +5484,123 @@ async function handleAction(action, target) {
   }
 }
 
+// ---- 订单可搜索下拉框（甘特图，替换原生 select）----
+// 展开/查询/高亮均为单次渲染内的临时 DOM 状态，不写入 app；选中即触发整页重渲染自然重置。
+function renderOrderCombobox({ role, canvasId = "", serverMode = false, items, selectedValue, selectedLabel }) {
+  const label = selectedLabel || "";
+  const rootAttrs = [
+    "data-order-combobox",
+    `data-role="${role}"`,
+    canvasId ? `data-canvas="${escapeHtml(canvasId)}"` : "",
+    serverMode ? 'data-server="1"' : "",
+    `data-selected-label="${escapeHtml(label)}"`,
+  ].filter(Boolean).join(" ");
+  const optionsHtml = items.map((item) => {
+    const active = item.value === selectedValue;
+    return `<li class="order-combobox-option${active ? " is-selected" : ""}" data-order-combobox-option data-value="${escapeHtml(item.value)}" role="option" aria-selected="${active ? "true" : "false"}">${escapeHtml(item.label)}</li>`;
+  }).join("");
+  return `
+    <div class="order-combobox" ${rootAttrs}>
+      <input type="search" class="order-combobox-input" data-order-combobox-input
+             placeholder="搜索订单号…" value="${escapeHtml(label)}"
+             autocomplete="off" role="combobox" aria-expanded="false">
+      <ul class="order-combobox-list" data-order-combobox-list role="listbox" hidden>
+        ${optionsHtml}
+        <li class="order-combobox-empty" data-order-combobox-empty hidden>无匹配订单</li>
+      </ul>
+    </div>
+  `;
+}
+
+function openOrderCombobox(root) {
+  if (!root || root.classList.contains("is-open")) return;
+  root.classList.add("is-open");
+  const list = root.querySelector("[data-order-combobox-list]");
+  const input = root.querySelector("[data-order-combobox-input]");
+  if (list) list.hidden = false;
+  if (input) input.setAttribute("aria-expanded", "true");
+}
+
+function closeOrderCombobox(root) {
+  if (!root || !root.classList.contains("is-open")) return;
+  root.classList.remove("is-open");
+  const list = root.querySelector("[data-order-combobox-list]");
+  const input = root.querySelector("[data-order-combobox-input]");
+  if (list) list.hidden = true;
+  if (input) {
+    input.setAttribute("aria-expanded", "false");
+    input.value = root.dataset.selectedLabel || "";
+  }
+  root.querySelectorAll(".order-combobox-option.is-active").forEach((o) => o.classList.remove("is-active"));
+}
+
+function closeOrderComboboxesExcept(keepRoot) {
+  document.querySelectorAll(".order-combobox.is-open").forEach((root) => {
+    if (root !== keepRoot) closeOrderCombobox(root);
+  });
+}
+
+// 仅按订单号（value）做大小写不敏感子串匹配；“全部订单”项仅在无查询词时保留。
+function filterOrderCombobox(root, query) {
+  if (!root) return;
+  const q = String(query || "").trim().toLowerCase();
+  let visible = 0;
+  root.querySelectorAll("[data-order-combobox-option]").forEach((opt) => {
+    const value = opt.dataset.value || "";
+    const show = value === "__all__" ? q === "" : value.toLowerCase().includes(q);
+    opt.hidden = !show;
+    opt.classList.remove("is-active");
+    if (show) visible += 1;
+  });
+  const empty = root.querySelector("[data-order-combobox-empty]");
+  if (empty) empty.hidden = visible > 0;
+  const first = root.querySelector("[data-order-combobox-option]:not([hidden])");
+  if (first) first.classList.add("is-active");
+}
+
+function moveOrderComboboxHighlight(root, delta) {
+  const opts = Array.from(root.querySelectorAll("[data-order-combobox-option]")).filter((o) => !o.hidden);
+  if (!opts.length) return;
+  let idx = opts.findIndex((o) => o.classList.contains("is-active"));
+  idx = idx < 0 ? (delta > 0 ? 0 : opts.length - 1) : idx + delta;
+  idx = Math.max(0, Math.min(opts.length - 1, idx));
+  opts.forEach((o) => o.classList.remove("is-active"));
+  opts[idx].classList.add("is-active");
+  opts[idx].scrollIntoView({ block: "nearest" });
+}
+
+async function selectOrderComboboxOption(option) {
+  const root = option.closest(".order-combobox");
+  if (!root) return;
+  const value = option.dataset.value;
+  closeOrderCombobox(root);
+  if (root.dataset.role === "review") {
+    return loadReviewGantt(app.reviewGantt.taskId, app.reviewGantt.ids, value);
+  }
+  if (root.dataset.server === "1") {
+    return loadPlanGantt(app.planGantt.taskId, app.planGantt.solutionId, value);
+  }
+  app.ganttOrderFilter[root.dataset.canvas] = value;
+  return renderCurrentPage();
+}
+
+function handleOrderComboboxKeydown(event, root, input) {
+  const isOpen = root.classList.contains("is-open");
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (!isOpen) { openOrderCombobox(root); filterOrderCombobox(root, input.value); return; }
+    moveOrderComboboxHighlight(root, 1);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (isOpen) moveOrderComboboxHighlight(root, -1);
+  } else if (event.key === "Enter") {
+    const active = isOpen ? root.querySelector(".order-combobox-option.is-active:not([hidden])") : null;
+    if (active) { event.preventDefault(); selectOrderComboboxOption(active); }
+  } else if (event.key === "Escape") {
+    if (isOpen) { event.preventDefault(); closeOrderCombobox(root); }
+  }
+}
+
 function bindGlobalEvents() {
   document.addEventListener("fullscreenchange", () => {
     const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-workbench")
@@ -5495,6 +5614,13 @@ function bindGlobalEvents() {
   });
 
   document.addEventListener("click", async (event) => {
+    const comboOption = event.target.closest("[data-order-combobox-option]");
+    if (comboOption) {
+      event.preventDefault();
+      await selectOrderComboboxOption(comboOption);
+      return;
+    }
+    closeOrderComboboxesExcept(event.target.closest(".order-combobox"));
     const ganttPageTarget = event.target.closest("[data-gantt-page]");
     if (ganttPageTarget && !ganttPageTarget.disabled) {
       event.preventDefault();
@@ -5573,13 +5699,6 @@ function bindGlobalEvents() {
       updateOptimizeBudgetHint();
       return;
     }
-    if (target.matches("[data-gantt-order-select]")) {
-      if (target.matches("[data-gantt-server-order]")) {
-        return loadPlanGantt(app.planGantt.taskId, app.planGantt.solutionId, target.value);
-      }
-      app.ganttOrderFilter[target.dataset.canvas] = target.value;
-      return renderCurrentPage();
-    }
     if (target.matches("[data-gantt-group-mode]")) {
       app.ganttGroupMode[target.dataset.canvas] = target.value;
       return renderCurrentPage();
@@ -5639,9 +5758,6 @@ function bindGlobalEvents() {
       if (value) await searchGraphOrderAndRender(value);
       return;
     }
-    if (target.matches("[data-review-gantt-order]")) {
-      return loadReviewGantt(app.reviewGantt.taskId, app.reviewGantt.ids, target.value);
-    }
     if (target.matches("#workflow-sim-rule")) app.simRule = target.value;
     if (target.matches("#ai-solution-select")) {
       app.reviewDetailId = target.value;
@@ -5660,8 +5776,29 @@ function bindGlobalEvents() {
     }
   });
 
+  document.addEventListener("focusin", (event) => {
+    const input = event.target.closest?.("[data-order-combobox-input]");
+    if (!input) return;
+    const root = input.closest(".order-combobox");
+    openOrderCombobox(root);
+    filterOrderCombobox(root, "");
+    input.select();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const input = event.target.closest?.("[data-order-combobox-input]");
+    if (!input) return;
+    handleOrderComboboxKeydown(event, input.closest(".order-combobox"), input);
+  });
+
   document.addEventListener("input", (event) => {
     const target = event.target;
+    if (target.matches("[data-order-combobox-input]")) {
+      const root = target.closest(".order-combobox");
+      openOrderCombobox(root);
+      filterOrderCombobox(root, target.value);
+      return;
+    }
     if (target.matches("[data-graph-search]")) {
       app.graphView.search = target.value || "";
       renderCurrentPage();
