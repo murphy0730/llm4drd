@@ -811,6 +811,17 @@ a {
   z-index: 2;
   background: var(--surface, #fff);
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .compare-table .compare-check { width: 40px; text-align: center; }
 .compare-table .compare-name strong { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .compare-table .compare-name small { display: block; margin-top: 2px; color: var(--text-faint); font-size: 11px; }
@@ -893,18 +904,15 @@ a {
 
 /* 机器分类利用率表：固定列宽收敛，4 方案对比不出横向滚动 */
 .util-table { table-layout: fixed; }
-.util-col-type { width: 200px; }
-.util-col-plan { width: 120px; }
+.util-col-type { width: 132px; }
 .util-table th, .util-table td { padding: 8px 10px; }
 .util-table .util-plan-name {
-  display: inline-block; max-width: 90px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+  display: inline;
+  overflow: visible;
+  white-space: normal;
+  word-break: break-word;
 }
-.util-table .cell-sub { font-size: 11px; white-space: nowrap; }
 .util-table td:not(:first-child), .util-table th:not(:first-child) { text-align: right; }
-.util-table td:not(:first-child) .cell-sub { text-align: right; }
-.util-bar { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: rgba(15, 76, 129, 0.10); overflow: hidden; }
-.util-bar-fill { display: block; height: 100%; border-radius: 2px; }
 
 .table-shell {
   overflow: auto;
@@ -2256,6 +2264,53 @@ a {
   color: var(--text);
 }
 
+.order-combobox {
+  position: relative;
+  flex: 0 0 280px;
+  width: 280px;
+  z-index: 5;
+}
+
+.order-combobox > input {
+  width: 280px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  border-radius: 12px;
+  padding: 9px 12px;
+  color: var(--text);
+}
+
+.order-combobox-list {
+  position: absolute;
+  inset: calc(100% + 4px) 0 auto;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+}
+
+.order-combobox-option {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.order-combobox-option:hover,
+.order-combobox-option.is-active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
 /* -- 甘特资源筛选 / 二级筛选 / 分页 -- */
 .gantt-filter-bar { flex-wrap: wrap; row-gap: 6px; margin: 6px 0; }
 .gantt-filter-bar > select { flex: 0 1 auto; min-width: 140px; padding: 6px 10px; }
@@ -2273,49 +2328,6 @@ a {
 .gantt-pager { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; color: var(--text-soft); font-size: 12px; }
 .gantt-pager .btn-ghost { padding: 4px 12px; border-radius: 999px; }
 .gantt-group-downtime { color: var(--danger); font-weight: 700; }
-
-/* -- 订单可搜索下拉框 -- */
-.field-inline > .order-combobox { flex: 1; }
-.order-combobox { position: relative; min-width: 180px; }
-.order-combobox-input {
-  width: 100%;
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  border-radius: 12px;
-  padding: 11px 12px;
-  color: var(--text);
-  font-size: 13px;
-}
-.order-combobox-list {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  max-height: 320px; /* 约 10 行 */
-  overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--line-strong);
-  border-radius: 12px;
-  box-shadow: var(--shadow-md);
-}
-.order-combobox-option {
-  padding: 8px 10px;
-  border-radius: 8px;
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.order-combobox-option:hover,
-.order-combobox-option.is-active { background: var(--surface-strong); }
-.order-combobox-option.is-selected { color: var(--primary); font-weight: 600; }
-.order-combobox-empty { padding: 8px 10px; color: var(--text-soft); font-size: 13px; }
 
 /* 构建图谱按钮与上方内容留间隔 */
 .form-actions--gap {

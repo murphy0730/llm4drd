@@ -17,6 +17,10 @@ const CONFIG = {
   GANTT_ORDER_PAGE_SIZE: 60,
 };
 
+const ORDER_SEARCH_DEBOUNCE_MS = 200;
+const ORDER_SEARCH_LIMIT = 50;
+const ORDER_RECENT_LIMIT = 8;
+
 const GRAPH_NODE_ORDER = ["order", "task", "operation", "machine", "tooling", "personnel"];
 const GRAPH_TYPE_LABELS = {
   order: "订单",
@@ -180,6 +184,9 @@ const app = {
   },
   pendingGantts: new Map(),
   ganttInstances: [],
+  // 用户手动调整的可视时间范围：canvasId -> { viewKey, window }。
+  // 方案、订单或分组变化时 viewKey 变化并恢复默认窗口；机器筛选和分页沿用当前范围。
+  ganttViewWindows: {},
   // 甘特图订单筛选：canvasId -> 选中的订单 id（"__all__" 表示全部，仅小实例提供）
   ganttOrderFilter: {},
   // 甘特图机器筛选与分页：canvasId -> { type, downtimeOnly, query, page }
@@ -190,11 +197,29 @@ const app = {
   ganttGroupMode: {},
   // 方案详情甘特图的服务端取数状态：key = taskId::solutionId，切方案即自动失效
   planGantt: { key: null, taskId: null, solutionId: null, orders: [], orderId: null, entries: [], totalOperations: 0, loading: false, error: null },
-  // 评审勾选集甘特联动的服务端取数状态：key = taskId::sorted(ids)::orderId；每个勾选方案在选定订单下的排产
-  reviewGantt: { key: null, taskId: null, ids: [], orderId: null, orders: [], schemes: {}, totalOperations: 0, failedIds: [], loading: false, error: null },
-  // 机器分类利用率对比的服务端取数状态：key = taskId::sorted(solution_ids)，对比集合变化即自动失效
-  typeUtilization: { key: null, loading: false, error: null, data: null },
+  // 评审批量读取状态：选中方案、订单排程和利用率由一个 review-data 请求共同维护。
+  reviewRead: emptyReviewRead(),
+  orderComboboxSources: new Map(),
+  orderComboboxMounts: new Map(),
+  orderComboboxRecent: ReviewRuntime.createRecentOrderStore({
+    contextLimit: 24,
+    itemLimit: ORDER_RECENT_LIMIT,
+  }),
 };
+
+function emptyReviewRead() {
+  return {
+    selectionKey: null,
+    scheduleKey: null,
+    orderId: null,
+    schemes: {},
+    utilization: null,
+    failedIds: [],
+    failureMessages: {},
+    loading: false,
+    error: null,
+  };
+}
 
 function defaultGraphView() {
   return {
@@ -344,6 +369,22 @@ const api = {
     const params = new URLSearchParams({ solution_ids: asArray(solutionIds).join(",") });
     return this.json(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/machine-type-utilization?${params.toString()}`);
   },
+  getReviewData(taskId, solutionIds, orderId, includeUtilization, signal) {
+    const params = new URLSearchParams({
+      solution_ids: ReviewRuntime.normalizeIds(solutionIds).join(","),
+      include_utilization: includeUtilization ? "true" : "false",
+    });
+    if (orderId) params.set("order_id", orderId);
+    return this.request(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/review-data?${params}`, { signal });
+  },
+  searchReviewOrders(taskId, solutionIds, query, signal) {
+    const params = new URLSearchParams({
+      solution_ids: ReviewRuntime.normalizeIds(solutionIds).join(","),
+      q: query || "",
+      limit: "50",
+    });
+    return this.request(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/review-orders?${params}`, { signal });
+  },
   exportOptimizeSolution(taskId, solutionId) {
     return this.request("/optimize/hybrid/export-solution", {
       method: "POST",
@@ -361,6 +402,38 @@ const api = {
   aiAsk(payload) { return this.json("/ai/pareto/ask", "POST", payload); },
 };
 
+const reviewDataClient = ReviewRuntime.createClient({
+  fetchReviewData: (args, signal) => api.getReviewData(
+    args.taskId,
+    args.ids,
+    args.orderId,
+    args.includeUtilization,
+    signal,
+  ),
+  fetchOrders: (args, signal) => api.searchReviewOrders(
+    args.taskId,
+    args.ids,
+    args.query,
+    signal,
+  ),
+});
+
+let reviewReadRequestGeneration = 0;
+let pendingReviewScheduleKey = null;
+
+function invalidateReviewReadRequest() {
+  reviewReadRequestGeneration += 1;
+  pendingReviewScheduleKey = null;
+}
+
+function isCurrentReviewReadRequest(generation, selectionKey, scheduleKey) {
+  return (
+    generation === reviewReadRequestGeneration &&
+    selectionKey === app.reviewRead.selectionKey &&
+    scheduleKey === pendingReviewScheduleKey
+  );
+}
+
 function el(id) {
   return document.getElementById(id);
 }
@@ -375,6 +448,93 @@ function escapeHtml(value) {
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function orderComboboxLabel(order) {
+  if (!order) return "";
+  if (order.order_id === "__all__") return order.order_name || "全部订单";
+  return [order.order_id, order.order_name].filter(Boolean).join(" · ");
+}
+
+function rememberOrderComboboxSelection(recentKey, order) {
+  app.orderComboboxRecent.record(recentKey, order);
+}
+
+function renderOrderCombobox(config) {
+  const recentKey = `${config.id}::${config.contextKey}`;
+  rememberOrderComboboxSelection(recentKey, config.selected);
+  app.orderComboboxSources.set(config.id, { ...config, recentKey });
+  const listId = `${config.id}-list`;
+  return `
+    <div class="order-combobox" data-order-combobox="${escapeHtml(config.id)}">
+      <input type="search" role="combobox" aria-autocomplete="list"
+        aria-expanded="false" aria-controls="${escapeHtml(listId)}"
+        value="${escapeHtml(orderComboboxLabel(config.selected))}" placeholder="输入订单号模糊搜索">
+      <div class="order-combobox-list" id="${escapeHtml(listId)}"
+        role="listbox" hidden></div>
+    </div>
+  `;
+}
+
+function mountOrderComboboxes() {
+  app.orderComboboxMounts.forEach((controller, mountedContainer) => {
+    if (mountedContainer.isConnected) return;
+    controller.dispose();
+    app.orderComboboxMounts.delete(mountedContainer);
+  });
+  document.querySelectorAll(".page.active [data-order-combobox]:not([data-order-combobox-bound='1'])").forEach((container) => {
+    const source = app.orderComboboxSources.get(container.dataset.orderCombobox);
+    const input = container.querySelector('[role="combobox"]');
+    const list = container.querySelector('[role="listbox"]');
+    if (!source || !input || !list) return;
+    container.dataset.orderComboboxBound = "1";
+
+    let controller;
+    const renderState = (state) => {
+      list.innerHTML = state.results.map((order, index) => {
+        const optionId = `${source.id}-option-${index}`;
+        const active = index === state.activeIndex;
+        return `<button type="button" id="${escapeHtml(optionId)}" class="order-combobox-option${active ? " is-active" : ""}" role="option" aria-selected="${active ? "true" : "false"}" data-order-result="${index}">${escapeHtml(orderComboboxLabel(order))}</button>`;
+      }).join("");
+      list.hidden = !state.open;
+      input.setAttribute("aria-expanded", state.open ? "true" : "false");
+      if (state.open && state.activeIndex >= 0) {
+        input.setAttribute("aria-activedescendant", `${source.id}-option-${state.activeIndex}`);
+        list.querySelector(".is-active")?.scrollIntoView({ block: "nearest" });
+      } else {
+        input.removeAttribute("aria-activedescendant");
+      }
+      list.querySelectorAll("[data-order-result]").forEach((option) => {
+        option.addEventListener("click", () => {
+          controller.choose(state.results[Number(option.dataset.orderResult)]);
+        });
+      });
+    };
+
+    controller = ReviewRuntime.createOrderComboboxController({
+      search: source.search,
+      current: source.selected,
+      recent: app.orderComboboxRecent.read(source.recentKey),
+      select: async (order) => {
+        input.value = orderComboboxLabel(order);
+        rememberOrderComboboxSelection(source.recentKey, order);
+        await source.select(order);
+      },
+      delay: ORDER_SEARCH_DEBOUNCE_MS,
+      limit: ORDER_SEARCH_LIMIT,
+      onState: renderState,
+    });
+    app.orderComboboxMounts.set(container, controller);
+
+    input.addEventListener("keydown", async (event) => {
+      await ReviewRuntime.handleOrderComboboxKey(controller, event);
+    });
+
+    input.addEventListener("input", () => {
+      controller.input(input.value);
+    });
+    ReviewRuntime.bindOrderComboboxOpen(input, controller);
+  });
 }
 
 function formatNumber(value, digits = 1) {
@@ -1487,6 +1647,22 @@ function ganttOffsetToISO(offset, base) {
   return new Date(new Date(base).getTime() + Number(offset) * 3600 * 1000).toISOString();
 }
 
+function ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey) {
+  const fullWindow = {
+    start: ganttOffsetToISO(horizonStart, base),
+    end: ganttOffsetToISO(horizonEnd, base),
+  };
+  const effectiveNow = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd
+    ? ganttOffsetToISO(nowOffset, base)
+    : fullWindow.start;
+  return {
+    fullWindow,
+    initialWindow: ReviewRuntime.computeInitialWindow(fullWindow.start, fullWindow.end, effectiveNow),
+    nowISO: effectiveNow,
+    viewKey,
+  };
+}
+
 const GANTT_MACHINE_FILTER_DEFAULT = Object.freeze({ type: "__all__", downtimeOnly: false, query: "", page: 1 });
 const GANTT_ENTRY_FILTER_DEFAULT = Object.freeze({ status: "__all__", query: "", from: "", to: "" });
 
@@ -1558,6 +1734,12 @@ function buildGanttData(entries, options = {}) {
   const hasRealBase = Boolean(planStartAt);
   const base = hasRealBase ? planStartAt.toISOString() : GANTT_FALLBACK_BASE;
   const groupMode = options.groupMode === "order" ? "order" : "machine";
+  const viewKey = JSON.stringify({
+    canvasId: options.canvasId || "",
+    selectedOrder: options.selectedOrder || "",
+    solutionIds: asArray(options.solutionIds).map(String).sort(),
+    groupMode,
+  });
 
   const normalized = asArray(entries)
     .map((item) => ({
@@ -1600,11 +1782,6 @@ function buildGanttData(entries, options = {}) {
   const ganttItemTitle = (item) => `${item.statusLabel} · ${item.opId}\n订单:${item.orderId} 任务:${item.taskId}\n机器:${item.machineName}（${machineTypeName(item.machineId)}）\n${hasRealBase ? `${formatDateTime(ganttOffsetToISO(item.start, base))} ~ ${formatDateTime(ganttOffsetToISO(item.end, base))}` : `相对 ${item.start}h ~ ${item.end}h`}`;
   const overlayClass = (ov) => (ov.className.includes("unplanned") ? "unplanned" : ov.className.includes("planned") ? "planned" : "offshift");
   const nowOffset = ganttProgressNowOffset(normalized);
-  // "现在"线常驻：无进度数据时落在排程起点（全部未来排产的语义起点）
-  const nowISOFor = (horizonStart, horizonEnd) => {
-    const effective = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd ? nowOffset : horizonStart;
-    return ganttOffsetToISO(effective, base);
-  };
 
   // —— 模式一：按订单层级（订单 ▸ 任务令 ▸ 工序行，工序行标机器），按工序行分页 ——
   if (groupMode === "order") {
@@ -1629,7 +1806,17 @@ function buildGanttData(entries, options = {}) {
       page, pageCount, pageSize, typeOptions, filter: machineFilter,
     };
     if (!visible.length) {
-      return { groups: [], items: [], hasRealBase, machineFacet: facet, window: null, nowISO: null, mode: "order" };
+      return {
+        groups: [],
+        items: [],
+        hasRealBase,
+        machineFacet: facet,
+        fullWindow: null,
+        initialWindow: null,
+        nowISO: null,
+        viewKey,
+        mode: "order",
+      };
     }
     const horizonStart = Math.min(...visible.map((i) => i.start));
     const horizonEnd = Math.max(...visible.map((i) => i.end));
@@ -1706,14 +1893,12 @@ function buildGanttData(entries, options = {}) {
       });
     });
 
-    const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
     return {
       groups,
       items,
       hasRealBase,
       machineFacet: facet,
-      window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
-      nowISO: nowISOFor(horizonStart, horizonEnd),
+      ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
       mode: "order",
     };
   }
@@ -1742,7 +1927,17 @@ function buildGanttData(entries, options = {}) {
 
   if (!visible.length) {
     // 筛选/翻页后本页无条目（如关键字无命中）：保留 facet 供工具条渲染
-    return { groups, items: [], hasRealBase, machineFacet, window: null, nowISO: null, mode: "machine" };
+    return {
+      groups,
+      items: [],
+      hasRealBase,
+      machineFacet,
+      fullWindow: null,
+      initialWindow: null,
+      nowISO: null,
+      viewKey,
+      mode: "machine",
+    };
   }
 
   const horizonStart = Math.min(...visible.map((i) => i.start));
@@ -1778,14 +1973,12 @@ function buildGanttData(entries, options = {}) {
     });
   });
 
-  const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
   return {
     groups,
     items,
     hasRealBase,
     machineFacet,
-    window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
-    nowISO: nowISOFor(horizonStart, horizonEnd),
+    ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
     mode: "machine",
   };
 }
@@ -1855,7 +2048,13 @@ function renderTimeline(entries, options = {}) {
   const storedMode = app.ganttGroupMode[id];
   const groupMode = allowOrderMode ? (storedMode === "machine" ? "machine" : "order") : "machine";
 
-  const data = buildGanttData(visibleEntries, { ...options, canvasId: id, groupMode });
+  const data = buildGanttData(visibleEntries, {
+    ...options,
+    canvasId: id,
+    groupMode,
+    selectedOrder,
+    solutionIds: asArray(options.solutionIds),
+  });
   if (!data) {
     return renderEmptyState("暂无甘特数据", "当前方案还没有可显示的资源排程。");
   }
@@ -1863,15 +2062,42 @@ function renderTimeline(entries, options = {}) {
   app.pendingGantts.set(id, { entries: visibleEntries, options: { ...options, canvasId: id, groupMode }, data });
 
   const selectedOrderColor = selectedOrder === "__all__" ? null : orderColorFor(selectedOrder);
-  const orderComboItems = [
-    ...(allowAll ? [{ value: "__all__", label: `全部订单（${formatInt(allEntries.length)} 道工序）` }] : []),
-    ...orderOptions.map((orderId) => ({ value: orderId, label: orderId })),
-  ];
-  const selectedOrderLabel = selectedOrder === "__all__" ? "全部订单" : String(selectedOrder ?? "");
+  const orderSearchItems = orderOptions.map((orderId) => ({
+    order_id: orderId,
+    order_name: orderNames.get(orderId) || "",
+  }));
+  if (allowAll) {
+    orderSearchItems.unshift({
+      order_id: "__all__",
+      order_name: `全部订单（${formatInt(allEntries.length)} 道工序）`,
+    });
+  }
+  const selectedOrderItem = orderSearchItems.find((order) => order.order_id === selectedOrder) || null;
+  const orderComboboxId = `${id}-order`;
+  const taskId = serverOrders?.taskId || app.planGantt.taskId;
+  const solutionId = serverOrders?.solutionId || app.planGantt.solutionId;
   const orderSelector = orderOptions.length > 1 || !allowAll ? `
     <div class="field-inline">
       <span>订单</span>
-      ${renderOrderCombobox({ role: "gantt", canvasId: id, serverMode, items: orderComboItems, selectedValue: selectedOrder, selectedLabel: selectedOrderLabel })}
+      ${renderOrderCombobox({
+        id: orderComboboxId,
+        selected: selectedOrderItem,
+        ...(serverMode
+          ? { contextKey: `plan::${taskId}::${solutionId}` }
+          : { contextKey: `local::${app.currentSceneId || "current-instance"}::${id}::${ReviewRuntime.normalizeIds(options.solutionIds).join(",")}` }),
+        search: serverMode
+          ? async (query, signal) => {
+            const payload = await api.searchReviewOrders(taskId, [solutionId], query, signal);
+            return asArray(payload?.orders);
+          }
+          : (query) => ReviewRuntime.rankOrders(orderSearchItems, query, ORDER_SEARCH_LIMIT),
+        select: serverMode
+          ? (order) => loadPlanGantt(taskId, solutionId, order.order_id)
+          : (order) => {
+            app.ganttOrderFilter[id] = order.order_id;
+            return renderCurrentPage();
+          },
+      })}
       <span>分组</span>
       <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
         <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
@@ -2548,7 +2774,11 @@ function renderWorkflowStep3() {
   `;
 
   const simulationDetail = app.simResult ? `
-    ${renderTimeline(app.simResult.gantt, { title: `规则仿真甘特图 · ${app.simRule}`, canvasId: "gantt-sim" })}
+    ${renderTimeline(app.simResult.gantt, {
+      title: `规则仿真甘特图 · ${app.simRule}`,
+      canvasId: "gantt-sim",
+      solutionIds: [app.simResult.solution_id || `RULE:${app.simRule}`],
+    })}
     <article class="surface-card">
       <div class="card-head"><h3>仿真明细预览</h3><p>核查开始/结束时间、状态、订单和资源分配是否符合业务直觉。</p></div>
       ${renderSimpleTable(
@@ -2776,7 +3006,7 @@ function renderReviewCandidateComparison() {
       </td>
     </tr>`;
   }).join("");
-  const headers = ["选", "方案", ...allKeys.map((key) => getObjectiveLabel(key)), "操作"];
+  const headers = ["方案", ...allKeys.map((key) => getObjectiveLabel(key)), "操作"];
   return `
     <article class="surface-card">
       <div class="card-head">
@@ -2786,7 +3016,7 @@ function renderReviewCandidateComparison() {
       ${renderPrimaryObjectiveBadges(primaryKeys)}
       <div class="table-shell">
         <table class="data-table compare-table">
-          <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+          <thead><tr><th class="compare-check"><span class="sr-only">选择方案</span></th>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -2804,15 +3034,15 @@ function renderReviewTypeUtilization() {
       </article>
     `;
   }
-  const state = ensureTypeUtilization(columns);
+  const state = app.reviewRead;
 
   let inner;
-  if (state.loading) {
+  if (state.loading && !state.utilization) {
     inner = `<div class="empty-state"><p>正在计算机器分类利用率…</p></div>`;
-  } else if (state.error) {
+  } else if (state.error && !state.utilization) {
     inner = `<div class="empty-state"><p>加载机器分类利用率失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-type-utilization">重试</button></div>`;
   } else {
-    const types = asArray(state.data?.types).filter((type) => Object.keys(type.per_solution || {}).length);
+    const types = asArray(state.utilization?.types).filter((type) => Object.keys(type.per_solution || {}).length);
     if (!types.length) {
       inner = `<div class="empty-state"><p>当前对比方案的排程未覆盖任何机台类型。</p></div>`;
     } else {
@@ -2822,14 +3052,12 @@ function renderReviewTypeUtilization() {
         const cells = columns.map((c) => {
           const entry = type.per_solution?.[c.id];
           if (!entry) return "<td>-</td>";
-          const idx = schemeColorIndex(c.id);
           const isBest = best !== null && entry.utilization === best;
           const pct = isBest ? `<strong>${formatPercent(entry.utilization)}</strong>` : formatPercent(entry.utilization);
-          const pctWidth = Math.max(0, Math.min(100, Math.round((Number(entry.utilization) || 0) * 100)));
-          return `<td class="${isBest ? "is-best" : ""}">${pct}<span class="cell-sub">${formatInt(entry.used_machines)}/${formatInt(type.machines_total)} 台</span><span class="util-bar"><span class="util-bar-fill" style="width:${pctWidth}%;background:${schemeColorToken(idx)}"></span></span></td>`;
+          return `<td class="${isBest ? "is-best" : ""}">${pct}</td>`;
         }).join("");
         return `<tr>
-          <td><strong>${escapeHtml(type.type_name)}</strong>（${escapeHtml(type.type_id)}）<span class="cell-sub">共 ${formatInt(type.machines_total)} 台${type.is_critical ? " · 关键" : ""}</span></td>
+          <td><strong>${escapeHtml(type.type_name)}</strong></td>
           ${cells}
         </tr>`;
       }).join("");
@@ -2851,7 +3079,7 @@ function renderReviewTypeUtilization() {
     <article class="surface-card">
       <div class="card-head">
         <h3>机器分类利用率对比</h3>
-        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗，小字为该类"有排产 / 总台数"，色条长度即利用率。</p>
+        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗。</p>
       </div>
       ${inner}
     </article>
@@ -2893,6 +3121,12 @@ function buildReviewGanttData(selected, schemes, canvasId) {
 
   const horizonStart = Math.min(...all.map((e) => e.start));
   const horizonEnd = Math.max(...all.map((e) => e.end));
+  const viewKey = JSON.stringify({
+    canvasId,
+    selectedOrder: app.reviewRead.orderId || "",
+    solutionIds: selected.map((item) => item.id).sort(),
+    groupMode: "scheme",
+  });
 
   const groups = [];
   const items = [];
@@ -2932,74 +3166,85 @@ function buildReviewGanttData(selected, schemes, canvasId) {
     });
   });
 
-  const padH = Math.max((horizonEnd - horizonStart) * 0.02, 1);
   const nowOffset = ganttProgressNowOffset(all);
-  const nowEffective = nowOffset !== null && nowOffset >= horizonStart && nowOffset <= horizonEnd ? nowOffset : horizonStart;
   return {
     groups,
     items,
     hasRealBase,
     machineFacet: null,
-    window: { start: ganttOffsetToISO(horizonStart - padH, base), end: ganttOffsetToISO(horizonEnd + padH, base) },
-    nowISO: ganttOffsetToISO(nowEffective, base),
+    ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
     mode: "scheme",
   };
 }
 
+function reviewGanttControlsHtml() {
+  const selectedOrder = app.reviewRead.orderId;
+  if (!selectedOrder) return "";
+  const selected = getSelectedReviewCandidates();
+  const taskId = app.optimizeResult?.task_id;
+  const ids = selected.map((item) => item.id).filter(Boolean);
+  return `
+    <div class="field-inline">
+      <span>订单</span>
+      ${renderOrderCombobox({
+        id: "gantt-review-compare-order",
+        selected: { order_id: selectedOrder, order_name: "" },
+        contextKey: `review::${ReviewRuntime.selectionKey(taskId, ids)}`,
+        search: async (query, signal) => {
+          const result = await reviewDataClient.searchOrders({ taskId, ids, query }, signal);
+          return result.cancelled ? [] : result.orders;
+        },
+        select: (order) => loadReviewData(getSelectedReviewCandidates(), order.order_id, false),
+      })}
+    </div>
+  `;
+}
+
+function reviewGanttLegendHtml(selected) {
+  return selected.map((item, index) => `
+    <span class="legend-item"><span class="legend-swatch scheme-c-${index % SCHEME_COLOR_TOKENS.length}"></span>${escapeHtml(item.name)}</span>
+  `).join("");
+}
+
+function currentReviewGanttData(selected) {
+  if (app.reviewRead.loading) return null;
+  const taskId = app.optimizeResult?.task_id;
+  const ids = selected.map((item) => item.id).filter(Boolean);
+  const selectionKey = taskId && ids.length ? ReviewRuntime.selectionKey(taskId, ids) : null;
+  if (!selectionKey || app.reviewRead.selectionKey !== selectionKey) return null;
+  return buildReviewGanttData(selected, app.reviewRead.schemes, "gantt-review-compare");
+}
+
+function reviewGanttStatusHtml(selected, data) {
+  const state = app.reviewRead;
+  if (state.loading) return `<p class="gantt-note">正在加载勾选方案的排产…</p>`;
+  if (state.error) {
+    return `<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div>`;
+  }
+  return ReviewRuntime.renderReviewFailureNotes({
+    failedIds: state.failedIds,
+    failureMessages: state.failureMessages,
+    selected,
+    hasData: Boolean(data),
+  });
+}
+
 function renderReviewGantt(selected) {
-  const id = "gantt-review-compare";
   const cardHead = `<div class="card-head"><h3>勾选方案甘特联动</h3><p>按机器分组，机器行内每个勾选方案独立配色（与对比表、利用率列头一致）；一次聚焦一个订单，切换订单可比较各方案在该订单上的排产差异。</p></div>`;
   if (!selected.length) {
     return `<article class="surface-card">${cardHead}<div class="empty-state"><p>请在上方对比表勾选方案，以联动甘特对比。</p></div></article>`;
   }
-  const taskId = app.optimizeResult?.task_id;
-  if (!taskId) {
+  if (!app.optimizeResult?.task_id) {
     return `<article class="surface-card">${cardHead}<div class="empty-state"><p>运行混合优化后，可在此查看勾选方案的排产甘特联动。</p></div></article>`;
   }
-  const state = ensureReviewGanttData(selected);
-  if (state.loading) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>正在加载勾选方案的排产…</p></div></article>`;
-  }
-  if (state.error) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div></article>`;
-  }
-  const data = buildReviewGanttData(selected, state.schemes, id);
-  if (!data) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p></div></article>`;
-  }
-  app.pendingGantts.set(id, { entries: [], options: { canvasId: id }, data });
-
-  const orders = asArray(state.orders);
-  const selectedOrder = state.orderId;
-  const orderSelector = orders.length ? `
-    <div class="field-inline">
-      <span>订单</span>
-      ${renderOrderCombobox({
-        role: "review",
-        items: orders.map((o) => ({ value: o.order_id, label: o.order_id })),
-        selectedValue: selectedOrder,
-        selectedLabel: String(selectedOrder ?? ""),
-      })}
-    </div>
-  ` : "";
-  const legend = `
-    <div class="legend">
-      ${selected.map((item, index) => `<span class="legend-item"><span class="legend-swatch scheme-c-${index % SCHEME_COLOR_TOKENS.length}"></span>${escapeHtml(item.name)}</span>`).join("")}
-    </div>
-  `;
-  const failedNames = asArray(state.failedIds)
-    .map((fid) => selected.find((item) => item.id === fid)?.name)
-    .filter(Boolean);
-  const failedNote = failedNames.length
-    ? `<p class="gantt-note">${escapeHtml(failedNames.join("、"))} 在该订单下无可回放的排产，未在下方甘特显示。</p>`
-    : "";
+  const data = currentReviewGanttData(selected);
   return `
     <article class="surface-card">
       ${cardHead}
-      ${orderSelector}
-      ${legend}
-      ${failedNote}
-      <div class="gantt-canvas" id="${escapeHtml(id)}"></div>
+      <div class="review-gantt-controls">${reviewGanttControlsHtml()}</div>
+      <div class="legend review-gantt-legend">${reviewGanttLegendHtml(selected)}</div>
+      <div class="review-gantt-status">${reviewGanttStatusHtml(selected, data)}</div>
+      <div class="gantt-canvas" id="gantt-review-compare"></div>
     </article>
   `;
 }
@@ -3019,7 +3264,7 @@ function renderReviewLibraryTab() {
         <div><span>Pareto</span><strong>${formatInt(paretoCount)}</strong></div>
         <div><span>启发式</span><strong>${formatInt(heuristicCount)}</strong></div>
         <div><span>精确冠军</span><strong>${formatInt(exactCount)}</strong></div>
-        <div><span>已选方案</span><strong>${formatInt(selected.length)}</strong></div>
+        <div><span>已选方案</span><strong id="review-selected-count">${formatInt(selected.length)}</strong></div>
       </div>
     </article>
     <article class="surface-card">
@@ -3055,13 +3300,15 @@ function renderReviewLibraryTab() {
         </div>
       </div>
     </article>
-    ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
-      "暂无方案池",
-      "先运行混合优化，或点击上方启发式规则加载参照方案。",
-      '<button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>',
-    )}
-    ${candidates.length ? renderReviewTypeUtilization() : ""}
-    ${candidates.length ? renderReviewGantt(selected) : ""}
+    <div id="review-comparison-region">
+      ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
+        "暂无方案池",
+        "先运行混合优化，或点击上方启发式规则加载参照方案。",
+        '<button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>',
+      )}
+    </div>
+    <div id="review-utilization-region">${candidates.length ? renderReviewTypeUtilization() : ""}</div>
+    <div id="review-gantt-region">${candidates.length ? renderReviewGantt(selected) : ""}</div>
   `;
 }
 
@@ -3106,7 +3353,11 @@ function renderReviewExactTab() {
           { label: "求解信息", value: escapeHtml(app.exactReference.exact_info?.solver_status || app.exactReference.evaluationMode || "-") },
         ])}
       </article>
-      ${renderTimeline(app.exactReference.schedule, { title: "精确冠军参考甘特图", canvasId: "gantt-exact" })}
+      ${renderTimeline(app.exactReference.schedule, {
+        title: "精确冠军参考甘特图",
+        canvasId: "gantt-exact",
+        solutionIds: [app.exactReference.solution_id || "EXACT"],
+      })}
     ` : ""}
   `;
 }
@@ -3185,10 +3436,96 @@ function renderReviewAiTab() {
   `;
 }
 
+function clearReviewTimeline() {
+  const entry = app.ganttInstances.find((item) => item.canvasId === "gantt-review-compare");
+  if (!entry) return;
+  entry.items.clear();
+  entry.groups.clear();
+  try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
+}
+
+function upsertReviewTimeline(data) {
+  if (!data || typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
+  const canvasId = "gantt-review-compare";
+  const entry = app.ganttInstances.find((item) => item.canvasId === canvasId && item.el?.isConnected);
+  if (!entry) {
+    app.pendingGantts.set(canvasId, { entries: [], options: { canvasId }, data });
+    requestAnimationFrame(() => mountGantts());
+    return;
+  }
+  entry.items.clear();
+  entry.groups.clear();
+  if (data.groups.length) entry.groups.add(data.groups);
+  if (data.items.length) entry.items.add(data.items);
+  entry.data = data;
+  entry.timeline.setOptions({
+    min: data.fullWindow?.start,
+    max: data.fullWindow?.end,
+  });
+  const stored = app.ganttViewWindows[canvasId];
+  const selectedWindow = stored?.viewKey === data.viewKey ? stored.window : data.initialWindow;
+  if (selectedWindow) {
+    entry.timeline.setWindow(selectedWindow.start, selectedWindow.end, { animation: false });
+  }
+  if (data.nowISO) {
+    try {
+      entry.timeline.setCustomTime(data.nowISO, "sched-now");
+    } catch (_) {
+      try { entry.timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) {}
+    }
+  } else {
+    try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
+  }
+}
+
+function refreshReviewDynamicRegions() {
+  const candidates = getReviewCandidates();
+  const selected = getSelectedReviewCandidates();
+  const comparisonRegion = el("review-comparison-region");
+  if (comparisonRegion) {
+    comparisonRegion.innerHTML = candidates.length ? renderReviewCandidateComparison() : "";
+  }
+  const selectedCount = el("review-selected-count");
+  if (selectedCount) selectedCount.textContent = formatInt(selected.length);
+
+  const utilizationRegion = el("review-utilization-region");
+  if (utilizationRegion) {
+    utilizationRegion.innerHTML = candidates.length ? renderReviewTypeUtilization() : "";
+  }
+
+  const ganttRegion = el("review-gantt-region");
+  if (!ganttRegion) return;
+  const existingCanvas = ganttRegion.querySelector("#gantt-review-compare");
+  if (!existingCanvas || !selected.length || !app.optimizeResult?.task_id) {
+    ganttRegion.innerHTML = candidates.length ? renderReviewGantt(selected) : "";
+  } else {
+    const data = currentReviewGanttData(selected);
+    const controls = ganttRegion.querySelector(".review-gantt-controls");
+    const legend = ganttRegion.querySelector(".review-gantt-legend");
+    const status = ganttRegion.querySelector(".review-gantt-status");
+    if (controls) controls.innerHTML = reviewGanttControlsHtml();
+    if (legend) legend.innerHTML = reviewGanttLegendHtml(selected);
+    if (status) status.innerHTML = reviewGanttStatusHtml(selected, data);
+  }
+
+  const data = currentReviewGanttData(selected);
+  if (data) {
+    upsertReviewTimeline(data);
+  } else if (!app.reviewRead.loading) {
+    clearReviewTimeline();
+  }
+  mountOrderComboboxes();
+  requestAnimationFrame(() => mountGantts());
+}
+
 function renderReview() {
   const container = el("review-content");
   syncTabButtons("data-review-tab", app.reviewTab);
-  if (app.reviewTab === "library") container.innerHTML = renderReviewLibraryTab();
+  if (app.reviewTab === "library") {
+    container.innerHTML = renderReviewLibraryTab();
+    refreshReviewDynamicRegions();
+    ensureReviewData(getSelectedReviewCandidates());
+  }
   if (app.reviewTab === "exact") container.innerHTML = renderReviewExactTab();
   if (app.reviewTab === "ai") container.innerHTML = renderReviewAiTab();
   requestAnimationFrame(() => mountGantts());
@@ -4251,6 +4588,7 @@ function selectedGraphOrderOption() {
 }
 
 function mountGantts() {
+  mountOrderComboboxes();
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
   const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
   // Destroy orphaned instances: canvas id no longer in the active DOM, or the id exists but
@@ -4268,11 +4606,15 @@ function mountGantts() {
     // renderTimeline 已构建过 data（暂存在 payload），大实例下避免重复归一化/遮罩计算
     const data = payload.data || buildGanttData(payload.entries, payload.options);
     if (!data) return;
+    const stored = app.ganttViewWindows[el.id];
+    const selectedWindow = stored?.viewKey === data.viewKey ? stored.window : data.initialWindow;
     el.dataset.bound = "1";
+    const items = new vis.DataSet(data.items);
+    const groups = new vis.DataSet(data.groups);
     const timeline = new vis.Timeline(
       el,
-      new vis.DataSet(data.items),
-      new vis.DataSet(data.groups),
+      items,
+      groups,
       {
         editable: false,
         selectable: false,
@@ -4288,9 +4630,11 @@ function mountGantts() {
         // 关闭内置真实当前时间线（相对小时基准下无意义），"现在"线由 data.nowISO 按进度分界注入
         showCurrentTime: false,
         groupOrder: (a, b) => (a.seq || 0) - (b.seq || 0),
-        // 筛选无命中时 window 为 null，交给 vis 自适应空视图
-        start: data.window ? data.window.start : undefined,
-        end: data.window ? data.window.end : undefined,
+        // 无数据时范围为空，交给 vis 自适应空视图。
+        start: selectedWindow ? selectedWindow.start : undefined,
+        end: selectedWindow ? selectedWindow.end : undefined,
+        min: data.fullWindow ? data.fullWindow.start : undefined,
+        max: data.fullWindow ? data.fullWindow.end : undefined,
         showTooltips: true,
         // 内置 moment 只打包了 de/en/ja/ru/uk 语料且全局 locale 被 uk 覆盖，
         // 因此各刻度一律用与语言无关的数字格式，不能依赖 ddd / MMMM。
@@ -4303,7 +4647,14 @@ function mountGantts() {
     if (data.nowISO) {
       try { timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) { /* 忽略现在线注入失败 */ }
     }
-    app.ganttInstances.push({ canvasId: el.id, el, timeline });
+    const entry = { canvasId: el.id, el, timeline, items, groups, data };
+    timeline.on("rangechanged", (props) => {
+      app.ganttViewWindows[el.id] = {
+        viewKey: entry.data.viewKey,
+        window: { start: props.start.toISOString(), end: props.end.toISOString() },
+      };
+    });
+    app.ganttInstances.push(entry);
   });
 }
 
@@ -4540,6 +4891,12 @@ function setImportProgress(state) {
 }
 
 function resetInstanceDerivedState() {
+  invalidateReviewReadRequest();
+  reviewDataClient.reset();
+  app.orderComboboxRecent.reset();
+  app.reviewRead = emptyReviewRead();
+  app.pendingGantts.delete("gantt-review-compare");
+  app.ganttViewWindows = {};
   app.graphMeta = null;
   app.graphNodes = [];
   app.graphEdges = [];
@@ -4660,75 +5017,88 @@ async function loadPlanGantt(taskId, solutionId, orderId = null) {
   await renderCurrentPage();
 }
 
-// 勾选集甘特联动的服务端取数：每个勾选方案在选定订单下的排产。key 仅按 (taskId, ids) 记
-// （与利用率对比同键，复用 typeUtilizationKey），切订单不换 key，由订单下拉直接重取；
-// 取排产失败的方案（如无排产回放能力的参照）记入 failedIds，渲染时提示，不静默吞掉。
-async function loadReviewGantt(taskId, ids, orderId = null) {
-  const key = typeUtilizationKey(taskId, ids);
-  const keepOrders = app.reviewGantt.key === key ? app.reviewGantt.orders : [];
-  app.reviewGantt = { key, taskId, ids, orderId, orders: keepOrders, schemes: {}, totalOperations: 0, failedIds: [], loading: true, error: null };
-  await renderCurrentPage();
-  try {
-    const results = await Promise.all(ids.map((id) =>
-      api.getOptimizeSolutionSchedule(taskId, id, orderId).then((r) => ({ id, r }), (error) => ({ id, error }))));
-    if (app.reviewGantt.key !== key) return; // 竞态：期间已切勾选集，丢弃过期响应
-    const schemes = {};
-    const failedIds = [];
-    let orders = keepOrders;
-    let resolvedOrder = orderId;
-    let total = 0;
-    results.forEach(({ id, r }) => {
-      if (!r) { failedIds.push(id); return; }
-      schemes[id] = asArray(r.entries);
-      if (!orders.length) orders = asArray(r.orders);
-      if (!resolvedOrder) resolvedOrder = r.order_id || null;
-      total = Math.max(total, Number(r.total_operations || 0));
-    });
-    app.reviewGantt = { key, taskId, ids, orderId: resolvedOrder, orders, schemes, totalOperations: total, failedIds, loading: false, error: null };
-  } catch (error) {
-    if (app.reviewGantt.key === key) app.reviewGantt = { ...app.reviewGantt, loading: false, error: error.message || String(error) };
-  }
-  await renderCurrentPage();
-}
-
-function ensureReviewGanttData(selected) {
+async function loadReviewData(selected, orderId = null, includeUtilization = true) {
   const taskId = app.optimizeResult?.task_id;
   const ids = asArray(selected).map((item) => item.id).filter(Boolean);
-  if (!taskId || !ids.length) return app.reviewGantt;
-  const key = typeUtilizationKey(taskId, ids);
-  const state = app.reviewGantt;
-  if (state.key === key && (state.loading || Object.keys(state.schemes).length || state.error)) return state;
-  if (state.key !== key) loadReviewGantt(taskId, ids, null); // fire-and-forget
-  return app.reviewGantt;
-}
-
-function typeUtilizationKey(taskId, ids) {
-  return `${taskId}::${[...ids].sort().join(",")}`;
-}
-
-async function loadTypeUtilization(taskId, ids) {
-  const key = typeUtilizationKey(taskId, ids);
-  app.typeUtilization = { key, loading: true, error: null, data: null };
-  await renderCurrentPage();
+  if (!taskId || !ids.length) return;
+  const selectionKey = ReviewRuntime.selectionKey(taskId, ids);
+  const requestedScheduleKey = ReviewRuntime.scheduleKey(taskId, ids, orderId);
+  const requestGeneration = ++reviewReadRequestGeneration;
+  pendingReviewScheduleKey = requestedScheduleKey;
+  const previous = app.reviewRead;
+  const selectionChanged = previous.selectionKey !== selectionKey;
+  if (selectionChanged) app.pendingGantts.delete("gantt-review-compare");
+  app.reviewRead = {
+    ...previous,
+    selectionKey,
+    scheduleKey: selectionChanged ? null : previous.scheduleKey,
+    orderId: selectionChanged ? null : previous.orderId,
+    schemes: selectionChanged ? {} : previous.schemes,
+    utilization: selectionChanged ? null : previous.utilization,
+    failedIds: selectionChanged ? [] : previous.failedIds,
+    failureMessages: selectionChanged ? {} : previous.failureMessages,
+    loading: true,
+    error: null,
+  };
+  if (selectionChanged) clearReviewTimeline();
+  refreshReviewDynamicRegions();
   try {
-    const payload = await api.getMachineTypeUtilization(taskId, ids);
-    if (app.typeUtilization.key !== key) return; // 竞态：期间已切对比集合，丢弃过期响应
-    app.typeUtilization = { key, loading: false, error: null, data: payload };
+    const result = await reviewDataClient.loadData({
+      taskId,
+      ids,
+      orderId,
+      includeUtilization,
+    });
+    if (result.cancelled) return;
+    if (!isCurrentReviewReadRequest(requestGeneration, selectionKey, requestedScheduleKey)) return;
+    const payload = result.payload;
+    app.reviewRead = {
+      selectionKey,
+      scheduleKey: ReviewRuntime.scheduleKey(taskId, ids, payload.order_id),
+      orderId: payload.order_id,
+      schemes: payload.schemes || {},
+      utilization: payload.type_utilization ?? app.reviewRead.utilization,
+      failedIds: payload.failed_solution_ids || [],
+      failureMessages: payload.failure_messages || {},
+      loading: false,
+      error: null,
+    };
+    pendingReviewScheduleKey = null;
   } catch (error) {
-    if (app.typeUtilization.key === key) app.typeUtilization = { key, loading: false, error: error.message || String(error), data: null };
+    if (isCurrentReviewReadRequest(requestGeneration, selectionKey, requestedScheduleKey)) {
+      app.reviewRead = {
+        ...app.reviewRead,
+        loading: false,
+        error: error.message || String(error),
+      };
+      pendingReviewScheduleKey = null;
+    }
   }
-  await renderCurrentPage();
+  refreshReviewDynamicRegions();
 }
 
-function ensureTypeUtilization(preview) {
+function ensureReviewData(selected) {
   const taskId = app.optimizeResult?.task_id;
-  const ids = asArray(preview).map((item) => item.id).filter(Boolean);
-  if (!taskId || !ids.length) return app.typeUtilization;
-  const key = typeUtilizationKey(taskId, ids);
-  const state = app.typeUtilization;
-  if (state.key === key && (state.loading || state.data || state.error)) return state;
-  if (state.key !== key) loadTypeUtilization(taskId, ids); // fire-and-forget
-  return app.typeUtilization;
+  const ids = asArray(selected).map((item) => item.id).filter(Boolean);
+  if (!taskId || !ids.length) {
+    if (app.reviewRead.selectionKey) {
+      invalidateReviewReadRequest();
+      reviewDataClient.reset();
+      app.reviewRead = emptyReviewRead();
+      app.pendingGantts.delete("gantt-review-compare");
+      refreshReviewDynamicRegions();
+    }
+    return app.reviewRead;
+  }
+  const selectionKey = ReviewRuntime.selectionKey(taskId, ids);
+  if (
+    app.reviewRead.selectionKey === selectionKey &&
+    (app.reviewRead.loading || app.reviewRead.scheduleKey)
+  ) {
+    return app.reviewRead;
+  }
+  loadReviewData(selected, null, true);
+  return app.reviewRead;
 }
 
 // 订单过滤：下拉仅覆盖前 200 条订单，其余订单通过搜索按后端解析加载并聚焦该订单簇
@@ -5426,14 +5796,17 @@ async function handleAction(action, target) {
     }
     persistReviewProgress();
     updateShell();
-    return renderCurrentPage();
+    const comparisonRegion = el("review-comparison-region");
+    if (comparisonRegion) comparisonRegion.innerHTML = renderReviewCandidateComparison();
+    const selectedCount = el("review-selected-count");
+    if (selectedCount) selectedCount.textContent = formatInt(app.reviewSelection.length);
+    return ensureReviewData(getSelectedReviewCandidates());
   }
   if (action === "retry-type-utilization") {
-    app.typeUtilization = { key: null, loading: false, error: null, data: null };
-    return renderCurrentPage();
+    return loadReviewData(getSelectedReviewCandidates(), app.reviewRead.orderId, true);
   }
   if (action === "retry-review-gantt") {
-    return loadReviewGantt(app.reviewGantt.taskId, app.reviewGantt.ids, app.reviewGantt.orderId);
+    return loadReviewData(getSelectedReviewCandidates(), app.reviewRead.orderId, true);
   }
   if (action === "generate-exact-single") return handleGenerateExact("single");
   if (action === "generate-exact-weighted") return handleGenerateExact("weighted");
@@ -5484,123 +5857,6 @@ async function handleAction(action, target) {
   }
 }
 
-// ---- 订单可搜索下拉框（甘特图，替换原生 select）----
-// 展开/查询/高亮均为单次渲染内的临时 DOM 状态，不写入 app；选中即触发整页重渲染自然重置。
-function renderOrderCombobox({ role, canvasId = "", serverMode = false, items, selectedValue, selectedLabel }) {
-  const label = selectedLabel || "";
-  const rootAttrs = [
-    "data-order-combobox",
-    `data-role="${role}"`,
-    canvasId ? `data-canvas="${escapeHtml(canvasId)}"` : "",
-    serverMode ? 'data-server="1"' : "",
-    `data-selected-label="${escapeHtml(label)}"`,
-  ].filter(Boolean).join(" ");
-  const optionsHtml = items.map((item) => {
-    const active = item.value === selectedValue;
-    return `<li class="order-combobox-option${active ? " is-selected" : ""}" data-order-combobox-option data-value="${escapeHtml(item.value)}" role="option" aria-selected="${active ? "true" : "false"}">${escapeHtml(item.label)}</li>`;
-  }).join("");
-  return `
-    <div class="order-combobox" ${rootAttrs}>
-      <input type="search" class="order-combobox-input" data-order-combobox-input
-             placeholder="搜索订单号…" value="${escapeHtml(label)}"
-             autocomplete="off" role="combobox" aria-expanded="false">
-      <ul class="order-combobox-list" data-order-combobox-list role="listbox" hidden>
-        ${optionsHtml}
-        <li class="order-combobox-empty" data-order-combobox-empty hidden>无匹配订单</li>
-      </ul>
-    </div>
-  `;
-}
-
-function openOrderCombobox(root) {
-  if (!root || root.classList.contains("is-open")) return;
-  root.classList.add("is-open");
-  const list = root.querySelector("[data-order-combobox-list]");
-  const input = root.querySelector("[data-order-combobox-input]");
-  if (list) list.hidden = false;
-  if (input) input.setAttribute("aria-expanded", "true");
-}
-
-function closeOrderCombobox(root) {
-  if (!root || !root.classList.contains("is-open")) return;
-  root.classList.remove("is-open");
-  const list = root.querySelector("[data-order-combobox-list]");
-  const input = root.querySelector("[data-order-combobox-input]");
-  if (list) list.hidden = true;
-  if (input) {
-    input.setAttribute("aria-expanded", "false");
-    input.value = root.dataset.selectedLabel || "";
-  }
-  root.querySelectorAll(".order-combobox-option.is-active").forEach((o) => o.classList.remove("is-active"));
-}
-
-function closeOrderComboboxesExcept(keepRoot) {
-  document.querySelectorAll(".order-combobox.is-open").forEach((root) => {
-    if (root !== keepRoot) closeOrderCombobox(root);
-  });
-}
-
-// 仅按订单号（value）做大小写不敏感子串匹配；“全部订单”项仅在无查询词时保留。
-function filterOrderCombobox(root, query) {
-  if (!root) return;
-  const q = String(query || "").trim().toLowerCase();
-  let visible = 0;
-  root.querySelectorAll("[data-order-combobox-option]").forEach((opt) => {
-    const value = opt.dataset.value || "";
-    const show = value === "__all__" ? q === "" : value.toLowerCase().includes(q);
-    opt.hidden = !show;
-    opt.classList.remove("is-active");
-    if (show) visible += 1;
-  });
-  const empty = root.querySelector("[data-order-combobox-empty]");
-  if (empty) empty.hidden = visible > 0;
-  const first = root.querySelector("[data-order-combobox-option]:not([hidden])");
-  if (first) first.classList.add("is-active");
-}
-
-function moveOrderComboboxHighlight(root, delta) {
-  const opts = Array.from(root.querySelectorAll("[data-order-combobox-option]")).filter((o) => !o.hidden);
-  if (!opts.length) return;
-  let idx = opts.findIndex((o) => o.classList.contains("is-active"));
-  idx = idx < 0 ? (delta > 0 ? 0 : opts.length - 1) : idx + delta;
-  idx = Math.max(0, Math.min(opts.length - 1, idx));
-  opts.forEach((o) => o.classList.remove("is-active"));
-  opts[idx].classList.add("is-active");
-  opts[idx].scrollIntoView({ block: "nearest" });
-}
-
-async function selectOrderComboboxOption(option) {
-  const root = option.closest(".order-combobox");
-  if (!root) return;
-  const value = option.dataset.value;
-  closeOrderCombobox(root);
-  if (root.dataset.role === "review") {
-    return loadReviewGantt(app.reviewGantt.taskId, app.reviewGantt.ids, value);
-  }
-  if (root.dataset.server === "1") {
-    return loadPlanGantt(app.planGantt.taskId, app.planGantt.solutionId, value);
-  }
-  app.ganttOrderFilter[root.dataset.canvas] = value;
-  return renderCurrentPage();
-}
-
-function handleOrderComboboxKeydown(event, root, input) {
-  const isOpen = root.classList.contains("is-open");
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    if (!isOpen) { openOrderCombobox(root); filterOrderCombobox(root, input.value); return; }
-    moveOrderComboboxHighlight(root, 1);
-  } else if (event.key === "ArrowUp") {
-    event.preventDefault();
-    if (isOpen) moveOrderComboboxHighlight(root, -1);
-  } else if (event.key === "Enter") {
-    const active = isOpen ? root.querySelector(".order-combobox-option.is-active:not([hidden])") : null;
-    if (active) { event.preventDefault(); selectOrderComboboxOption(active); }
-  } else if (event.key === "Escape") {
-    if (isOpen) { event.preventDefault(); closeOrderCombobox(root); }
-  }
-}
-
 function bindGlobalEvents() {
   document.addEventListener("fullscreenchange", () => {
     const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-workbench")
@@ -5614,13 +5870,6 @@ function bindGlobalEvents() {
   });
 
   document.addEventListener("click", async (event) => {
-    const comboOption = event.target.closest("[data-order-combobox-option]");
-    if (comboOption) {
-      event.preventDefault();
-      await selectOrderComboboxOption(comboOption);
-      return;
-    }
-    closeOrderComboboxesExcept(event.target.closest(".order-combobox"));
     const ganttPageTarget = event.target.closest("[data-gantt-page]");
     if (ganttPageTarget && !ganttPageTarget.disabled) {
       event.preventDefault();
@@ -5776,29 +6025,8 @@ function bindGlobalEvents() {
     }
   });
 
-  document.addEventListener("focusin", (event) => {
-    const input = event.target.closest?.("[data-order-combobox-input]");
-    if (!input) return;
-    const root = input.closest(".order-combobox");
-    openOrderCombobox(root);
-    filterOrderCombobox(root, "");
-    input.select();
-  });
-
-  document.addEventListener("keydown", (event) => {
-    const input = event.target.closest?.("[data-order-combobox-input]");
-    if (!input) return;
-    handleOrderComboboxKeydown(event, input.closest(".order-combobox"), input);
-  });
-
   document.addEventListener("input", (event) => {
     const target = event.target;
-    if (target.matches("[data-order-combobox-input]")) {
-      const root = target.closest(".order-combobox");
-      openOrderCombobox(root);
-      filterOrderCombobox(root, target.value);
-      return;
-    }
     if (target.matches("[data-graph-search]")) {
       app.graphView.search = target.value || "";
       renderCurrentPage();
