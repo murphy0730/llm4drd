@@ -913,6 +913,20 @@ a {
   word-break: break-word;
 }
 
+/* 机器分类利用率：默认折叠 + 每日趋势折线 */
+.util-collapse > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--text);
+  padding: 4px 2px;
+  list-style: revert;
+}
+.util-collapse > summary:hover { color: var(--primary); }
+.util-trend-panel { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.util-trend-svg { width: 100%; min-width: 360px; height: auto; }
+.util-trend-grid { stroke: var(--line); stroke-width: 1; }
+.util-trend-axis { fill: var(--text-soft); font-size: 10px; }
+
 .table-shell {
   overflow: auto;
 }
@@ -2310,6 +2324,67 @@ a {
   color: var(--primary);
 }
 
+/* -- Excel 风格订单多选筛选框 -- */
+.multi-order-filter { position: relative; flex: 0 0 280px; width: 280px; z-index: 6; }
+.multi-order-summary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  border-radius: 12px;
+  padding: 9px 12px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.multi-order-summary-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-order-caret { color: var(--text-soft); flex: 0 0 auto; }
+.multi-order-panel {
+  position: absolute;
+  inset: calc(100% + 4px) 0 auto;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+}
+.multi-order-search {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.multi-order-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+.multi-order-list { max-height: 260px; overflow-y: auto; }
+.multi-order-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+.multi-order-option:hover { background: var(--primary-soft); color: var(--primary); }
+.multi-order-foot { color: var(--text-soft); font-size: 11px; padding: 4px 8px 0; }
+
 /* -- 甘特资源筛选 / 二级筛选 / 分页 -- */
 .gantt-filter-bar { flex-wrap: wrap; row-gap: 6px; margin: 6px 0; }
 .gantt-filter-bar > select { flex: 0 1 auto; min-width: 140px; padding: 6px 10px; }
@@ -2493,8 +2568,17 @@ a {
   box-shadow: var(--shadow-sm);
 }
 .gantt-canvas .vis-item .vis-item-content { padding: 5px 9px; font-weight: 700; }
-.gantt-canvas .vis-labelset .vis-label .vis-inner { padding: 8px 10px; }
+.gantt-canvas .vis-labelset .vis-label .vis-inner {
+  padding: 8px 10px;
+  /* 机器名标签完整显示：不换行、不裁切，避免首行/首列文字被遮挡（vis 默认 overflow:hidden 会裁掉） */
+  white-space: nowrap;
+  overflow: visible;
+}
 .gantt-canvas .vis-labelset .vis-label.vis-nested-group .vis-inner { padding-left: 22px; }
+/* 左侧标签面板：整体不裁切，且首行标签下移一格避开顶部时间轴，防止首行首列文字被盖住 */
+.gantt-canvas .vis-panel.vis-left,
+.gantt-canvas .vis-labelset { overflow: visible; }
+.gantt-canvas .vis-labelset .vis-label:first-child .vis-inner { padding-top: 12px; }
 
 .gantt-canvas .vis-labelset .vis-label.gantt-group-order {
   background: var(--surface-strong);

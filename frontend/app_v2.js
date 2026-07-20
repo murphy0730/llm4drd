@@ -189,6 +189,18 @@ const app = {
   ganttViewWindows: {},
   // 甘特图订单筛选：canvasId -> 选中的订单 id（"__all__" 表示全部，仅小实例提供）
   ganttOrderFilter: {},
+  // 甘特图订单多选筛选：canvasId -> 选中的订单 id 数组（空数组 = 全部订单）
+  ganttOrderMulti: {},
+  // Excel 风格多选订单筛选组件的已注册数据源：id -> config
+  multiOrderSources: new Map(),
+  // 评审甘特：当前选中的单个方案 id（与勾选集 reviewSelection 解耦）
+  reviewGanttSchemeId: null,
+  // 评审甘特：单方案完整排程缓存 schemeId -> { loading, error, entries, orders }
+  reviewSchemeCache: {},
+  // 评审：某方案每日机器分类利用率缓存 schemeId -> { loading, error, days, types }
+  reviewDailyUtilCache: {},
+  // 方案每日利用率趋势详情：当前展开的方案 id（null = 未展开）
+  reviewUtilTrendId: null,
   // 甘特图机器筛选与分页：canvasId -> { type, downtimeOnly, query, page }
   ganttMachineFilter: {},
   // 甘特图订单内二级筛选：canvasId -> { status, query, from, to }
@@ -369,6 +381,10 @@ const api = {
     const params = new URLSearchParams({ solution_ids: asArray(solutionIds).join(",") });
     return this.json(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/machine-type-utilization?${params.toString()}`);
   },
+  getMachineTypeDailyUtilization(taskId, solutionId) {
+    const params = new URLSearchParams({ solution_id: solutionId });
+    return this.json(`/optimize/hybrid/result/${encodeURIComponent(taskId)}/machine-type-daily-utilization?${params.toString()}`);
+  },
   getReviewData(taskId, solutionIds, orderId, includeUtilization, signal) {
     const params = new URLSearchParams({
       solution_ids: ReviewRuntime.normalizeIds(solutionIds).join(","),
@@ -453,7 +469,8 @@ function asArray(value) {
 function orderComboboxLabel(order) {
   if (!order) return "";
   if (order.order_id === "__all__") return order.order_name || "全部订单";
-  return [order.order_id, order.order_name].filter(Boolean).join(" · ");
+  // 订单一律按订单号展示，不再拼接订单名。
+  return order.order_id || "";
 }
 
 function rememberOrderComboboxSelection(recentKey, order) {
@@ -536,6 +553,126 @@ function mountOrderComboboxes() {
       controller.input(input.value);
     });
     ReviewRuntime.bindOrderComboboxOpen(input, controller);
+  });
+}
+
+// —— Excel 风格订单多选筛选框（客户端）——
+// config: { id, orders:[{order_id, order_name}], selectedIds:string[], onChange:(ids)=>void }
+// 语义：选中 0 个 = 全部订单；顶部「全选」勾选即选中全部；输入框按订单号模糊过滤。
+// 交互性能：面板内改动只维护本地工作集，关闭面板时一次性提交（避免每次勾选都重建甘特）。
+const MULTI_ORDER_RENDER_CAP = 300;
+
+function multiOrderSummary(orders, selectedIds) {
+  const total = orders.length;
+  if (!selectedIds.length || selectedIds.length >= total) return `全部订单（${formatInt(total)}）`;
+  if (selectedIds.length === 1) return String(selectedIds[0]);
+  return `已选 ${formatInt(selectedIds.length)} / ${formatInt(total)} 个订单`;
+}
+
+function renderMultiOrderFilter(config) {
+  app.multiOrderSources.set(config.id, config);
+  const selected = new Set(config.selectedIds || []);
+  return `
+    <div class="multi-order-filter" data-multi-order-filter="${escapeHtml(config.id)}">
+      <button type="button" class="multi-order-summary" data-multi-order-toggle aria-expanded="false">
+        <span class="multi-order-summary-text">${escapeHtml(multiOrderSummary(config.orders, config.selectedIds || []))}</span>
+        <span class="multi-order-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="multi-order-panel" hidden>
+        <input type="search" class="multi-order-search" placeholder="输入订单号模糊搜索" aria-label="搜索订单号">
+        <label class="multi-order-all"><input type="checkbox" data-multi-order-all> 全选</label>
+        <div class="multi-order-list" role="group" aria-label="订单列表">
+          ${config.orders.slice(0, MULTI_ORDER_RENDER_CAP).map((order) => `
+            <label class="multi-order-option"><input type="checkbox" data-multi-order-id="${escapeHtml(order.order_id)}" ${selected.has(order.order_id) ? "checked" : ""}> ${escapeHtml(order.order_id)}</label>
+          `).join("")}
+        </div>
+        <div class="multi-order-foot">
+          ${config.orders.length > MULTI_ORDER_RENDER_CAP ? `<span class="multi-order-more">仅显示前 ${MULTI_ORDER_RENDER_CAP} 条，请输入订单号搜索</span>` : ""}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function mountMultiOrderFilters() {
+  document.querySelectorAll(".page.active [data-multi-order-filter]:not([data-multi-order-bound='1'])").forEach((container) => {
+    const source = app.multiOrderSources.get(container.dataset.multiOrderFilter);
+    if (!source) return;
+    container.dataset.multiOrderBound = "1";
+    const toggle = container.querySelector("[data-multi-order-toggle]");
+    const panel = container.querySelector(".multi-order-panel");
+    const search = container.querySelector(".multi-order-search");
+    const list = container.querySelector(".multi-order-list");
+    const allBox = container.querySelector("[data-multi-order-all]");
+    const summaryText = container.querySelector(".multi-order-summary-text");
+    if (!toggle || !panel || !list || !allBox) return;
+
+    const working = new Set(source.selectedIds || []);
+    const total = source.orders.length;
+
+    const syncAllBox = () => {
+      allBox.checked = working.size === 0 || working.size >= total;
+    };
+    const updateSummary = () => {
+      summaryText.textContent = multiOrderSummary(source.orders, Array.from(working));
+    };
+    syncAllBox();
+
+    const commit = () => {
+      // 空集合与全选都表示"全部订单"，统一提交为空数组，让上游按无筛选处理
+      const ids = working.size >= total ? [] : Array.from(working);
+      source.onChange(ids);
+    };
+
+    const open = () => {
+      panel.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
+      if (search) search.focus();
+    };
+    const close = ({ commitChanges = true } = {}) => {
+      if (panel.hidden) return;
+      panel.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+      if (commitChanges) commit();
+    };
+
+    toggle.addEventListener("click", () => {
+      if (panel.hidden) open(); else close();
+    });
+
+    if (search) {
+      search.addEventListener("input", () => {
+        const q = search.value.trim().toLowerCase();
+        list.querySelectorAll(".multi-order-option").forEach((opt) => {
+          const id = String(opt.querySelector("input")?.dataset.multiOrderId || "").toLowerCase();
+          opt.hidden = q ? !id.includes(q) : false;
+        });
+      });
+    }
+
+    allBox.addEventListener("change", () => {
+      working.clear();
+      if (allBox.checked) {
+        source.orders.forEach((o) => working.add(o.order_id));
+      }
+      list.querySelectorAll("[data-multi-order-id]").forEach((box) => { box.checked = allBox.checked; });
+      updateSummary();
+    });
+
+    list.addEventListener("change", (event) => {
+      const box = event.target.closest("[data-multi-order-id]");
+      if (!box) return;
+      if (box.checked) working.add(box.dataset.multiOrderId); else working.delete(box.dataset.multiOrderId);
+      syncAllBox();
+      updateSummary();
+    });
+
+    // 点击组件外部：关闭并提交
+    const onDocClick = (event) => {
+      if (!container.isConnected) { document.removeEventListener("click", onDocClick, true); return; }
+      if (!container.contains(event.target)) close();
+    };
+    document.addEventListener("click", onDocClick, true);
   });
 }
 
@@ -2026,20 +2163,21 @@ function renderTimeline(entries, options = {}) {
   const orderOptions = Array.from(orderNames.keys())
     .sort((a, b) => String(a).localeCompare(String(b), "zh-CN", { numeric: true }));
   const allowAll = serverMode ? false : allEntries.length <= CONFIG.GANTT_ALL_ORDERS_MAX_OPS;
-  let selectedOrder;
-  if (serverMode) {
-    selectedOrder = serverOrders.selectedOrder || orderOptions[0];
-  } else {
-    selectedOrder = app.ganttOrderFilter[id];
-    if (selectedOrder === "__all__" && !allowAll) selectedOrder = null;
-    if (selectedOrder !== "__all__" && !orderOptions.includes(selectedOrder)) selectedOrder = null;
-    if (!selectedOrder) selectedOrder = allowAll ? "__all__" : orderOptions[0];
+  // 本地模式：订单多选集合（空数组 = 全部订单）。大实例默认聚焦首个订单，避免一次性全量渲染卡死。
+  let localSelectedIds = [];
+  if (!serverMode) {
+    localSelectedIds = asArray(app.ganttOrderMulti[id]).filter((oid) => orderOptions.includes(oid));
+    if (!localSelectedIds.length && !allowAll && orderOptions.length) localSelectedIds = [orderOptions[0]];
   }
+  // selectedOrder 兼容下游（分组/配色/构建）：单选=该订单；多选或全部=特殊 "__all__"（走机器分组）
+  const selectedOrder = serverMode
+    ? (serverOrders.selectedOrder || orderOptions[0])
+    : (localSelectedIds.length === 1 ? localSelectedIds[0] : "__all__");
   const orderEntries = serverMode
     ? allEntries
-    : (selectedOrder === "__all__"
-      ? allEntries
-      : allEntries.filter((item) => (item.order_id || "-") === selectedOrder));
+    : (localSelectedIds.length
+      ? allEntries.filter((item) => localSelectedIds.includes(item.order_id || "-"))
+      : allEntries);
 
   // 订单内二级筛选：状态 / 关键字 / 时间窗（选中订单后仍可继续过滤，见问题 B）
   const entryFilter = getGanttEntryFilter(id);
@@ -2078,28 +2216,32 @@ function renderTimeline(entries, options = {}) {
   const orderComboboxId = `${id}-order`;
   const taskId = serverOrders?.taskId || app.planGantt.taskId;
   const solutionId = serverOrders?.solutionId || app.planGantt.solutionId;
-  const orderSelector = orderOptions.length > 1 || !allowAll ? `
-    <div class="field-inline">
-      <span>订单</span>
+  // 服务端取数模式（方案详情/评审对比）沿用异步单选；本地模式（规则仿真等）用 Excel 风格订单多选。
+  const orderControl = serverMode
+    ? `
       ${renderOrderCombobox({
         id: orderComboboxId,
         selected: selectedOrderItem,
-        ...(serverMode
-          ? { contextKey: `plan::${taskId}::${solutionId}` }
-          : { contextKey: `local::${app.currentSceneId || "current-instance"}::${id}::${ReviewRuntime.normalizeIds(options.solutionIds).join(",")}` }),
-        search: serverMode
-          ? async (query, signal) => {
-            const payload = await api.searchReviewOrders(taskId, [solutionId], query, signal);
-            return asArray(payload?.orders);
-          }
-          : (query) => ReviewRuntime.rankOrders(orderSearchItems, query, ORDER_SEARCH_LIMIT),
-        select: serverMode
-          ? (order) => loadPlanGantt(taskId, solutionId, order.order_id)
-          : (order) => {
-            app.ganttOrderFilter[id] = order.order_id;
-            return renderCurrentPage();
-          },
-      })}
+        contextKey: `plan::${taskId}::${solutionId}`,
+        search: async (query, signal) => {
+          const payload = await api.searchReviewOrders(taskId, [solutionId], query, signal);
+          return asArray(payload?.orders);
+        },
+        select: (order) => loadPlanGantt(taskId, solutionId, order.order_id),
+      })}`
+    : renderMultiOrderFilter({
+      id: orderComboboxId,
+      orders: orderOptions.map((orderId) => ({ order_id: orderId, order_name: orderNames.get(orderId) || "" })),
+      selectedIds: localSelectedIds,
+      onChange: (ids) => {
+        app.ganttOrderMulti[id] = ids;
+        return renderCurrentPage();
+      },
+    });
+  const orderSelector = orderOptions.length > 1 || !allowAll ? `
+    <div class="field-inline">
+      <span>订单</span>
+      ${orderControl}
       <span>分组</span>
       <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
         <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
@@ -2551,111 +2693,52 @@ function graphNodeDetailRows(node, relatedEdges = []) {
   return rows;
 }
 
-// 层级泳道布局：订单→任务→工序→机器/工装/人员 六条纵向泳道（左冷右暖），
-// 列内按"子列网格"紧凑排布，避免单列过高；返回泳道几何供背景渲染。
-const GRAPH_LANE_CONFIG = {
-  order: { rows: 12, rowGap: 86, colGap: 132 },
-  task: { rows: 16, rowGap: 74, colGap: 128 },
-  operation: { rows: 22, rowGap: 54, colGap: 92 },
-  machine: { rows: 16, rowGap: 74, colGap: 128 },
-  tooling: { rows: 14, rowGap: 74, colGap: 128 },
-  personnel: { rows: 14, rowGap: 74, colGap: 128 },
-  other: { rows: 14, rowGap: 74, colGap: 128 },
-};
-const GRAPH_LANE_PAD_X = 24;
-const GRAPH_LANE_GAP = 30;
-const GRAPH_LANE_TOP = 60;
-const GRAPH_LANE_OUTER_PAD = 24;
-
-function graphLaneFamily(type) {
-  if (["order", "task", "operation"].includes(type)) return "plan";
-  if (isResourceNodeType(type)) return "resource";
-  return "other";
-}
+// 扁平网格布局（7月15号版风格）：不分泳道、不加家族带，节点按类型聚簇后从上到下网格平铺，
+// 保留类型配色/形状/尺寸编码与自由拖动。lanes / families 返回空数组，渲染层不再绘制分隔带。
+const GRAPH_GRID_PAD = 60;
+const GRAPH_GRID_CELL = 132;
+const GRAPH_GRID_ROW = 112;
 
 function layoutGraph(nodes, edges, selectedId) {
-  const groups = new Map();
-  GRAPH_NODE_ORDER.forEach((type) => groups.set(type, []));
-  nodes.forEach((node) => {
-    if (!groups.has(node.type)) groups.set(node.type, []);
-    groups.get(node.type).push(node);
-  });
-
   const degree = new Map(nodes.map((node) => [node.id, 0]));
   edges.forEach((edge) => {
     degree.set(edge.source, (degree.get(edge.source) || 0) + 1);
     degree.set(edge.target, (degree.get(edge.target) || 0) + 1);
   });
 
-  const directNeighbors = new Set([selectedId]);
-  edges.forEach((edge) => {
-    if (edge.source === selectedId || edge.target === selectedId) {
-      directNeighbors.add(edge.source);
-      directNeighbors.add(edge.target);
-    }
+  // 按类型聚簇（沿用类型次序），类型内按度数排序，使强连接节点靠前；整体作为一条连续序列平铺。
+  const typeRank = new Map(GRAPH_NODE_ORDER.map((type, index) => [type, index]));
+  const ordered = nodes.slice().sort((a, b) => {
+    const ta = typeRank.has(a.type) ? typeRank.get(a.type) : GRAPH_NODE_ORDER.length;
+    const tb = typeRank.has(b.type) ? typeRank.get(b.type) : GRAPH_NODE_ORDER.length;
+    if (ta !== tb) return ta - tb;
+    const degreeGap = (degree.get(b.id) || 0) - (degree.get(a.id) || 0);
+    if (degreeGap !== 0) return degreeGap;
+    return String(a.label).localeCompare(String(b.label), "zh-CN");
   });
 
-  const usedGroups = Array.from(groups.entries()).filter(([, items]) => items.length);
+  // 网格列数：偏向纵向（从上到下）阅读，取略小于正方形的列数。
+  const count = ordered.length;
+  const cols = Math.max(1, Math.round(Math.sqrt(Math.max(1, count)) * 0.9));
+  const rows = Math.max(1, Math.ceil(count / cols));
+
   const placed = new Map();
-  const lanes = [];
-  let laneX = GRAPH_LANE_OUTER_PAD;
-  let maxContentBottom = GRAPH_LANE_TOP + 40;
-
-  usedGroups.forEach(([type, items]) => {
-    const cfg = GRAPH_LANE_CONFIG[type] || GRAPH_LANE_CONFIG.other;
-    items.sort((a, b) => {
-      const aRank = a.id === selectedId ? 0 : directNeighbors.has(a.id) ? 1 : 2;
-      const bRank = b.id === selectedId ? 0 : directNeighbors.has(b.id) ? 1 : 2;
-      if (aRank !== bRank) return aRank - bRank;
-      const degreeGap = (degree.get(b.id) || 0) - (degree.get(a.id) || 0);
-      if (degreeGap !== 0) return degreeGap;
-      return String(a.label).localeCompare(String(b.label), "zh-CN");
+  ordered.forEach((node, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    placed.set(node.id, {
+      x: GRAPH_GRID_PAD + col * GRAPH_GRID_CELL,
+      y: GRAPH_GRID_PAD + row * GRAPH_GRID_ROW,
+      r: GRAPH_NODE_SIZES[node.type] || GRAPH_NODE_SIZES.other,
+      node,
+      type: node.type,
     });
-    const subCols = Math.max(1, Math.ceil(items.length / cfg.rows));
-    const usedRows = Math.max(1, Math.ceil(items.length / subCols));
-    maxContentBottom = Math.max(maxContentBottom, GRAPH_LANE_TOP + 40 + (usedRows - 1) * cfg.rowGap);
-    const laneWidth = GRAPH_LANE_PAD_X * 2 + (subCols - 1) * cfg.colGap + 64;
-    items.forEach((node, index) => {
-      const col = Math.floor(index / usedRows);
-      const row = index % usedRows;
-      placed.set(node.id, {
-        x: laneX + GRAPH_LANE_PAD_X + 32 + col * cfg.colGap,
-        y: GRAPH_LANE_TOP + 40 + row * cfg.rowGap,
-        r: GRAPH_NODE_SIZES[node.type] || GRAPH_NODE_SIZES.other,
-        node,
-        type,
-      });
-    });
-    lanes.push({
-      type,
-      family: graphLaneFamily(type),
-      label: graphTypeLabel(type),
-      count: items.length,
-      x: laneX,
-      width: laneWidth,
-    });
-    laneX += laneWidth + GRAPH_LANE_GAP;
   });
 
-  const width = Math.max(960, laneX - GRAPH_LANE_GAP + GRAPH_LANE_OUTER_PAD);
-  const height = Math.max(460, maxContentBottom + 96);
-  lanes.forEach((lane) => {
-    lane.y = GRAPH_LANE_TOP - 12;
-    lane.height = height - GRAPH_LANE_TOP + 12 - 16;
-  });
+  const width = Math.max(960, GRAPH_GRID_PAD * 2 + Math.max(0, cols - 1) * GRAPH_GRID_CELL + 80);
+  const height = Math.max(460, GRAPH_GRID_PAD * 2 + Math.max(0, rows - 1) * GRAPH_GRID_ROW + 80);
 
-  // 泳道族（规划链/资源）连续区段，用于顶部族标
-  const families = [];
-  lanes.forEach((lane) => {
-    const last = families[families.length - 1];
-    if (last && last.family === lane.family) {
-      last.width = lane.x + lane.width - last.x;
-    } else {
-      families.push({ family: lane.family, x: lane.x, width: lane.width });
-    }
-  });
-
-  return { width, height, placed, lanes, families };
+  return { width, height, placed, lanes: [], families: [] };
 }
 
 // 边几何：跨列走直线（按节点半径做边界吸附），同列顺序边向右弓形绕开节点
@@ -2998,7 +3081,6 @@ function renderReviewCandidateComparison() {
       <td class="compare-check"><input type="checkbox" data-action="toggle-candidate" data-id="${escapeHtml(item.id)}" ${checked ? "checked" : ""} aria-label="勾选 ${escapeHtml(item.name)}"></td>
       <td class="compare-name">
         <strong>${colorIdx >= 0 ? `<span class="scheme-dot" style="background:${schemeColorToken(colorIdx)}"></span>` : ""}${escapeHtml(item.name)}</strong>
-        <small>${escapeHtml(candidateSourceLabel(item))} · ${escapeHtml(candidateModeLabel(item))}</small>
       </td>
       ${allKeys.map((key) => cell(item, key)).join("")}
       <td class="compare-ops">
@@ -3026,230 +3108,184 @@ function renderReviewCandidateComparison() {
   `;
 }
 
-function renderReviewTypeUtilization() {
-  const columns = getSelectedReviewCandidates();
-  if (!columns.length) {
-    return `
-      <article class="surface-card">
-        <div class="card-head"><h3>机器分类利用率对比</h3></div>
-        <div class="empty-state"><p>请在上方对比表勾选方案，以对比各机台类型的利用率。</p></div>
-      </article>
-    `;
-  }
-  const state = app.reviewRead;
-
-  let inner;
-  if (state.loading && !state.utilization) {
-    inner = `<div class="empty-state"><p>正在计算机器分类利用率…</p></div>`;
-  } else if (state.error && !state.utilization) {
-    inner = `<div class="empty-state"><p>加载机器分类利用率失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-type-utilization">重试</button></div>`;
-  } else {
-    const types = asArray(state.utilization?.types).filter((type) => Object.keys(type.per_solution || {}).length);
-    if (!types.length) {
-      inner = `<div class="empty-state"><p>当前对比方案的排程未覆盖任何机台类型。</p></div>`;
-    } else {
-      const rows = types.map((type) => {
-        const cellUtils = columns.map((c) => type.per_solution?.[c.id]?.utilization).filter((u) => u !== undefined && u !== null);
-        const best = cellUtils.length ? Math.max(...cellUtils) : null;
-        const cells = columns.map((c) => {
-          const entry = type.per_solution?.[c.id];
-          if (!entry) return "<td>-</td>";
-          const isBest = best !== null && entry.utilization === best;
-          const pct = isBest ? `<strong>${formatPercent(entry.utilization)}</strong>` : formatPercent(entry.utilization);
-          return `<td class="${isBest ? "is-best" : ""}">${pct}</td>`;
-        }).join("");
-        return `<tr>
-          <td><strong>${escapeHtml(type.type_name)}</strong></td>
-          ${cells}
-        </tr>`;
-      }).join("");
-      inner = `
-        <div class="table-shell">
-          <table class="data-table util-table">
-            <colgroup><col class="util-col-type">${columns.map(() => '<col class="util-col-plan">').join("")}</colgroup>
-            <thead><tr><th>机器类型</th>${columns.map((c) => {
-              const idx = schemeColorIndex(c.id);
-              return `<th><span class="scheme-dot" style="background:${schemeColorToken(idx)}"></span><span class="util-plan-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span></th>`;
-            }).join("")}</tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-      `;
-    }
-  }
-  return `
-    <article class="surface-card">
-      <div class="card-head">
-        <h3>机器分类利用率对比</h3>
-        <p>单机利用率 = 有排产时长 / 排产窗口（首个排产开始 ~ 最后排产结束）；按机器类型对有排产机器取算术平均，每行最佳值加粗。</p>
-      </div>
-      ${inner}
-    </article>
-  `;
-}
-
-// 勾选集甘特联动：按机器分组，机器行内每个勾选方案一条子行（vis nestedGroups：机器 → 方案），
-// 每方案用勾选集稳定色板，直观对比同一订单在不同方案下各机台的排产差异。
-function buildReviewGanttData(selected, schemes, canvasId) {
-  const planStartAt = tryParseDate(app.instanceDetails?.plan_start_at);
-  const hasRealBase = Boolean(planStartAt);
-  const base = hasRealBase ? planStartAt.toISOString() : GANTT_FALLBACK_BASE;
-
-  // 每个方案归一化后的条目，附带其配色序号（= 勾选顺序）
-  const schemeRows = selected.map((item, index) => {
-    const entries = asArray(schemes[item.id])
-      .map((e) => ({
-        machineId: e.machine_id || e.machine_name || e.resource_id || "unknown",
-        machineName: e.machine_name || e.machine_id || e.resource_name || "未知资源",
-        opId: e.op_id || e.operation_id || e.id || "-",
-        orderId: e.order_id || "-",
-        taskId: e.task_id || "-",
-        start: Number(e.start ?? e.start_time ?? 0),
-        end: Number(e.end ?? e.end_time ?? 0),
-        status: normalizeScheduleStatus(e.status),
-      }))
-      .filter((e) => !Number.isNaN(e.start) && !Number.isNaN(e.end) && e.end > e.start);
-    return { id: item.id, name: item.name, colorIdx: index % SCHEME_COLOR_TOKENS.length, entries };
-  }).filter((row) => row.entries.length);
-
-  const all = schemeRows.flatMap((row) => row.entries);
-  if (!all.length) return null;
-
-  // 机器行集合（跨方案取并集），按机器名自然排序
-  const machineNames = new Map();
-  all.forEach((e) => { if (!machineNames.has(e.machineId)) machineNames.set(e.machineId, e.machineName); });
-  const machineIds = Array.from(machineNames.keys())
-    .sort((a, b) => String(machineNames.get(a)).localeCompare(String(machineNames.get(b)), "zh-CN", { numeric: true }));
-
-  const horizonStart = Math.min(...all.map((e) => e.start));
-  const horizonEnd = Math.max(...all.map((e) => e.end));
-  const viewKey = JSON.stringify({
-    canvasId,
-    selectedOrder: app.reviewRead.orderId || "",
-    solutionIds: selected.map((item) => item.id).sort(),
-    groupMode: "scheme",
-  });
-
-  const groups = [];
-  const items = [];
-  let seq = 0;
-  machineIds.forEach((machineId) => {
-    const rowsHere = schemeRows.filter((row) => row.entries.some((e) => e.machineId === machineId));
-    const nestedIds = rowsHere.map((row) => `rm|${machineId}|s|${row.id}`);
-    groups.push({
-      id: `rm|${machineId}`,
-      content: `${escapeHtml(machineNames.get(machineId))}<span class="gantt-group-count">${formatInt(rowsHere.length)} 方案</span>`,
-      className: "gantt-group-machine",
-      nestedGroups: nestedIds,
-      showNested: true,
-      seq: (seq += 1),
-    });
-    rowsHere.forEach((row) => {
-      groups.push({
-        id: `rm|${machineId}|s|${row.id}`,
-        content: `<span class="scheme-dot scheme-c-${row.colorIdx}"></span><span class="gantt-op-machine">${escapeHtml(row.name)}</span>`,
-        className: `gantt-group-op scheme-c-${row.colorIdx}`,
-        seq: (seq += 1),
-      });
-    });
-  });
-
-  schemeRows.forEach((row) => {
-    row.entries.forEach((e, i) => {
-      items.push({
-        id: `ri-${row.id}-${i}`,
-        group: `rm|${e.machineId}|s|${row.id}`,
-        start: ganttOffsetToISO(e.start, base),
-        end: ganttOffsetToISO(e.end, base),
-        content: escapeHtml(e.opId),
-        className: `scheme-c-${row.colorIdx}`,
-        title: `${escapeHtml(row.name)} · ${escapeHtml(e.opId)}\n订单:${escapeHtml(e.orderId)} 任务:${escapeHtml(e.taskId)}\n机器:${escapeHtml(e.machineName)}\n${hasRealBase ? `${formatDateTime(ganttOffsetToISO(e.start, base))} ~ ${formatDateTime(ganttOffsetToISO(e.end, base))}` : `相对 ${e.start}h ~ ${e.end}h`}`,
-      });
-    });
-  });
-
-  const nowOffset = ganttProgressNowOffset(all);
-  return {
-    groups,
-    items,
-    hasRealBase,
-    machineFacet: null,
-    ...ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey),
-    mode: "scheme",
-  };
-}
-
-function reviewGanttControlsHtml() {
-  const selectedOrder = app.reviewRead.orderId;
-  if (!selectedOrder) return "";
-  const selected = getSelectedReviewCandidates();
+async function loadReviewDailyUtil(schemeId) {
   const taskId = app.optimizeResult?.task_id;
-  const ids = selected.map((item) => item.id).filter(Boolean);
+  if (!taskId || !schemeId) return;
+  try {
+    const payload = await api.getMachineTypeDailyUtilization(taskId, schemeId);
+    app.reviewDailyUtilCache[schemeId] = { loading: false, error: null, days: asArray(payload?.days), types: asArray(payload?.types) };
+  } catch (error) {
+    app.reviewDailyUtilCache[schemeId] = { loading: false, error: error.message || String(error), days: [], types: [] };
+  }
+  refreshReviewDynamicRegions();
+}
+
+function ensureReviewDailyUtil(schemeId) {
+  const st = app.reviewDailyUtilCache[schemeId];
+  if (st && (st.loading || st.types || st.error)) return st;
+  app.reviewDailyUtilCache[schemeId] = { loading: true, error: null, days: [], types: null };
+  loadReviewDailyUtil(schemeId);
+  return app.reviewDailyUtilCache[schemeId];
+}
+
+// 每日机器分类利用率趋势：每个机器类型一条折线（横轴 D1..Dn，纵轴利用率%），与表格同口径同色。
+function renderDailyUtilTrendSvg(days, types) {
+  const W = Math.max(360, 40 + days.length * 46);
+  const H = 200;
+  const padL = 40, padR = 12, padT = 12, padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const xOf = (i) => padL + (days.length <= 1 ? plotW / 2 : (i / (days.length - 1)) * plotW);
+  const yOf = (v) => padT + (1 - Math.max(0, Math.min(1, v))) * plotH;
+  const gridY = [0, 0.25, 0.5, 0.75, 1].map((v) => `
+    <line x1="${padL}" y1="${yOf(v)}" x2="${W - padR}" y2="${yOf(v)}" class="util-trend-grid"></line>
+    <text x="${padL - 6}" y="${yOf(v) + 3}" class="util-trend-axis" text-anchor="end">${Math.round(v * 100)}</text>`).join("");
+  const xLabels = days.map((d, i) => `<text x="${xOf(i)}" y="${H - 8}" class="util-trend-axis" text-anchor="middle">D${escapeHtml(String(d))}</text>`).join("");
+  const lines = types.map((type, ti) => {
+    const color = schemeColorToken(ti % SCHEME_COLOR_TOKENS.length);
+    const pts = asArray(type.per_day).map((v, i) => (v === null || v === undefined) ? null : `${xOf(i)},${yOf(v)}`).filter(Boolean).join(" ");
+    return pts ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2"></polyline>` : "";
+  }).join("");
+  const legend = types.map((type, ti) => `<span class="legend-item"><span class="legend-swatch" style="background:${schemeColorToken(ti % SCHEME_COLOR_TOKENS.length)}"></span>${escapeHtml(type.type_name)}</span>`).join("");
   return `
-    <div class="field-inline">
-      <span>订单</span>
-      ${renderOrderCombobox({
-        id: "gantt-review-compare-order",
-        selected: { order_id: selectedOrder, order_name: "" },
-        contextKey: `review::${ReviewRuntime.selectionKey(taskId, ids)}`,
-        label: (order) => (order && order.order_id ? String(order.order_id) : ""),
-        search: async (query, signal) => {
-          const result = await reviewDataClient.searchOrders({ taskId, ids, query }, signal);
-          return result.cancelled ? [] : result.orders;
-        },
-        select: (order) => loadReviewData(getSelectedReviewCandidates(), order.order_id, false),
-      })}
+    <div class="util-trend">
+      <div class="table-shell"><svg viewBox="0 0 ${W} ${H}" class="util-trend-svg" role="img" aria-label="每日机器分类利用率趋势">${gridY}${xLabels}${lines}</svg></div>
+      <div class="legend">${legend}</div>
     </div>
   `;
 }
 
-function reviewGanttLegendHtml(selected) {
-  return selected.map((item, index) => `
-    <span class="legend-item"><span class="legend-swatch scheme-c-${index % SCHEME_COLOR_TOKENS.length}"></span>${escapeHtml(item.name)}</span>
-  `).join("");
-}
-
-function currentReviewGanttData(selected) {
-  if (app.reviewRead.loading) return null;
-  const taskId = app.optimizeResult?.task_id;
-  const ids = selected.map((item) => item.id).filter(Boolean);
-  const selectionKey = taskId && ids.length ? ReviewRuntime.selectionKey(taskId, ids) : null;
-  if (!selectionKey || app.reviewRead.selectionKey !== selectionKey) return null;
-  return buildReviewGanttData(selected, app.reviewRead.schemes, "gantt-review-compare");
-}
-
-function reviewGanttStatusHtml(selected, data) {
-  const state = app.reviewRead;
-  if (state.loading) return `<p class="gantt-note">正在加载勾选方案的排产…</p>`;
-  if (state.error) {
-    return `<div class="empty-state"><p>加载排产失败：${escapeHtml(state.error)}</p><button class="btn-ghost" data-action="retry-review-gantt">重试</button></div>`;
-  }
-  return ReviewRuntime.renderReviewFailureNotes({
-    failedIds: state.failedIds,
-    failureMessages: state.failureMessages,
-    selected,
-    hasData: Boolean(data),
-  });
-}
-
-function renderReviewGantt(selected) {
-  const cardHead = `<div class="card-head"><h3>勾选方案甘特联动</h3><p>按机器分组，机器行内每个勾选方案独立配色（与对比表、利用率列头一致）；一次聚焦一个订单，切换订单可比较各方案在该订单上的排产差异。</p></div>`;
-  if (!selected.length) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>请在上方对比表勾选方案，以联动甘特对比。</p></div></article>`;
+function renderReviewTypeUtilization() {
+  ensureReviewGanttSchemeSelection();
+  const candidates = getReviewCandidates();
+  const schemeId = app.reviewGanttSchemeId;
+  const schemeName = candidates.find((c) => c.id === schemeId)?.name || schemeId || "";
+  const head = `
+    <div class="card-head">
+      <h3>机器分类利用率对比</h3>
+      <p>按天展示当前方案（${escapeHtml(String(schemeName))}）各机器类型的日利用率；日利用率 = 该类型当日有排产时长 /（该类型机器数 × 当日 24h），每行最佳值加粗。选方案由甘特/对比表「查看详情」联动。</p>
+    </div>`;
+  if (!candidates.length || !schemeId) {
+    return `<article class="surface-card">${head}<div class="empty-state"><p>请先运行优化或加载参照方案。</p></div></article>`;
   }
   if (!app.optimizeResult?.task_id) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>运行混合优化后，可在此查看勾选方案的排产甘特联动。</p></div></article>`;
+    return `<article class="surface-card">${head}<div class="empty-state"><p>运行混合优化后，可查看每日机器分类利用率。</p></div></article>`;
   }
-  const data = currentReviewGanttData(selected);
+  const st = ensureReviewDailyUtil(schemeId);
+  let inner;
+  if (st.loading) {
+    inner = `<div class="empty-state"><p>正在计算每日机器分类利用率…</p></div>`;
+  } else if (st.error) {
+    inner = `<div class="empty-state"><p>加载失败：${escapeHtml(st.error)}</p><button class="btn-ghost" data-action="retry-daily-util">重试</button></div>`;
+  } else if (!asArray(st.types).length) {
+    inner = `<div class="empty-state"><p>该方案的排程未覆盖任何机台类型。</p></div>`;
+  } else {
+    const days = asArray(st.days);
+    const rows = st.types.map((type) => {
+      const vals = asArray(type.per_day).filter((v) => v !== null && v !== undefined);
+      const best = vals.length ? Math.max(...vals) : null;
+      const cells = asArray(type.per_day).map((v) => {
+        if (v === null || v === undefined) return "<td>-</td>";
+        const isBest = best !== null && v === best;
+        const pct = isBest ? `<strong>${formatPercent(v)}</strong>` : formatPercent(v);
+        return `<td class="${isBest ? "is-best" : ""}">${pct}</td>`;
+      }).join("");
+      return `<tr><td><strong>${escapeHtml(type.type_name)}</strong></td>${cells}</tr>`;
+    }).join("");
+    const trend = app.reviewUtilTrendId === schemeId ? `
+      <div class="util-trend-panel">
+        <div class="card-head"><h3>${escapeHtml(String(schemeName))} 每日机器分类利用率趋势</h3></div>
+        ${renderDailyUtilTrendSvg(days, st.types)}
+      </div>` : "";
+    inner = `
+      <div class="table-shell">
+        <table class="data-table util-table">
+          <thead><tr><th>机器类型</th>${days.map((d) => `<th>D${escapeHtml(String(d))}</th>`).join("")}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${trend}
+    `;
+  }
+  // 2.4：默认折叠
   return `
     <article class="surface-card">
-      ${cardHead}
-      <div class="review-gantt-controls">${reviewGanttControlsHtml()}</div>
-      <div class="legend review-gantt-legend">${reviewGanttLegendHtml(selected)}</div>
-      <div class="review-gantt-status">${reviewGanttStatusHtml(selected, data)}</div>
-      <div class="gantt-canvas" id="gantt-review-compare"></div>
+      <details class="util-collapse">
+        <summary>机器分类利用率对比 · 当前方案 ${escapeHtml(String(schemeName))}</summary>
+        ${head}
+        ${inner}
+      </details>
     </article>
   `;
+}
+
+// 评审方案排程甘特：单方案 + 订单多选，复用统一甘特（renderTimeline，按机器分组 + 4 天默认窗口）。
+function ensureReviewGanttSchemeSelection() {
+  const candidates = getReviewCandidates();
+  if (!candidates.length) { app.reviewGanttSchemeId = null; return; }
+  if (!app.reviewGanttSchemeId || !candidates.some((c) => c.id === app.reviewGanttSchemeId)) {
+    app.reviewGanttSchemeId = app.reviewDetailId || app.reviewSelection[0] || candidates[0].id;
+  }
+}
+
+async function loadReviewSchemeSchedule(schemeId) {
+  const taskId = app.optimizeResult?.task_id;
+  if (!taskId || !schemeId) return;
+  try {
+    const payload = await api.getOptimizeSolutionSchedule(taskId, schemeId, "__all__");
+    app.reviewSchemeCache[schemeId] = { loading: false, error: null, entries: asArray(payload?.entries), orders: asArray(payload?.orders) };
+  } catch (error) {
+    app.reviewSchemeCache[schemeId] = { loading: false, error: error.message || String(error), entries: null, orders: [] };
+  }
+  refreshReviewDynamicRegions();
+}
+
+function ensureReviewSchemeSchedule(schemeId) {
+  const st = app.reviewSchemeCache[schemeId];
+  if (st && (st.loading || st.entries || st.error)) return st;
+  app.reviewSchemeCache[schemeId] = { loading: true, error: null, entries: null, orders: [] };
+  loadReviewSchemeSchedule(schemeId);
+  return app.reviewSchemeCache[schemeId];
+}
+
+function renderReviewGantt() {
+  ensureReviewGanttSchemeSelection();
+  const candidates = getReviewCandidates();
+  const cardHead = `<div class="card-head"><h3>方案排程甘特（按机器）</h3><p>选择单个方案与一个或多个订单，查看该方案在所选订单上的排产；默认显示前 4 天，可滚动查看全部。</p></div>`;
+  if (!candidates.length) {
+    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>暂无方案，请先运行优化或加载参照方案。</p></div></article>`;
+  }
+  if (!app.optimizeResult?.task_id) {
+    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>运行混合优化后，可在此查看方案排产甘特。</p></div></article>`;
+  }
+  const schemeId = app.reviewGanttSchemeId;
+  const schemeName = candidates.find((c) => c.id === schemeId)?.name || schemeId;
+  const schemeCard = `
+    <article class="surface-card">
+      ${cardHead}
+      <div class="field-inline">
+        <span>方案</span>
+        <select data-action="select-review-scheme">
+          ${candidates.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === schemeId ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}
+        </select>
+      </div>
+    </article>`;
+  const st = ensureReviewSchemeSchedule(schemeId);
+  let body;
+  if (st.loading) {
+    body = `<article class="surface-card"><div class="empty-state"><p>正在加载该方案排程…</p></div></article>`;
+  } else if (st.error) {
+    body = `<article class="surface-card"><div class="empty-state"><p>加载排程失败：${escapeHtml(st.error)}</p><button class="btn-ghost" data-action="retry-review-scheme">重试</button></div></article>`;
+  } else if (!asArray(st.entries).length) {
+    body = `<article class="surface-card"><div class="empty-state"><p>该方案没有可显示的排程。</p></div></article>`;
+  } else {
+    body = renderTimeline(st.entries, {
+      title: `方案排程甘特 · ${schemeName}`,
+      canvasId: "gantt-review-scheme",
+      solutionIds: [schemeId],
+    });
+  }
+  return `${schemeCard}${body}`;
 }
 
 function renderReviewLibraryTab() {
@@ -3311,7 +3347,7 @@ function renderReviewLibraryTab() {
       )}
     </div>
     <div id="review-utilization-region">${candidates.length ? renderReviewTypeUtilization() : ""}</div>
-    <div id="review-gantt-region">${candidates.length ? renderReviewGantt(selected) : ""}</div>
+    <div id="review-gantt-region">${candidates.length ? renderReviewGantt() : ""}</div>
   `;
 }
 
@@ -3497,25 +3533,9 @@ function refreshReviewDynamicRegions() {
   }
 
   const ganttRegion = el("review-gantt-region");
-  if (!ganttRegion) return;
-  const existingCanvas = ganttRegion.querySelector("#gantt-review-compare");
-  if (!existingCanvas || !selected.length || !app.optimizeResult?.task_id) {
-    ganttRegion.innerHTML = candidates.length ? renderReviewGantt(selected) : "";
-  } else {
-    const data = currentReviewGanttData(selected);
-    const controls = ganttRegion.querySelector(".review-gantt-controls");
-    const legend = ganttRegion.querySelector(".review-gantt-legend");
-    const status = ganttRegion.querySelector(".review-gantt-status");
-    if (controls) controls.innerHTML = reviewGanttControlsHtml();
-    if (legend) legend.innerHTML = reviewGanttLegendHtml(selected);
-    if (status) status.innerHTML = reviewGanttStatusHtml(selected, data);
-  }
-
-  const data = currentReviewGanttData(selected);
-  if (data) {
-    upsertReviewTimeline(data);
-  } else if (!app.reviewRead.loading) {
-    clearReviewTimeline();
+  if (ganttRegion) {
+    // 单方案甘特由 renderTimeline 走统一的 pendingGantts/mountGantts 渲染路径。
+    ganttRegion.innerHTML = candidates.length ? renderReviewGantt() : "";
   }
   mountOrderComboboxes();
   requestAnimationFrame(() => mountGantts());
@@ -4246,7 +4266,7 @@ function renderInteractiveGraph() {
     <div class="graph-canvas-stats">
       <span>展示节点 <b>${formatInt(graph.visibleNodes.length)}</b> / ${formatInt(graph.totalNodeCount)}</span>
       <span>展示边 <b>${formatInt(graph.visibleEdges.length)}</b> / ${formatInt(graph.totalEdgeCount)}</span>
-      <span>层级 <b>${formatInt((graph.layout.lanes || []).length)}</b> 条</span>
+      <span>类型 <b>${formatInt(Object.keys(graph.typeCounts || {}).length)}</b> 种</span>
       <span>当前订单 <b>${escapeHtml(orderEntityId || "-")}</b></span>
       ${culled
         ? `<span class="graph-canvas-stats-warn">已按焦点/上限收敛，省略 ${formatInt(graph.culledNodeCount)} 节点 · ${formatInt(graph.culledEdgeCount)} 边</span>`
@@ -4367,7 +4387,7 @@ function renderInteractiveGraph() {
     <div class="surface-card graph-workbench">
       <div class="card-head">
         <h3>可交互有向异构图</h3>
-        <p>六条层级泳道（规划链冷色 → 资源暖色），节点按颜色+形状+尺寸三重编码；订单标识色与甘特条块跨视图联动。</p>
+        <p>扁平布局的异构图：节点按类型以颜色+形状+尺寸三重编码，可滚轮缩放、拖拽平移、微调节点位置；订单标识色与甘特条块跨视图联动。</p>
       </div>
       <div class="graph-toolbar">
         <div class="inline-actions">
@@ -4592,6 +4612,7 @@ function selectedGraphOrderOption() {
 
 function mountGantts() {
   mountOrderComboboxes();
+  mountMultiOrderFilters();
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
   const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
   // Destroy orphaned instances: canvas id no longer in the active DOM, or the id exists but
@@ -5815,10 +5836,24 @@ async function handleAction(action, target) {
   if (action === "generate-exact-weighted") return handleGenerateExact("weighted");
   if (action === "export-selected-solution") return handleExportSolution(target?.dataset.id || getSelectedReviewCandidate()?.id);
   if (action === "focus-candidate") {
-    app.reviewDetailId = target.dataset.id;
+    // 查看详情 = 打开该方案「每日机器分类利用率趋势」，并让甘特/利用率表跟随该方案
+    const id = target.dataset.id;
+    app.reviewDetailId = id;
+    app.reviewGanttSchemeId = id;
+    app.reviewUtilTrendId = app.reviewUtilTrendId === id ? null : id;
     persistReviewProgress();
     updateShell();
     return renderCurrentPage();
+  }
+  if (action === "retry-review-scheme") {
+    const id = app.reviewGanttSchemeId;
+    if (id) { delete app.reviewSchemeCache[id]; refreshReviewDynamicRegions(); }
+    return;
+  }
+  if (action === "retry-daily-util") {
+    const id = app.reviewGanttSchemeId;
+    if (id) { delete app.reviewDailyUtilCache[id]; refreshReviewDynamicRegions(); }
+    return;
   }
   if (action === "send-candidate-to-ai") {
     const id = target.dataset.id;
@@ -5954,6 +5989,13 @@ function bindGlobalEvents() {
     if (target.matches("[data-gantt-group-mode]")) {
       app.ganttGroupMode[target.dataset.canvas] = target.value;
       return renderCurrentPage();
+    }
+    if (target.matches("[data-action='select-review-scheme']")) {
+      app.reviewGanttSchemeId = target.value;
+      // 切换方案默认回到"所有订单"（renderTimeline 大实例会自动聚焦首个订单）
+      app.ganttOrderMulti["gantt-review-scheme"] = [];
+      refreshReviewDynamicRegions();
+      return;
     }
     if (target.matches("[data-gantt-machine-type]")) {
       const canvasId = target.dataset.canvas;

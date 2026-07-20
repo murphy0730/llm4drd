@@ -3457,8 +3457,13 @@ async def optimize_solution_schedule(task_id: str, solution_id: str, order_id: O
         bucket["op_count"] += 1
     orders = sorted(facet.values(), key=lambda item: item["order_id"])
 
-    selected_order = order_id or (orders[0]["order_id"] if orders else None)
-    entries = [entry for entry in schedule if str(entry.get("order_id") or "-") == selected_order] if selected_order else []
+    # order_id="__all__" 返回该方案全部订单排程（评审「单方案全量订单」甘特用），否则按单订单返回。
+    if order_id == "__all__":
+        selected_order = "__all__"
+        entries = list(schedule)
+    else:
+        selected_order = order_id or (orders[0]["order_id"] if orders else None)
+        entries = [entry for entry in schedule if str(entry.get("order_id") or "-") == selected_order] if selected_order else []
 
     return _json_safe({
         "task_id": resolved_id,
@@ -3512,6 +3517,73 @@ async def optimize_machine_type_utilization(task_id: str, solution_ids: str):
         "task_id": resolved_id,
         "solutions": order,
         "types": types,
+    })
+
+
+def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict], day_hours: float = 24.0) -> dict:
+    """按天 × 机器类型的利用率：以偏移 0 为第 0 天起点，按 day_hours 滚动分桶。
+
+    单机类型日利用率 = 该类型当日 busy 时长 /（该类型机器数 × 当日窗口小时数），跨天工序按天切分。
+    返回 {days:[1..n], types:[{type_id,type_name,is_critical,per_day:[util|null]}]}。
+    """
+    max_day = -1
+    busy: dict[str, dict[int, float]] = {}  # type_id -> {day -> busy hours}
+    for entry in schedule:
+        machine_id = entry.get("machine_id")
+        start, end = entry.get("start"), entry.get("end")
+        if machine_id not in current_shop.machines or start is None or end is None:
+            continue
+        start, end = float(start), float(end)
+        if end <= start:
+            continue
+        type_id = current_shop.machines[machine_id].type_id
+        day_bucket = busy.setdefault(type_id, {})
+        day = int(start // day_hours)
+        while day * day_hours < end:
+            lo = max(start, day * day_hours)
+            hi = min(end, (day + 1) * day_hours)
+            if hi > lo:
+                day_bucket[day] = day_bucket.get(day, 0.0) + (hi - lo)
+                max_day = max(max_day, day)
+            day += 1
+
+    day_count = max_day + 1 if max_day >= 0 else 0
+    types: list[dict] = []
+    for type_id in sorted(current_shop.machine_types):
+        machine_type = current_shop.machine_types[type_id]
+        machines_total = len(current_shop.get_machines_for_type(type_id)) or 1
+        day_bucket = busy.get(type_id, {})
+        if not day_bucket:
+            continue
+        per_day = []
+        for day in range(day_count):
+            hours = day_bucket.get(day)
+            if hours is None:
+                per_day.append(None)
+            else:
+                per_day.append(round(min(1.0, hours / (machines_total * day_hours)), 4))
+        types.append({
+            "type_id": type_id,
+            "type_name": machine_type.name,
+            "is_critical": machine_type.is_critical,
+            "per_day": per_day,
+        })
+    return {"days": list(range(1, day_count + 1)), "types": types}
+
+
+@app.get("/api/optimize/hybrid/result/{task_id}/machine-type-daily-utilization")
+async def optimize_machine_type_daily_utilization(task_id: str, solution_id: str):
+    """单方案「按天 × 机器类型」利用率（方案评审每日利用率表与趋势用）。"""
+    resolved_id, task = _resolve_hybrid_task(task_id)
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+    solution = _resolve_export_solution(current_shop, task, solution_id)
+    payload = _machine_type_daily_utilization(current_shop, list(solution.get("schedule") or []))
+    return _json_safe({
+        "task_id": resolved_id,
+        "solution_id": solution.get("solution_id", solution_id),
+        **payload,
     })
 
 
