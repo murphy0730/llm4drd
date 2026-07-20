@@ -3483,40 +3483,6 @@ function clearReviewTimeline() {
   try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
 }
 
-function upsertReviewTimeline(data) {
-  if (!data || typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
-  const canvasId = "gantt-review-compare";
-  const entry = app.ganttInstances.find((item) => item.canvasId === canvasId && item.el?.isConnected);
-  if (!entry) {
-    app.pendingGantts.set(canvasId, { entries: [], options: { canvasId }, data });
-    requestAnimationFrame(() => mountGantts());
-    return;
-  }
-  entry.items.clear();
-  entry.groups.clear();
-  if (data.groups.length) entry.groups.add(data.groups);
-  if (data.items.length) entry.items.add(data.items);
-  entry.data = data;
-  entry.timeline.setOptions({
-    min: data.fullWindow?.start,
-    max: data.fullWindow?.end,
-  });
-  const stored = app.ganttViewWindows[canvasId];
-  const selectedWindow = stored?.viewKey === data.viewKey ? stored.window : data.initialWindow;
-  if (selectedWindow) {
-    entry.timeline.setWindow(selectedWindow.start, selectedWindow.end, { animation: false });
-  }
-  if (data.nowISO) {
-    try {
-      entry.timeline.setCustomTime(data.nowISO, "sched-now");
-    } catch (_) {
-      try { entry.timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) {}
-    }
-  } else {
-    try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
-  }
-}
-
 function refreshReviewDynamicRegions() {
   const candidates = getReviewCandidates();
   const selected = getSelectedReviewCandidates();
@@ -5825,12 +5791,6 @@ async function handleAction(action, target) {
     const selectedCount = el("review-selected-count");
     if (selectedCount) selectedCount.textContent = formatInt(app.reviewSelection.length);
     return ensureReviewData(getSelectedReviewCandidates());
-  }
-  if (action === "retry-type-utilization") {
-    return loadReviewData(getSelectedReviewCandidates(), app.reviewRead.orderId, true);
-  }
-  if (action === "retry-review-gantt") {
-    return loadReviewData(getSelectedReviewCandidates(), app.reviewRead.orderId, true);
   }
   if (action === "generate-exact-single") return handleGenerateExact("single");
   if (action === "generate-exact-weighted") return handleGenerateExact("weighted");
