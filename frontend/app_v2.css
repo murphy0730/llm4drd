@@ -336,8 +336,12 @@ a {
 
 .page-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
 }
+/* 宽表（利用率日表 / 方案对比表）只在自身 .table-shell 内横向滚动，
+   不再把网格列撑开导致 .main-stage 整体横滚、其他 TAB 变宽 */
+.page-body > * { min-width: 0; }
 
 .surface-card,
 .surface-panel,
@@ -832,6 +836,34 @@ a {
 .compare-table tbody tr.scheme-c-2 { --scheme-color: var(--success); }
 .compare-table tbody tr.scheme-c-3 { --scheme-color: var(--info); }
 .compare-table tbody tr.is-selected { background: color-mix(in srgb, var(--scheme-color) 8%, transparent); }
+
+/* 方案对比：单元格 = KPI 值 + 与基线 Δ 标注（箭头/绝对值/百分比） */
+.compare-table td { vertical-align: top; }
+.compare-table .cmp-cell { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.cmp-value { white-space: nowrap; }
+.cmp-delta { font-size: 11px; line-height: 1.2; white-space: nowrap; display: inline-flex; align-items: center; gap: 2px; }
+.cmp-arrow { font-size: 9px; }
+.cmp-good { color: var(--success); }
+.cmp-bad { color: var(--danger); }
+.cmp-flat, .cmp-base { color: var(--text-faint); }
+
+/* 方案对比：可配置列下拉 */
+.col-config { position: relative; flex: 0 0 auto; }
+.col-config > summary {
+  cursor: pointer; font-size: 12px; color: var(--primary);
+  list-style: none; padding: 5px 10px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); white-space: nowrap; user-select: none;
+}
+.col-config > summary::-webkit-details-marker { display: none; }
+.col-config[open] > summary { background: var(--surface-strong); }
+.col-config-panel {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-sm);
+  padding: 10px 12px; display: grid; gap: 6px;
+  min-width: 200px; max-height: 320px; overflow-y: auto;
+}
+.col-config-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-soft); white-space: nowrap; }
 
 .op-btn {
   display: inline-flex;
@@ -2578,7 +2610,7 @@ a {
 /* 左侧标签面板：整体不裁切，且首行标签下移一格避开顶部时间轴，防止首行首列文字被盖住 */
 .gantt-canvas .vis-panel.vis-left,
 .gantt-canvas .vis-labelset { overflow: visible; }
-.gantt-canvas .vis-labelset .vis-label:first-child .vis-inner { padding-top: 12px; }
+.gantt-canvas .vis-labelset .vis-label:first-child .vis-inner { padding-top: 16px; }
 
 .gantt-canvas .vis-labelset .vis-label.gantt-group-order {
   background: var(--surface-strong);
@@ -2588,13 +2620,20 @@ a {
   font-weight: 700;
   color: var(--text);
   display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+/* 任务令行与订单行同用 flex + gap，确保「任务令号」与「x道工序」徽标之间有明确间距 */
+.gantt-canvas .vis-labelset .vis-label.gantt-group-task .vis-inner {
+  color: var(--text-soft);
+  font-weight: 600;
+  display: flex;
   align-items: center;
   gap: 6px;
 }
-.gantt-canvas .vis-labelset .vis-label.gantt-group-task .vis-inner { color: var(--text-soft); font-weight: 600; }
 .gantt-canvas .vis-labelset .vis-label.gantt-group-op .vis-inner { display: flex; align-items: center; gap: 6px; font-weight: 500; }
 .gantt-canvas .gantt-op-machine { color: var(--text-faint); font-size: 10.5px; }
-.gantt-canvas .gantt-group-count { margin-left: 6px; color: var(--text-faint); font-size: 10px; font-weight: 400; }
+.gantt-canvas .gantt-group-count { color: var(--text-faint); font-size: 10px; font-weight: 400; }
 .gantt-canvas .gantt-order-dot {
   width: 10px;
   height: 10px;

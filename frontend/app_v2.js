@@ -192,9 +192,11 @@ const app = {
   // 甘特图订单多选筛选：canvasId -> 选中的订单 id 数组（空数组 = 全部订单）
   ganttOrderMulti: {},
   // Excel 风格多选订单筛选组件的已注册数据源：id -> config
-  multiOrderSources: new Map(),
+  multiSelectSources: new Map(),
   // 评审甘特：当前选中的单个方案 id（与勾选集 reviewSelection 解耦）
   reviewGanttSchemeId: null,
+  // 方案对比「列配置」面板展开态（跨区域重渲染保持）
+  reviewColConfigOpen: false,
   // 评审甘特：单方案完整排程缓存 schemeId -> { loading, error, entries, orders }
   reviewSchemeCache: {},
   // 评审：某方案每日机器分类利用率缓存 schemeId -> { loading, error, days, types }
@@ -556,70 +558,76 @@ function mountOrderComboboxes() {
   });
 }
 
-// —— Excel 风格订单多选筛选框（客户端）——
-// config: { id, orders:[{order_id, order_name}], selectedIds:string[], onChange:(ids)=>void }
-// 语义：选中 0 个 = 全部订单；顶部「全选」勾选即选中全部；输入框按订单号模糊过滤。
+// —— 通用「可搜索 + 多选」下拉筛选框（客户端）——
+// 订单与机器类型两个甘特筛选共用同一组件，交互与外观一致。
+// config: { id, options:[{id, label}], selectedIds:string[], onChange:(ids)=>void, noun, unit? }
+// 语义：选中 0 个 = 全部；顶部「全选」勾选即选中全部；输入框按 label 模糊过滤。
 // 交互性能：面板内改动只维护本地工作集，关闭面板时一次性提交（避免每次勾选都重建甘特）。
-const MULTI_ORDER_RENDER_CAP = 300;
+const MULTI_SELECT_RENDER_CAP = 300;
 
-function multiOrderSummary(orders, selectedIds) {
-  const total = orders.length;
-  if (!selectedIds.length || selectedIds.length >= total) return `全部订单（${formatInt(total)}）`;
-  if (selectedIds.length === 1) return String(selectedIds[0]);
-  return `已选 ${formatInt(selectedIds.length)} / ${formatInt(total)} 个订单`;
+function multiSelectSummary(options, selectedIds, noun, unit = "") {
+  const total = options.length;
+  if (!selectedIds.length || selectedIds.length >= total) return `全部${noun}（${formatInt(total)}${unit}）`;
+  if (selectedIds.length === 1) {
+    const only = options.find((o) => o.id === selectedIds[0]);
+    return only ? only.label : String(selectedIds[0]);
+  }
+  return `已选 ${formatInt(selectedIds.length)} / ${formatInt(total)} 个${noun}`;
 }
 
-function renderMultiOrderFilter(config) {
-  app.multiOrderSources.set(config.id, config);
+function renderMultiSelectFilter(config) {
+  const noun = config.noun || "项";
+  const unit = config.unit || "";
+  app.multiSelectSources.set(config.id, { ...config, noun, unit });
   const selected = new Set(config.selectedIds || []);
   return `
-    <div class="multi-order-filter" data-multi-order-filter="${escapeHtml(config.id)}">
-      <button type="button" class="multi-order-summary" data-multi-order-toggle aria-expanded="false">
-        <span class="multi-order-summary-text">${escapeHtml(multiOrderSummary(config.orders, config.selectedIds || []))}</span>
+    <div class="multi-order-filter" data-multi-select-filter="${escapeHtml(config.id)}">
+      <button type="button" class="multi-order-summary" data-multi-select-toggle aria-expanded="false">
+        <span class="multi-order-summary-text">${escapeHtml(multiSelectSummary(config.options, config.selectedIds || [], noun, unit))}</span>
         <span class="multi-order-caret" aria-hidden="true">▾</span>
       </button>
       <div class="multi-order-panel" hidden>
-        <input type="search" class="multi-order-search" placeholder="输入订单号模糊搜索" aria-label="搜索订单号">
-        <label class="multi-order-all"><input type="checkbox" data-multi-order-all> 全选</label>
-        <div class="multi-order-list" role="group" aria-label="订单列表">
-          ${config.orders.slice(0, MULTI_ORDER_RENDER_CAP).map((order) => `
-            <label class="multi-order-option"><input type="checkbox" data-multi-order-id="${escapeHtml(order.order_id)}" ${selected.has(order.order_id) ? "checked" : ""}> ${escapeHtml(order.order_id)}</label>
+        <input type="search" class="multi-order-search" placeholder="输入${escapeHtml(noun)}模糊搜索" aria-label="搜索${escapeHtml(noun)}">
+        <label class="multi-order-all"><input type="checkbox" data-multi-select-all> 全选</label>
+        <div class="multi-order-list" role="group" aria-label="${escapeHtml(noun)}列表">
+          ${config.options.slice(0, MULTI_SELECT_RENDER_CAP).map((opt) => `
+            <label class="multi-order-option"><input type="checkbox" data-multi-select-id="${escapeHtml(opt.id)}" ${selected.has(opt.id) ? "checked" : ""}> ${escapeHtml(opt.label)}</label>
           `).join("")}
         </div>
         <div class="multi-order-foot">
-          ${config.orders.length > MULTI_ORDER_RENDER_CAP ? `<span class="multi-order-more">仅显示前 ${MULTI_ORDER_RENDER_CAP} 条，请输入订单号搜索</span>` : ""}
+          ${config.options.length > MULTI_SELECT_RENDER_CAP ? `<span class="multi-order-more">仅显示前 ${MULTI_SELECT_RENDER_CAP} 条，请输入搜索</span>` : ""}
         </div>
       </div>
     </div>
   `;
 }
 
-function mountMultiOrderFilters() {
-  document.querySelectorAll(".page.active [data-multi-order-filter]:not([data-multi-order-bound='1'])").forEach((container) => {
-    const source = app.multiOrderSources.get(container.dataset.multiOrderFilter);
+function mountMultiSelectFilters() {
+  document.querySelectorAll(".page.active [data-multi-select-filter]:not([data-multi-select-bound='1'])").forEach((container) => {
+    const source = app.multiSelectSources.get(container.dataset.multiSelectFilter);
     if (!source) return;
-    container.dataset.multiOrderBound = "1";
-    const toggle = container.querySelector("[data-multi-order-toggle]");
+    container.dataset.multiSelectBound = "1";
+    const toggle = container.querySelector("[data-multi-select-toggle]");
     const panel = container.querySelector(".multi-order-panel");
     const search = container.querySelector(".multi-order-search");
     const list = container.querySelector(".multi-order-list");
-    const allBox = container.querySelector("[data-multi-order-all]");
+    const allBox = container.querySelector("[data-multi-select-all]");
     const summaryText = container.querySelector(".multi-order-summary-text");
     if (!toggle || !panel || !list || !allBox) return;
 
     const working = new Set(source.selectedIds || []);
-    const total = source.orders.length;
+    const total = source.options.length;
 
     const syncAllBox = () => {
       allBox.checked = working.size === 0 || working.size >= total;
     };
     const updateSummary = () => {
-      summaryText.textContent = multiOrderSummary(source.orders, Array.from(working));
+      summaryText.textContent = multiSelectSummary(source.options, Array.from(working), source.noun, source.unit);
     };
     syncAllBox();
 
     const commit = () => {
-      // 空集合与全选都表示"全部订单"，统一提交为空数组，让上游按无筛选处理
+      // 空集合与全选都表示"全部"，统一提交为空数组，让上游按无筛选处理
       const ids = working.size >= total ? [] : Array.from(working);
       source.onChange(ids);
     };
@@ -644,8 +652,8 @@ function mountMultiOrderFilters() {
       search.addEventListener("input", () => {
         const q = search.value.trim().toLowerCase();
         list.querySelectorAll(".multi-order-option").forEach((opt) => {
-          const id = String(opt.querySelector("input")?.dataset.multiOrderId || "").toLowerCase();
-          opt.hidden = q ? !id.includes(q) : false;
+          const label = String(opt.textContent || "").trim().toLowerCase();
+          opt.hidden = q ? !label.includes(q) : false;
         });
       });
     }
@@ -653,16 +661,16 @@ function mountMultiOrderFilters() {
     allBox.addEventListener("change", () => {
       working.clear();
       if (allBox.checked) {
-        source.orders.forEach((o) => working.add(o.order_id));
+        source.options.forEach((o) => working.add(o.id));
       }
-      list.querySelectorAll("[data-multi-order-id]").forEach((box) => { box.checked = allBox.checked; });
+      list.querySelectorAll("[data-multi-select-id]").forEach((box) => { box.checked = allBox.checked; });
       updateSummary();
     });
 
     list.addEventListener("change", (event) => {
-      const box = event.target.closest("[data-multi-order-id]");
+      const box = event.target.closest("[data-multi-select-id]");
       if (!box) return;
-      if (box.checked) working.add(box.dataset.multiOrderId); else working.delete(box.dataset.multiOrderId);
+      if (box.checked) working.add(box.dataset.multiSelectId); else working.delete(box.dataset.multiSelectId);
       syncAllBox();
       updateSummary();
     });
@@ -1802,7 +1810,7 @@ function ganttWindowPayload(horizonStart, horizonEnd, base, nowOffset, viewKey) 
   };
 }
 
-const GANTT_MACHINE_FILTER_DEFAULT = Object.freeze({ type: "__all__", downtimeOnly: false, query: "", page: 1 });
+const GANTT_MACHINE_FILTER_DEFAULT = Object.freeze({ types: [], downtimeOnly: false, query: "", page: 1 });
 const GANTT_ENTRY_FILTER_DEFAULT = Object.freeze({ status: "__all__", query: "", from: "", to: "" });
 
 function getGanttMachineFilter(canvasId) {
@@ -1824,8 +1832,9 @@ function describeGanttMachine(machineId, machineName, machineMap, opCount) {
 
 function filterGanttMachineRows(rows, filter) {
   const query = String(filter.query || "").trim().toLowerCase();
+  const types = asArray(filter.types);
   return rows.filter((row) => {
-    if (filter.type !== "__all__" && row.typeName !== filter.type) return false;
+    if (types.length && !types.includes(row.typeName)) return false;
     if (filter.downtimeOnly && !row.hasDowntime) return false;
     if (query && !`${row.id} ${row.name}`.toLowerCase().includes(query)) return false;
     return true;
@@ -2229,9 +2238,10 @@ function renderTimeline(entries, options = {}) {
         },
         select: (order) => loadPlanGantt(taskId, solutionId, order.order_id),
       })}`
-    : renderMultiOrderFilter({
+    : renderMultiSelectFilter({
       id: orderComboboxId,
-      orders: orderOptions.map((orderId) => ({ order_id: orderId, order_name: orderNames.get(orderId) || "" })),
+      noun: "订单",
+      options: orderOptions.map((orderId) => ({ id: orderId, label: orderId })),
       selectedIds: localSelectedIds,
       onChange: (ids) => {
         app.ganttOrderMulti[id] = ids;
@@ -2251,13 +2261,23 @@ function renderTimeline(entries, options = {}) {
   ` : "";
 
   const facet = data.machineFacet;
+  const machineTypeControl = facet ? renderMultiSelectFilter({
+    id: `${id}-mtype`,
+    noun: "机器类型",
+    options: facet.typeOptions.map((t) => ({ id: t, label: t })),
+    selectedIds: asArray(facet.filter.types),
+    onChange: (types) => {
+      const f = getGanttMachineFilter(id);
+      f.types = types;
+      f.page = 1;
+      app.ganttMachineFilter[id] = f;
+      return renderCurrentPage();
+    },
+  }) : "";
   const machineFilterBar = facet ? `
     <div class="field-inline gantt-filter-bar">
       <span>机器类型</span>
-      <select data-gantt-machine-type data-canvas="${escapeHtml(id)}">
-        <option value="__all__" ${facet.filter.type === "__all__" ? "selected" : ""}>全部类型（${formatInt(groupMode === "order" ? facet.machineGroups : facet.totalGroups)} 台）</option>
-        ${facet.typeOptions.map((t) => `<option value="${escapeHtml(t)}" ${t === facet.filter.type ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
-      </select>
+      ${machineTypeControl}
       <label class="gantt-filter-check"><input type="checkbox" data-gantt-downtime-only data-canvas="${escapeHtml(id)}" ${facet.filter.downtimeOnly ? "checked" : ""}> 仅含停机（${formatInt(facet.downtimeGroups)} 台）</label>
       <input type="search" class="gantt-filter-query" placeholder="搜索机器号…" value="${escapeHtml(facet.filter.query)}" data-gantt-machine-query data-canvas="${escapeHtml(id)}">
     </div>
@@ -3053,25 +3073,78 @@ function bestMetricValue(preview, key) {
   return direction === "max" ? Math.max(...nums) : Math.min(...nums);
 }
 
+// —— 方案对比：可配置列 + 与基线 KPI 对比 ——
+const REVIEW_COMPARE_HIDDEN_LS = "review-compare-hidden-cols-v1";
+
+function getReviewHiddenColumns() {
+  try {
+    return new Set(asArray(JSON.parse(localStorage.getItem(REVIEW_COMPARE_HIDDEN_LS) || "[]")));
+  } catch {
+    return new Set();
+  }
+}
+
+function setReviewColumnHidden(key, hidden) {
+  const set = getReviewHiddenColumns();
+  if (hidden) set.add(key); else set.delete(key);
+  try { localStorage.setItem(REVIEW_COMPARE_HIDDEN_LS, JSON.stringify(Array.from(set))); } catch { /* 隐私模式忽略 */ }
+}
+
+// Δ 绝对值：利用率/比率类用百分点(pp)，计数类用整数，其余按小时
+function formatDeltaAbs(key, delta) {
+  const sign = delta > 0 ? "+" : "−";
+  const mag = Math.abs(delta);
+  if (isPercentMetric(key)) return `${sign}${(mag * 100).toFixed(1)}pp`;
+  if (isCountMetric(key)) return `${sign}${formatInt(Math.round(mag))}`;
+  return `${sign}${mag.toFixed(1)}h`;
+}
+
+// 单元格相对基线的 Δ 标注：箭头随数值升降，配色按改善(绿)/变差(红)；方向未知不判优、基线自身不标注
+function compareDeltaHtml(item, key, baseline) {
+  if (!baseline || item.id === baseline.id) return "";
+  const value = metricValue(item, key);
+  const base = metricValue(baseline, key);
+  if (value === null || value === undefined || base === null || base === undefined) return "";
+  if (!Number.isFinite(Number(value)) || !Number.isFinite(Number(base))) return "";
+  const delta = Number(value) - Number(base);
+  if (delta === 0) return `<span class="cmp-delta cmp-flat">持平</span>`;
+  const direction = objectiveDirection(key);
+  const improved = direction === "min" ? delta < 0 : direction === "max" ? delta > 0 : null;
+  const tone = improved === null ? "cmp-flat" : improved ? "cmp-good" : "cmp-bad";
+  const arrow = delta > 0 ? "▲" : "▼";
+  const absStr = formatDeltaAbs(key, delta);
+  const baseAbs = Math.abs(Number(base));
+  const pctStr = baseAbs > 0 ? `（${delta > 0 ? "+" : "−"}${Math.abs((delta / baseAbs) * 100).toFixed(1)}%）` : "";
+  return `<span class="cmp-delta ${tone}"><span class="cmp-arrow" aria-hidden="true">${arrow}</span>${absStr}${pctStr}</span>`;
+}
+
 // 方案对比表：单一决策工作台。左列勾选（共享上限 4），中列方案名+来源·模式副标题，
-// 随后主目标 KPI + 其他 KPI（每列最佳值加粗），末列逐行操作。聚焦方案置顶，勾选行按方案色高亮。
+// 随后主目标 KPI + 其他 KPI（可配置列，每列最佳值加粗、并与基线方案对比），末列逐行操作。聚焦方案置顶，勾选行按方案色高亮。
 function renderReviewCandidateComparison() {
   const candidates = getReviewCandidates();
   if (!candidates.length) return "";
   const primaryKeys = activePrimaryObjectiveKeys();
   const extraKeys = REVIEW_KPI_KEYS.filter((key) => !primaryKeys.includes(key));
   const allKeys = [...primaryKeys, ...extraKeys];
+  // 可配置列：默认全部显示，隐藏集存 localStorage；主目标列亦可隐藏
+  const hidden = getReviewHiddenColumns();
+  const visibleKeys = allKeys.filter((key) => !hidden.has(key));
+  // 基线方案：对比的锚点，用于每个 KPI 单元格的 Δ 标注
+  const baseline = candidates.find((item) => item.source === "baseline") || null;
   // 聚焦方案置顶，其余保持原顺序（基线 → 方案 → 参照 → 精确冠军）
   const focusedId = app.reviewDetailId;
   const ordered = focusedId && candidates.some((item) => item.id === focusedId)
     ? [candidates.find((item) => item.id === focusedId), ...candidates.filter((item) => item.id !== focusedId)]
     : candidates;
-  const bestByKey = Object.fromEntries(allKeys.map((key) => [key, bestMetricValue(candidates, key)]));
+  const bestByKey = Object.fromEntries(visibleKeys.map((key) => [key, bestMetricValue(candidates, key)]));
   const cell = (item, key) => {
     const value = metricValue(item, key);
     const best = bestByKey[key];
     const isBest = best !== null && value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) === best;
-    return `<td class="${isBest ? "is-best" : ""}">${isBest ? `<strong>${metricDisplay(item, key)}</strong>` : metricDisplay(item, key)}</td>`;
+    const disp = metricDisplay(item, key);
+    const isBaselineRow = baseline && item.id === baseline.id;
+    const delta = isBaselineRow ? `<span class="cmp-delta cmp-base">基准</span>` : compareDeltaHtml(item, key, baseline);
+    return `<td class="${isBest ? "is-best" : ""}"><div class="cmp-cell"><span class="cmp-value">${isBest ? `<strong>${disp}</strong>` : disp}</span>${delta}</div></td>`;
   };
   const rows = ordered.map((item) => {
     const checked = app.reviewSelection.includes(item.id);
@@ -3082,7 +3155,7 @@ function renderReviewCandidateComparison() {
       <td class="compare-name">
         <strong>${colorIdx >= 0 ? `<span class="scheme-dot" style="background:${schemeColorToken(colorIdx)}"></span>` : ""}${escapeHtml(item.name)}</strong>
       </td>
-      ${allKeys.map((key) => cell(item, key)).join("")}
+      ${visibleKeys.map((key) => cell(item, key)).join("")}
       <td class="compare-ops">
         <button class="op-btn" type="button" data-action="focus-candidate" data-id="${escapeHtml(item.id)}" title="查看详情" aria-label="查看详情">◎</button>
         <button class="op-btn" type="button" data-action="send-candidate-to-ai" data-id="${escapeHtml(item.id)}" title="送入 AI 评审" aria-label="送入 AI 评审">✦</button>
@@ -3090,12 +3163,23 @@ function renderReviewCandidateComparison() {
       </td>
     </tr>`;
   }).join("");
-  const headers = ["方案", ...allKeys.map((key) => getObjectiveLabel(key)), "操作"];
+  const headers = ["方案", ...visibleKeys.map((key) => getObjectiveLabel(key)), "操作"];
+  const colConfig = `
+    <details class="col-config" ${app.reviewColConfigOpen ? "open" : ""}>
+      <summary data-col-config-summary>列配置（${formatInt(visibleKeys.length)}/${formatInt(allKeys.length)}）</summary>
+      <div class="col-config-panel">
+        ${allKeys.map((key) => `<label class="col-config-item"><input type="checkbox" data-compare-col="${escapeHtml(key)}" ${hidden.has(key) ? "" : "checked"}> ${escapeHtml(getObjectiveLabel(key))}</label>`).join("")}
+      </div>
+    </details>`;
+  const baselineHint = baseline ? `每个 KPI 与基线方案（${escapeHtml(baseline.name)}）对比，箭头随数值升降，<span class="cmp-good">绿=改善</span> / <span class="cmp-bad">红=变差</span>，括号内为相对基线百分比。` : "未加载基线方案，暂不显示对比箭头。";
   return `
     <article class="surface-card">
       <div class="card-head">
-        <h3>方案对比</h3>
-        <p>勾选方案即同时驱动利用率对比、甘特联动与 AI 评审（共享上限 4）；「查看详情」将该行置顶。主目标在前、其他 KPI 在后，每列最佳值加粗，横向滚动查看全部。</p>
+        <div>
+          <h3>方案对比</h3>
+          <p>勾选方案即同时驱动利用率对比、甘特联动与 AI 评审（共享上限 4）；「查看详情」将该行置顶。${baselineHint}</p>
+        </div>
+        ${colConfig}
       </div>
       ${renderPrimaryObjectiveBadges(primaryKeys)}
       <div class="table-shell">
@@ -3248,44 +3332,34 @@ function ensureReviewSchemeSchedule(schemeId) {
   return app.reviewSchemeCache[schemeId];
 }
 
+// 甘特展示的方案由「方案对比」操作列的「查看详情」按钮联动（focus-candidate 同步 reviewGanttSchemeId），此处不再单独提供方案选择器。
 function renderReviewGantt() {
   ensureReviewGanttSchemeSelection();
   const candidates = getReviewCandidates();
-  const cardHead = `<div class="card-head"><h3>方案排程甘特（按机器）</h3><p>选择单个方案与一个或多个订单，查看该方案在所选订单上的排产；默认显示前 4 天，可滚动查看全部。</p></div>`;
+  const emptyHead = `<div class="card-head"><h3>排程甘特（按机器）</h3><p>点击「方案对比」操作列的「查看详情」切换方案；默认显示前 4 天，可滚动查看全部。</p></div>`;
   if (!candidates.length) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>暂无方案，请先运行优化或加载参照方案。</p></div></article>`;
+    return `<article class="surface-card">${emptyHead}<div class="empty-state"><p>暂无方案，请先运行优化或加载参照方案。</p></div></article>`;
   }
   if (!app.optimizeResult?.task_id) {
-    return `<article class="surface-card">${cardHead}<div class="empty-state"><p>运行混合优化后，可在此查看方案排产甘特。</p></div></article>`;
+    return `<article class="surface-card">${emptyHead}<div class="empty-state"><p>运行混合优化后，可在此查看方案排产甘特。</p></div></article>`;
   }
   const schemeId = app.reviewGanttSchemeId;
   const schemeName = candidates.find((c) => c.id === schemeId)?.name || schemeId;
-  const schemeCard = `
-    <article class="surface-card">
-      ${cardHead}
-      <div class="field-inline">
-        <span>方案</span>
-        <select data-action="select-review-scheme">
-          ${candidates.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === schemeId ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}
-        </select>
-      </div>
-    </article>`;
   const st = ensureReviewSchemeSchedule(schemeId);
-  let body;
   if (st.loading) {
-    body = `<article class="surface-card"><div class="empty-state"><p>正在加载该方案排程…</p></div></article>`;
-  } else if (st.error) {
-    body = `<article class="surface-card"><div class="empty-state"><p>加载排程失败：${escapeHtml(st.error)}</p><button class="btn-ghost" data-action="retry-review-scheme">重试</button></div></article>`;
-  } else if (!asArray(st.entries).length) {
-    body = `<article class="surface-card"><div class="empty-state"><p>该方案没有可显示的排程。</p></div></article>`;
-  } else {
-    body = renderTimeline(st.entries, {
-      title: `方案排程甘特 · ${schemeName}`,
-      canvasId: "gantt-review-scheme",
-      solutionIds: [schemeId],
-    });
+    return `<article class="surface-card"><div class="empty-state"><p>正在加载该方案排程…</p></div></article>`;
   }
-  return `${schemeCard}${body}`;
+  if (st.error) {
+    return `<article class="surface-card"><div class="empty-state"><p>加载排程失败：${escapeHtml(st.error)}</p><button class="btn-ghost" data-action="retry-review-scheme">重试</button></div></article>`;
+  }
+  if (!asArray(st.entries).length) {
+    return `<article class="surface-card"><div class="empty-state"><p>该方案没有可显示的排程。</p></div></article>`;
+  }
+  return renderTimeline(st.entries, {
+    title: `排程甘特 · ${schemeName}`,
+    canvasId: "gantt-review-scheme",
+    solutionIds: [schemeId],
+  });
 }
 
 function renderReviewLibraryTab() {
@@ -4578,7 +4652,7 @@ function selectedGraphOrderOption() {
 
 function mountGantts() {
   mountOrderComboboxes();
-  mountMultiOrderFilters();
+  mountMultiSelectFilters();
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
   const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
   // Destroy orphaned instances: canvas id no longer in the active DOM, or the id exists but
@@ -5868,6 +5942,12 @@ function bindGlobalEvents() {
   });
 
   document.addEventListener("click", async (event) => {
+    // 列配置面板开合：镜像 <details> 原生状态，供跨区域重渲染后保持展开
+    const colCfgSummary = event.target.closest("[data-col-config-summary]");
+    if (colCfgSummary) {
+      app.reviewColConfigOpen = !app.reviewColConfigOpen;
+      return;
+    }
     const ganttPageTarget = event.target.closest("[data-gantt-page]");
     if (ganttPageTarget && !ganttPageTarget.disabled) {
       event.preventDefault();
@@ -5946,23 +6026,14 @@ function bindGlobalEvents() {
       updateOptimizeBudgetHint();
       return;
     }
-    if (target.matches("[data-gantt-group-mode]")) {
-      app.ganttGroupMode[target.dataset.canvas] = target.value;
-      return renderCurrentPage();
-    }
-    if (target.matches("[data-action='select-review-scheme']")) {
-      app.reviewGanttSchemeId = target.value;
-      // 切换方案默认回到"所有订单"（renderTimeline 大实例会自动聚焦首个订单）
-      app.ganttOrderMulti["gantt-review-scheme"] = [];
+    if (target.matches("[data-compare-col]")) {
+      app.reviewColConfigOpen = true;
+      setReviewColumnHidden(target.dataset.compareCol, !target.checked);
       refreshReviewDynamicRegions();
       return;
     }
-    if (target.matches("[data-gantt-machine-type]")) {
-      const canvasId = target.dataset.canvas;
-      const filter = getGanttMachineFilter(canvasId);
-      filter.type = target.value;
-      filter.page = 1;
-      app.ganttMachineFilter[canvasId] = filter;
+    if (target.matches("[data-gantt-group-mode]")) {
+      app.ganttGroupMode[target.dataset.canvas] = target.value;
       return renderCurrentPage();
     }
     if (target.matches("[data-gantt-downtime-only]")) {
