@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM4DRD 智能调度决策中枢 · 重构设计稿</title>
+<style>
+/* ============================================================
+   LLM4DRD 前端重构设计稿 v1.0
+   - 保留现有浅色基调与主色 #2f6feb
+   - 工作流成为界面骨架：顶栏 5 步进度条全局常驻
+   - 侧栏导航按「流程 / 分析 / 系统」分组，带状态灯
+   ============================================================ */
+:root {
+  color-scheme: light;
+  --canvas: #f6f7f9;
+  --surface: #ffffff;
+  --surface-strong: #f2f4f7;
+  --inset: #eef0f3;
+  --line: rgba(9, 10, 14, 0.09);
+  --line-strong: rgba(9, 10, 14, 0.17);
+  --text: #101216;
+  --text-soft: #585d66;
+  --text-faint: #8b9099;
+  --primary: #2f6feb;
+  --primary-strong: #1d53c0;
+  --primary-soft: rgba(47, 111, 235, 0.09);
+  --accent: #c2620a;
+  --accent-soft: rgba(194, 98, 10, 0.1);
+  --success: #12a150;
+  --success-soft: rgba(18, 161, 80, 0.1);
+  --warning: #b45309;
+  --warning-soft: rgba(180, 83, 9, 0.1);
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.08);
+  --info: #0e8e7f;
+  --info-soft: rgba(14, 142, 127, 0.1);
+  --shadow-sm: 0 1px 2px rgba(9, 10, 14, 0.05);
+  --shadow-md: 0 6px 20px rgba(9, 10, 14, 0.08);
+  --shadow-lg: 0 16px 44px rgba(9, 10, 14, 0.12);
+  --r-sm: 5px; --r-md: 8px; --r-lg: 12px;
+  --topbar-h: 56px;
+  --flowbar-h: 64px;
+  --sidebar-w: 232px;
+  --font: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+  --font-display: "Geist", "PingFang SC", "HarmonyOS Sans SC", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: var(--canvas); color: var(--text); font-family: var(--font); font-size: 14px; -webkit-font-smoothing: antialiased; }
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, select, textarea { font-family: inherit; font-size: 13px; min-height: 36px; padding: 7px 10px; border-radius: var(--r-sm); border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(47,111,235,0.13); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 布局骨架 ---------- */
+.app { display: grid; grid-template-rows: var(--topbar-h) var(--flowbar-h) 1fr; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; grid-template-areas: "topbar topbar" "flowbar flowbar" "sidebar main"; }
+.topbar { grid-area: topbar; display: flex; align-items: center; gap: 16px; padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--line); z-index: 30; }
+.flowbar { grid-area: flowbar; display: flex; align-items: stretch; background: var(--surface); border-bottom: 1px solid var(--line); padding: 0 24px; z-index: 29; }
+.sidebar { grid-area: sidebar; background: var(--surface); border-right: 1px solid var(--line); padding: 18px 12px; overflow-y: auto; display: flex; flex-direction: column; }
+.main { grid-area: main; overflow-y: auto; }
+
+/* ---------- 顶栏 ---------- */
+.brand { display: flex; align-items: center; gap: 10px; min-width: 200px; }
+.brand-mark { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: linear-gradient(148deg, #2f6feb, #6d5de8); box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), var(--shadow-sm); }
+.brand-mark svg { width: 19px; height: 19px; fill: none; stroke: #fff; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+.brand h1 { font-family: var(--font-display); font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+.brand p { font-size: 10px; letter-spacing: 0.12em; color: var(--text-faint); text-transform: uppercase; margin-top: 1px; }
+.scene-pill { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: var(--r-md); border: 1px solid var(--line); background: var(--surface-strong); font-size: 12.5px; transition: border-color .15s var(--ease); }
+.scene-pill:hover { border-color: var(--line-strong); }
+.scene-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+.scene-pill small { color: var(--text-faint); font-family: var(--font-mono); font-size: 10.5px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.llm-status { display: flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; font-size: 11.5px; background: var(--success-soft); color: var(--success); border: 1px solid rgba(18,161,80,0.2); }
+.llm-status .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--success); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(18,161,80,0.35);} 50% { box-shadow: 0 0 0 5px rgba(18,161,80,0);} }
+.kpi-strip { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface); }
+.kpi-strip .cell { padding: 5px 14px; border-right: 1px solid var(--line); text-align: center; }
+.kpi-strip .cell:last-child { border-right: 0; }
+.kpi-strip span { display: block; font-size: 9.5px; color: var(--text-faint); }
+.kpi-strip strong { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 流程进度条（全局常驻） ---------- */
+.flow-step { position: relative; flex: 1; display: flex; align-items: center; gap: 10px; padding: 0 18px; cursor: pointer; transition: background .15s var(--ease); border-right: 1px solid var(--line); }
+.flow-step:last-child { border-right: 0; }
+.flow-step:hover { background: var(--surface-strong); }
+.flow-step .idx { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-family: var(--font-mono); font-size: 11px; flex-shrink: 0; border: 1.5px solid var(--line-strong); color: var(--text-faint); background: var(--surface); }
+.flow-step.done .idx { background: var(--success); border-color: var(--success); color: #fff; }
+.flow-step.current .idx { background: var(--primary); border-color: var(--primary); color: #fff; box-shadow: 0 0 0 4px var(--primary-soft); }
+.flow-step.blocked .idx { border-color: var(--warning); color: var(--warning); }
+.flow-step strong { display: block; font-size: 12.5px; }
+.flow-step small { display: block; font-size: 10px; color: var(--text-faint); margin-top: 1px; }
+.flow-step.done small { color: var(--success); }
+.flow-step.current small { color: var(--primary); }
+.flow-step.blocked small { color: var(--warning); }
+.flow-step.current { background: linear-gradient(to bottom, var(--primary-soft), transparent); box-shadow: inset 0 -2px 0 var(--primary); }
+
+/* ---------- 侧栏导航 ---------- */
+.nav-group { margin-bottom: 22px; }
+.nav-title { padding: 0 10px; margin-bottom: 6px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; color: var(--text-faint); }
+.nav-item { position: relative; width: 100%; display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 8px 10px; border-radius: var(--r-md); color: var(--text-soft); font-size: 13px; text-align: left; transition: all .14s var(--ease); }
+.nav-item:hover { color: var(--text); background: var(--surface-strong); }
+.nav-item.active { color: var(--primary); background: var(--primary-soft); font-weight: 550; }
+.nav-item .nav-idx { font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); width: 18px; }
+.nav-item.active .nav-idx { color: var(--primary); }
+.nav-item .lamp { width: 7px; height: 7px; border-radius: 50%; margin-left: auto; flex-shrink: 0; }
+.lamp.ok { background: var(--success); }
+.lamp.warn { background: var(--warning); }
+.lamp.idle { background: var(--line-strong); }
+.lamp.run { background: var(--primary); animation: pulse 1.6s infinite; }
+.nav-item .badge { margin-left: auto; font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 999px; background: var(--primary-soft); color: var(--primary); }
+.nav-item.locked { opacity: 0.45; }
+.nav-spacer { flex: 1; }
+.nav-note { margin: 0 4px; padding: 10px 12px; border-radius: var(--r-md); background: var(--accent-soft); border: 1px solid rgba(194,98,10,0.2); font-size: 11px; color: var(--accent); line-height: 1.5; }
+.nav-note strong { display: block; margin-bottom: 2px; }
+
+/* ---------- 页面通用 ---------- */
+.page { display: none; animation: enter .3s var(--ease) both; }
+.page.active { display: block; }
+@keyframes enter { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: none;} }
+.page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 26px 36px 22px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.eyebrow { display: block; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px; }
+.page-head h2 { font-family: var(--font-display); font-size: 23px; font-weight: 600; letter-spacing: -0.02em; }
+.page-head .desc { margin-top: 6px; color: var(--text-soft); font-size: 13px; max-width: 62ch; }
+.page-head-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.page-body { padding: 26px 36px 60px; max-width: 1480px; margin: 0 auto; }
+.precheck { display: flex; align-items: center; gap: 10px; margin: 0 36px; margin-top: 18px; padding: 11px 16px; border-radius: var(--r-md); font-size: 12.5px; }
+.precheck.ok { background: var(--success-soft); color: var(--success); border: 1px solid rgba(18,161,80,0.18); }
+.precheck.warn { background: var(--warning-soft); color: var(--warning); border: 1px solid rgba(180,83,9,0.2); }
+.precheck .grow { flex: 1; }
+.link-btn { color: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; font-size: 12.5px; }
+
+/* ---------- 按钮 ---------- */
+.btn { min-height: 34px; padding: 7px 14px; border-radius: var(--r-md); font-size: 12.5px; font-weight: 550; transition: all .14s var(--ease); display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { transform: translateY(-1px); }
+.btn-primary { background: var(--primary); color: #fff; box-shadow: var(--shadow-sm); }
+.btn-primary:hover { background: var(--primary-strong); }
+.btn-secondary { background: var(--surface); border: 1px solid var(--line-strong); color: var(--text); }
+.btn-ghost { color: var(--text-soft); border: 1px solid var(--line); }
+.btn-ghost:hover { color: var(--text); background: var(--surface-strong); }
+.btn-accent { background: var(--accent); color: #fff; }
+.btn-accent:hover { background: #a85508; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+/* ---------- 卡片 ---------- */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); }
+.card-pad { padding: 20px 22px; }
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+.card-head h3 { font-family: var(--font-display); font-size: 15px; font-weight: 600; }
+.card-head p { color: var(--text-soft); font-size: 12px; margin-top: 3px; }
+.state-card { border-left: 3px solid var(--primary); }
+.state-card.success { border-left-color: var(--success); }
+.state-card.warning { border-left-color: var(--warning); }
+.state-card.danger { border-left-color: var(--danger); }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.stack { display: grid; gap: 18px; }
+.mt-18 { margin-top: 18px; }
+
+/* ---------- KPI / 键值 ---------- */
+.kpi-card { padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); }
+.kpi-card span { font-size: 11px; color: var(--text-faint); }
+.kpi-card strong { display: block; margin-top: 6px; font-family: var(--font-mono); font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.kpi-card small { display: block; margin-top: 5px; font-size: 10.5px; color: var(--text-faint); }
+.kv-grid { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.kv-grid > div { padding: 12px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface); }
+.kv-grid span { display: block; font-size: 10.5px; color: var(--text-faint); }
+.kv-grid strong { display: block; margin-top: 4px; font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 表格 ---------- */
+.tbl-wrap { border: 1px solid var(--line); border-radius: var(--r-md); overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th { text-align: left; padding: 10px 14px; font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-faint); background: var(--surface-strong); border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+tr.is-selected td { background: var(--primary-soft); }
+tr.is-best td { background: var(--success-soft); }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; font-size: 10.5px; font-weight: 550; }
+.chip.ok { color: var(--success); background: var(--success-soft); }
+.chip.warn { color: var(--warning); background: var(--warning-soft); }
+.chip.err { color: var(--danger); background: var(--danger-soft); }
+.chip.info { color: var(--info); background: var(--info-soft); }
+.chip.blue { color: var(--primary); background: var(--primary-soft); }
+.chip.neutral { color: var(--text-soft); background: var(--surface-strong); }
+.delta { font-family: var(--font-mono); font-size: 10.5px; margin-left: 6px; }
+.delta.up-bad { color: var(--danger); }
+.delta.down-good { color: var(--success); }
+.best-tag { font-size: 9.5px; color: var(--success); font-weight: 600; margin-left: 5px; }
+
+/* ---------- Tab ---------- */
+.tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-strong); }
+.tab { padding: 7px 16px; border-radius: 6px; font-size: 12.5px; color: var(--text-soft); transition: all .14s var(--ease); }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); background: var(--surface); box-shadow: var(--shadow-sm); font-weight: 550; }
+
+/* ---------- 数据导入页 ---------- */
+.drop-hero { border: 1.5px dashed var(--line-strong); border-radius: var(--r-lg); padding: 44px 32px; text-align: center; background: linear-gradient(180deg, var(--primary-soft), transparent 70%); transition: all .2s var(--ease); }
+.drop-hero:hover { border-color: var(--primary); background: var(--primary-soft); }
+.drop-hero .icon { width: 52px; height: 52px; margin: 0 auto 14px; border-radius: 14px; display: grid; place-items: center; background: var(--surface); box-shadow: var(--shadow-md); }
+.drop-hero .icon svg { width: 26px; height: 26px; stroke: var(--primary); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.drop-hero h3 { font-family: var(--font-display); font-size: 17px; }
+.drop-hero p { margin: 8px auto 18px; color: var(--text-soft); font-size: 12.5px; max-width: 56ch; }
+.sheet-tags { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 20px; }
+.sheet-tags code { font-family: var(--font-mono); font-size: 10px; padding: 3px 8px; border-radius: 5px; background: var(--surface); border: 1px solid var(--line); color: var(--text-soft); }
+.valid-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line); }
+.valid-summary > div { padding: 16px; text-align: center; }
+.valid-summary .ok { background: var(--success-soft); }
+.valid-summary .warn { background: var(--warning-soft); }
+.valid-summary .err { background: var(--danger-soft); }
+.valid-summary strong { display: block; font-family: var(--font-mono); font-size: 24px; }
+.valid-summary .ok strong { color: var(--success); }
+.valid-summary .warn strong { color: var(--warning); }
+.valid-summary .err strong { color: var(--danger); }
+.valid-summary span { font-size: 11px; color: var(--text-soft); }
+
+/* ---------- 图谱页 ---------- */
+.graph-canvas { position: relative; height: 480px; border: 1px solid var(--line); border-radius: var(--r-md); background: radial-gradient(circle, rgba(9,10,14,0.06) 1px, transparent 1px); background-size: 22px 22px; overflow: hidden; }
+.graph-canvas svg { width: 100%; height: 100%; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-soft); }
+.legend i { width: 10px; height: 10px; border-radius: 3px; }
+
+/* ---------- 仿真页 ---------- */
+.rule-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.rule-card { text-align: left; padding: 14px 16px; border: 1.5px solid var(--line); border-radius: var(--r-md); background: var(--surface); transition: all .15s var(--ease); }
+.rule-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.rule-card.selected { border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 3px rgba(47,111,235,0.08); }
+.rule-card strong { font-family: var(--font-mono); font-size: 14px; }
+.rule-card p { margin-top: 5px; font-size: 11.5px; color: var(--text-soft); line-height: 1.5; }
+.banner-warn { display: flex; gap: 12px; padding: 14px 18px; border-radius: var(--r-md); background: var(--warning-soft); border: 1px solid rgba(180,83,9,0.25); color: var(--warning); font-size: 12.5px; line-height: 1.6; }
+.gantt-mock { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.gantt-row { display: grid; grid-template-columns: 110px 1fr; border-bottom: 1px solid var(--line); }
+.gantt-row:last-child { border-bottom: 0; }
+.gantt-row .mname { padding: 10px 12px; font-family: var(--font-mono); font-size: 11px; background: var(--surface-strong); border-right: 1px solid var(--line); display: flex; align-items: center; }
+.gantt-track { position: relative; height: 40px; background: repeating-linear-gradient(to right, transparent, transparent calc(100%/14 - 1px), var(--line) calc(100%/14 - 1px), var(--line) calc(100%/14)); }
+.gbar { position: absolute; top: 8px; height: 24px; border-radius: 5px; font-size: 9.5px; color: #fff; display: flex; align-items: center; padding: 0 7px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; }
+.gbar.down { background: repeating-linear-gradient(45deg, rgba(9,10,14,0.16), rgba(9,10,14,0.16) 4px, transparent 4px, transparent 8px), var(--surface-strong); border: 1px dashed var(--line-strong); color: var(--text-faint); }
+
+/* ---------- 优化页 ---------- */
+.opt-layout { display: grid; grid-template-columns: 400px 1fr; gap: 18px; align-items: start; }
+.sticky-col { position: sticky; top: 18px; }
+.obj-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.obj-pill { display: flex; gap: 9px; padding: 10px 12px; border: 1.5px solid var(--line); border-radius: var(--r-md); cursor: pointer; transition: all .14s var(--ease); }
+.obj-pill:hover { border-color: var(--line-strong); }
+.obj-pill.on { border-color: var(--primary); background: var(--primary-soft); }
+.obj-pill input { display: none; }
+.obj-pill .box { width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid var(--line-strong); flex-shrink: 0; margin-top: 2px; display: grid; place-items: center; color: transparent; font-size: 10px; }
+.obj-pill.on .box { background: var(--primary); border-color: var(--primary); color: #fff; }
+.obj-pill strong { font-size: 12px; display: block; }
+.obj-pill small { font-size: 10px; color: var(--text-faint); display: block; margin-top: 2px; line-height: 1.4; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-grid label span { display: block; font-size: 11px; color: var(--text-soft); margin-bottom: 5px; }
+.form-grid input, .form-grid select { width: 100%; }
+.budget-hint { margin-top: 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--accent-soft); color: var(--accent); font-size: 11.5px; line-height: 1.5; }
+.progress-ring-wrap { display: flex; align-items: center; gap: 22px; }
+.ring { position: relative; width: 108px; height: 108px; flex-shrink: 0; }
+.ring svg { transform: rotate(-90deg); }
+.ring .pct { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--font-mono); font-size: 21px; font-weight: 600; }
+.phase-line { display: flex; gap: 8px; margin-top: 16px; }
+.phase { flex: 1; padding: 9px 12px; border-radius: var(--r-md); font-size: 11px; background: var(--surface-strong); color: var(--text-faint); border: 1px solid var(--line); }
+.phase.on { background: var(--primary-soft); color: var(--primary); border-color: rgba(47,111,235,0.25); font-weight: 550; }
+.phase.done { background: var(--success-soft); color: var(--success); border-color: rgba(18,161,80,0.2); }
+.bar-track { height: 6px; border-radius: 999px; background: var(--inset); overflow: hidden; margin-top: 14px; }
+.bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--primary), #6d5de8); transition: width .5s var(--ease); }
+.log-box { max-height: 150px; overflow-y: auto; padding: 12px 14px; border-radius: var(--r-md); background: #101216; color: #9be3b3; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.7; }
+
+/* ---------- 评审页 ---------- */
+.review-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 26px; border-radius: var(--r-lg); background: linear-gradient(120deg, #1b2b4d, #2f6feb 70%, #6d5de8); color: #fff; }
+.review-hero h3 { font-family: var(--font-display); font-size: 18px; }
+.review-hero p { margin-top: 6px; font-size: 12.5px; opacity: 0.82; max-width: 58ch; }
+.review-hero .stat-cells { display: flex; border: 1px solid rgba(255,255,255,0.25); border-radius: var(--r-md); overflow: hidden; }
+.review-hero .stat-cells > div { padding: 10px 20px; border-right: 1px solid rgba(255,255,255,0.25); text-align: center; }
+.review-hero .stat-cells > div:last-child { border-right: 0; }
+.review-hero span { display: block; font-size: 10px; opacity: 0.75; }
+.review-hero strong { font-family: var(--font-mono); font-size: 19px; }
+.sel-list { display: grid; gap: 10px; }
+.sol-card { display: flex; align-items: center; gap: 13px; padding: 14px 16px; border: 1.5px solid var(--line); border-radius: var(--r-md); background: var(--surface); text-align: left; transition: all .15s var(--ease); width: 100%; }
+.sol-card:hover { border-color: var(--line-strong); }
+.sol-card.is-selected { border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 3px rgba(47,111,235,0.07); }
+.sol-card.is-best { border-color: var(--success); }
+.sol-card .check { width: 19px; height: 19px; border-radius: 6px; border: 1.5px solid var(--line-strong); display: grid; place-items: center; font-size: 11px; color: transparent; flex-shrink: 0; }
+.sol-card.is-selected .check { background: var(--primary); border-color: var(--primary); color: #fff; }
+.sol-card .sname { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+.sol-card .smeta { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: var(--font-mono); }
+.sol-card .smetrics { margin-left: auto; text-align: right; flex-shrink: 0; }
+.sol-card .smetrics strong { font-family: var(--font-mono); font-size: 15px; display: block; }
+.sol-card .smetrics span { font-size: 10px; color: var(--text-faint); }
+.rule-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rule-chip { padding: 7px 13px; border-radius: 999px; border: 1px solid var(--line-strong); font-family: var(--font-mono); font-size: 11.5px; transition: all .14s var(--ease); }
+.rule-chip:hover { border-color: var(--primary); color: var(--primary); }
+.rule-chip.ready { background: var(--success-soft); border-color: rgba(18,161,80,0.25); color: var(--success); }
+.rule-chip.computing { background: var(--warning-soft); border-color: rgba(180,83,9,0.25); color: var(--warning); }
+.util-grid { display: grid; gap: 10px; }
+.util-row { display: grid; grid-template-columns: 130px 1fr 58px; align-items: center; gap: 14px; }
+.util-row .uname { font-size: 12px; font-family: var(--font-mono); }
+.util-track { height: 10px; border-radius: 999px; background: var(--inset); overflow: hidden; }
+.util-fill { height: 100%; border-radius: 999px; }
+.util-row .uval { font-family: var(--font-mono); font-size: 12px; text-align: right; }
+.chat-stream { display: grid; gap: 12px; max-height: 330px; overflow-y: auto; padding: 4px 2px; }
+.bubble { max-width: 88%; padding: 12px 15px; border-radius: 14px; font-size: 12.5px; line-height: 1.65; }
+.bubble strong { display: block; font-size: 10.5px; margin-bottom: 5px; opacity: 0.7; }
+.bubble.ai { background: var(--surface-strong); border: 1px solid var(--line); border-top-left-radius: 4px; justify-self: start; }
+.bubble.me { background: var(--primary); color: #fff; border-top-right-radius: 4px; justify-self: end; }
+.chat-input { display: flex; gap: 10px; margin-top: 14px; }
+.chat-input textarea { flex: 1; resize: none; }
+.quick-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* ---------- 概览页 ---------- */
+.hero { display: flex; justify-content: space-between; gap: 26px; padding: 26px 30px; border-radius: var(--r-lg); background: linear-gradient(120deg, #101828, #1d3a75 65%, #2f6feb); color: #fff; }
+.hero h3 { font-family: var(--font-display); font-size: 21px; letter-spacing: -0.01em; }
+.hero p { margin: 9px 0 18px; font-size: 13px; opacity: 0.8; max-width: 60ch; line-height: 1.6; }
+.hero .cells { display: flex; border: 1px solid rgba(255,255,255,0.22); border-radius: var(--r-md); overflow: hidden; align-self: center; }
+.hero .cells > div { padding: 14px 24px; border-right: 1px solid rgba(255,255,255,0.22); }
+.hero .cells > div:last-child { border-right: 0; }
+.hero span { font-size: 10px; opacity: 0.7; display: block; }
+.hero strong { font-family: var(--font-mono); font-size: 17px; display: block; margin-top: 4px; }
+.btn-white { background: #fff; color: var(--primary); }
+.btn-white:hover { background: #eef2fd; }
+
+/* ---------- 导出页 ---------- */
+.export-card { display: flex; gap: 16px; padding: 20px 22px; align-items: center; }
+.export-card .eicon { width: 44px; height: 44px; border-radius: 11px; display: grid; place-items: center; flex-shrink: 0; background: var(--primary-soft); color: var(--primary); }
+.export-card .eicon.green { background: var(--success-soft); color: var(--success); }
+.export-card .eicon.orange { background: var(--accent-soft); color: var(--accent); }
+.export-card h4 { font-size: 14px; }
+.export-card p { font-size: 12px; color: var(--text-soft); margin-top: 4px; line-height: 1.5; }
+.export-card .btn { margin-left: auto; flex-shrink: 0; }
+
+/* ---------- 通用工具 ---------- */
+.subtle { font-size: 11.5px; color: var(--text-faint); line-height: 1.6; }
+.empty { padding: 42px 20px; text-align: center; color: var(--text-faint); }
+.empty h4 { color: var(--text-soft); font-size: 14px; margin-bottom: 6px; }
+.empty p { font-size: 12px; margin-bottom: 16px; }
+.section-gap { margin-top: 22px; }
+.toast { position: fixed; bottom: 24px; right: 24px; z-index: 99; padding: 13px 18px; border-radius: var(--r-md); background: #101216; color: #fff; font-size: 12.5px; box-shadow: var(--shadow-lg); animation: toast-in .25s var(--ease); display: flex; gap: 9px; align-items: center; max-width: 380px; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px);} to { opacity: 1; transform: none;} }
+.w120 { width: 120px; }
+@media (max-width: 1100px) { .grid-4, .grid-3 { grid-template-columns: 1fr 1fr; } .opt-layout { grid-template-columns: 1fr; } .rule-grid { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= 顶栏 ================= -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24"><path d="M7.2 18.4 18.6 7M15.1 5.7l3.2-1.6 1.6 3.2-1.7 1.6M5.2 15.8c-1.7-2.5-1.4-5.6.6-7.8M8.1 17.7c-2.7-3.5-2.4-8.4.7-11.5"/></svg></div>
+      <div><h1>LLM4DRD</h1><p>智能调度决策中枢</p></div>
+    </div>
+    <button class="scene-pill" data-goto="import">
+      <span class="dot"></span>
+      <span>2026Q3-总装车间-演示实例</span>
+      <small>6订单 · 86工序</small>
+    </button>
+    <div class="topbar-right">
+      <div class="kpi-strip">
+        <div class="cell"><span>订单</span><strong>6</strong></div>
+        <div class="cell"><span>任务令</span><strong>12</strong></div>
+        <div class="cell"><span>工序</span><strong>86</strong></div>
+        <div class="cell"><span>机器</span><strong>9</strong></div>
+        <div class="cell"><span>工装</span><strong>7</strong></div>
+        <div class="cell"><span>人员</span><strong>18</strong></div>
+      </div>
+      <button class="llm-status" data-goto="llm" title="大模型连接状态"><span class="pulse"></span>LLM 已连接</button>
+    </div>
+  </header>
+
+  <!-- ================= 流程进度条（全局常驻） ================= -->
+  <nav class="flowbar" id="flowbar">
+    <div class="flow-step done" data-goto="import"><span class="idx">✓</span><div><strong>数据导入</strong><small>校验通过 · 3 警告</small></div></div>
+    <div class="flow-step done" data-goto="graph"><span class="idx">✓</span><div><strong>图谱构建</strong><small>428 节点 · 1,204 边</small></div></div>
+    <div class="flow-step done" data-goto="simulate"><span class="idx">✓</span><div><strong>规则仿真</strong><small>ATC · 可行</small></div></div>
+    <div class="flow-step current" data-goto="optimize"><span class="idx">4</span><div><strong>优化求解</strong><small>运行中 · 63%</small></div></div>
+    <div class="flow-step" data-goto="review"><span class="idx">5</span><div><strong>方案评审</strong><small>待开始 · 已有 4 候选</small></div></div>
+  </nav>
+
+  <!-- ================= 侧栏 ================= -->
+  <aside class="sidebar">
+    <div class="nav-group">
+      <div class="nav-title">调度流程</div>
+      <button class="nav-item" data-goto="import"><span class="nav-idx">01</span>数据导入<span class="lamp ok"></span></button>
+      <button class="nav-item" data-goto="graph"><span class="nav-idx">02</span>图谱构建<span class="lamp ok"></span></button>
+      <button class="nav-item" data-goto="simulate"><span class="nav-idx">03</span>规则仿真<span class="lamp ok"></span></button>
+      <button class="nav-item active" data-goto="optimize"><span class="nav-idx">04</span>优化求解<span class="lamp run"></span></button>
+      <button class="nav-item" data-goto="review"><span class="nav-idx">05</span>方案评审<span class="badge">2/4</span></button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-title">分析</div>
+      <button class="nav-item" data-goto="dashboard"><span class="nav-idx">◆</span>工作概览</button>
+    </div>
+    <div class="nav-spacer"></div>
+    <div class="nav-note"><strong>优化运行中</strong>预计剩余约 42 秒，完成后会自动提示进入方案评审。</div>
+    <div class="nav-group" style="margin-top:18px">
+      <div class="nav-title">系统</div>
+      <button class="nav-item" data-goto="export"><span class="nav-idx">⇩</span>导出与交付</button>
+      <button class="nav-item" data-goto="llm"><span class="nav-idx">⚡</span>大模型连接<span class="lamp ok"></span></button>
+      <button class="nav-item" data-goto="system"><span class="nav-idx">⚙</span>系统状态</button>
+    </div>
+  </aside>
+
+  <!-- ================= 主区域 ================= -->
+  <main class="main">
+
+    <!-- ======== 页 1 · 数据导入 ======== -->
+    <section class="page" id="page-import">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Step 01 · Data Import</span>
+          <h2>数据导入</h2>
+          <p class="desc">导入排产场景 Excel，系统会自动运行数据强校验；校验通过后即可构建图谱、进入仿真。</p>
+        </div>
+        <div class="page-head-actions">
+          <button class="btn btn-ghost">下载模板</button>
+          <button class="btn btn-primary">选择 Excel 导入</button>
+        </div>
+      </div>
+      <div class="precheck ok">✓ 数据强校验已通过（3 条警告不影响仿真）<span class="grow"></span><button class="link-btn" data-goto="graph">下一步：图谱构建 →</button></div>
+      <div class="page-body stack">
+        <div class="drop-hero">
+          <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div>
+          <h3>拖入 Excel，或点击选择文件</h3>
+          <p>支持 .xlsx / .xls / .xlsm，需包含以下 Sheet 中的至少 planning_context 与 orders：</p>
+          <div class="sheet-tags">
+            <code>planning_context</code><code>orders</code><code>tasks</code><code>operations</code><code>machines</code><code>toolings</code><code>personnel</code><code>downtimes</code><code>initial_state</code>
+          </div>
+          <button class="btn btn-primary">选择 Excel</button>
+          <button class="btn btn-ghost" style="margin-left:8px">下载模板</button>
+        </div>
+
+        <div class="card card-pad">
+          <div class="card-head">
+            <div><h3>数据强校验</h3><p>覆盖数据完整性、关联关系与约束条件；错误级问题会导致仿真/优化静默失败。</p></div>
+            <span class="chip ok">校验通过 · 有警告</span>
+          </div>
+          <div class="valid-summary">
+            <div class="ok"><strong>213</strong><span>通过项</span></div>
+            <div class="warn"><strong>3</strong><span>警告</span></div>
+            <div class="err"><strong>0</strong><span>错误</span></div>
+          </div>
+          <div class="tbl-wrap mt-18">
+            <table>
+              <thead><tr><th>级别</th><th>问题 Sheet</th><th>类别</th><th>实体</th><th>问题明细</th></tr></thead>
+              <tbody>
+                <tr><td><span class="chip warn">警告</span></td><td class="mono">operations</td><td>工时异常</td><td class="mono">OP-1042</td><td>标准工时为 0，已按同机型平均工时 2.5h 兜底</td></tr>
+                <tr><td><span class="chip warn">警告</span></td><td class="mono">downtimes</td><td>时间重叠</td><td class="mono">MC-03</td><td>两条停机计划存在 30 分钟重叠，已合并处理</td></tr>
+                <tr><td><span class="chip warn">警告</span></td><td class="mono">personnel</td><td>班次缺失</td><td class="mono">EMP-11</td><td>周三无班次安排，该人员当日不可用</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="mt-18" style="display:flex;gap:10px">
+            <button class="btn btn-ghost">重新校验</button>
+            <button class="btn btn-ghost">导出校验结果 Excel</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 2 · 图谱构建 ======== -->
+    <section class="page" id="page-graph">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Step 02 · Knowledge Graph</span>
+          <h2>图谱构建</h2>
+          <p class="desc">把订单、任务、工序与资源构建为关系图谱，用于优化求解的约束推理与可视化追溯。</p>
+        </div>
+        <div class="page-head-actions">
+          <button class="btn btn-ghost">重新构建</button>
+          <button class="btn btn-primary" data-goto="simulate">下一步：规则仿真</button>
+        </div>
+      </div>
+      <div class="precheck ok">✓ 图谱已构建完成<span class="grow"></span><button class="link-btn" data-goto="simulate">下一步：规则仿真 →</button></div>
+      <div class="page-body stack">
+        <div class="card card-pad state-card success">
+          <div class="card-head" style="border:0;margin:0;padding:0">
+            <div><h3>图谱构建完成</h3><p>构建于 2026-07-20 21:58 · 耗时 12.4s</p></div>
+            <span class="chip ok">已就绪</span>
+          </div>
+          <div class="kv-grid mt-18" style="grid-template-columns:repeat(4,1fr)">
+            <div><span>节点总数</span><strong>428</strong></div>
+            <div><span>边总数</span><strong>1,204</strong></div>
+            <div><span>节点类型</span><strong>6</strong></div>
+            <div><span>孤立节点</span><strong style="color:var(--success)">0</strong></div>
+          </div>
+        </div>
+
+        <div class="card card-pad">
+          <div class="card-head">
+            <div><h3>图谱可视化</h3><p>订单 → 任务 → 工序 → 资源 的依赖网络（示意图，实际为 cytoscape 交互画布）。</p></div>
+            <div class="legend">
+              <span><i style="background:#2f6feb"></i>订单</span>
+              <span><i style="background:#6d5de8"></i>任务</span>
+              <span><i style="background:#0e8e7f"></i>工序</span>
+              <span><i style="background:#c2620a"></i>机器</span>
+            </div>
+          </div>
+          <div class="graph-canvas">
+            <svg viewBox="0 0 900 480">
+              <g stroke="rgba(9,10,14,0.14)" stroke-width="1">
+                <line x1="150" y1="240" x2="330" y2="120"/><line x1="150" y1="240" x2="330" y2="240"/><line x1="150" y1="240" x2="330" y2="360"/>
+                <line x1="330" y1="120" x2="520" y2="90"/><line x1="330" y1="120" x2="520" y2="150"/>
+                <line x1="330" y1="240" x2="520" y2="210"/><line x1="330" y1="240" x2="520" y2="270"/>
+                <line x1="330" y1="360" x2="520" y2="330"/><line x1="330" y1="360" x2="520" y2="390"/>
+                <line x1="520" y1="90" x2="710" y2="150"/><line x1="520" y1="150" x2="710" y2="150"/>
+                <line x1="520" y1="210" x2="710" y2="240"/><line x1="520" y1="270" x2="710" y2="240"/>
+                <line x1="520" y1="330" x2="710" y2="330"/><line x1="520" y1="390" x2="710" y2="330"/>
+                <line x1="520" y1="270" x2="710" y2="390"/>
+              </g>
+              <g font-family="Geist Mono, monospace" font-size="11" text-anchor="middle">
+                <circle cx="150" cy="240" r="34" fill="#2f6feb"/><text x="150" y="245" fill="#fff">ORD-01</text>
+                <circle cx="330" cy="120" r="26" fill="#6d5de8"/><text x="330" y="124" fill="#fff" font-size="10">T-01</text>
+                <circle cx="330" cy="240" r="26" fill="#6d5de8"/><text x="330" y="244" fill="#fff" font-size="10">T-02</text>
+                <circle cx="330" cy="360" r="26" fill="#6d5de8"/><text x="330" y="364" fill="#fff" font-size="10">T-03</text>
+                <circle cx="520" cy="90" r="18" fill="#0e8e7f"/><circle cx="520" cy="150" r="18" fill="#0e8e7f"/>
+                <circle cx="520" cy="210" r="18" fill="#0e8e7f"/><circle cx="520" cy="270" r="18" fill="#0e8e7f"/>
+                <circle cx="520" cy="330" r="18" fill="#0e8e7f"/><circle cx="520" cy="390" r="18" fill="#0e8e7f"/>
+                <rect x="692" y="132" width="36" height="36" rx="8" fill="#c2620a"/><text x="710" y="155" fill="#fff" font-size="9">MC1</text>
+                <rect x="692" y="222" width="36" height="36" rx="8" fill="#c2620a"/><text x="710" y="245" fill="#fff" font-size="9">MC2</text>
+                <rect x="692" y="312" width="36" height="36" rx="8" fill="#c2620a"/><text x="710" y="335" fill="#fff" font-size="9">MC3</text>
+                <rect x="692" y="372" width="36" height="36" rx="8" fill="#c2620a"/><text x="710" y="395" fill="#fff" font-size="9">MC4</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 3 · 规则仿真 ======== -->
+    <section class="page" id="page-simulate">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Step 03 · Rule Simulation</span>
+          <h2>规则仿真</h2>
+          <p class="desc">用经典派工规则建立基线排产，验证数据、班次、停机与在制状态是否合理，再决定是否进入优化。</p>
+        </div>
+        <div class="page-head-actions">
+          <button class="btn btn-primary">运行仿真</button>
+        </div>
+      </div>
+      <div class="precheck ok">✓ 前置就绪：数据校验通过、图谱已构建<span class="grow"></span><button class="link-btn" data-goto="optimize">下一步：优化求解 →</button></div>
+      <div class="page-body stack">
+        <div class="card card-pad">
+          <div class="card-head"><div><h3>选择派工规则</h3><p>当前选中 ATC。规则结果会作为优化求解的基线参照。</p></div></div>
+          <div class="rule-grid">
+            <button class="rule-card selected"><strong>ATC</strong><p>综合考虑交期紧迫度与处理时间，平衡延误与利用率</p></button>
+            <button class="rule-card"><strong>EDD</strong><p>优先安排交期最早的任务，降低最大延误</p></button>
+            <button class="rule-card"><strong>SPT</strong><p>优先处理耗时最短的工序，缩短平均周期</p></button>
+            <button class="rule-card"><strong>CR</strong><p>按交期剩余时间与剩余加工时间之比排序</p></button>
+            <button class="rule-card"><strong>FIFO</strong><p>按到达顺序先到先做，规则简单稳健</p></button>
+            <button class="rule-card"><strong>LPT</strong><p>优先处理长工序，规避长尾延误与资源空闲</p></button>
+          </div>
+        </div>
+
+        <div class="grid-4">
+          <div class="kpi-card"><span>总延误</span><strong>46.5h</strong><small>相对 EDD 基线 −18%</small></div>
+          <div class="kpi-card"><span>总周期 (Makespan)</span><strong>312.0h</strong><small>14 个日历日</small></div>
+          <div class="kpi-card"><span>净可用利用率</span><strong>78.4%</strong><small>9 台机器加权</small></div>
+          <div class="kpi-card"><span>完成工序</span><strong>86 / 86</strong><small style="color:var(--success)">全部排产成功</small></div>
+        </div>
+
+        <div class="card card-pad">
+          <div class="card-head"><div><h3>规则仿真甘特图 · ATC</h3><p>含停机遮罩与在制工序锁定（示意，实际为 vis-timeline 交互时间轴）。</p></div><span class="chip info">14 天排产周期</span></div>
+          <div class="gantt-mock">
+            <div class="gantt-row"><div class="mname">MC-01 数控车</div><div class="gantt-track">
+              <div class="gbar" style="left:1%;width:12%;background:#2f6feb">OP-101</div>
+              <div class="gbar" style="left:14%;width:9%;background:#6d5de8">OP-118</div>
+              <div class="gbar down" style="left:24%;width:7%">停机</div>
+              <div class="gbar" style="left:32%;width:14%;background:#0e8e7f">OP-134</div>
+              <div class="gbar" style="left:47%;width:10%;background:#2f6feb">OP-152</div>
+            </div></div>
+            <div class="gantt-row"><div class="mname">MC-02 数控铣</div><div class="gantt-track">
+              <div class="gbar" style="left:3%;width:15%;background:#c2620a">OP-102</div>
+              <div class="gbar" style="left:19%;width:11%;background:#2f6feb">OP-121</div>
+              <div class="gbar" style="left:31%;width:13%;background:#6d5de8">OP-140</div>
+            </div></div>
+            <div class="gantt-row"><div class="mname">MC-03 磨床</div><div class="gantt-track">
+              <div class="gbar" style="left:8%;width:10%;background:#0e8e7f">OP-105</div>
+              <div class="gbar down" style="left:19%;width:5%">保养</div>
+              <div class="gbar" style="left:25%;width:16%;background:#c2620a">OP-127</div>
+              <div class="gbar" style="left:42%;width:9%;background:#2f6feb">OP-161</div>
+            </div></div>
+            <div class="gantt-row"><div class="mname">MC-04 装配线</div><div class="gantt-track">
+              <div class="gbar" style="left:20%;width:18%;background:#6d5de8">OP-150</div>
+              <div class="gbar" style="left:39%;width:14%;background:#0e8e7f">OP-166</div>
+            </div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 4 · 优化求解 ======== -->
+    <section class="page active" id="page-optimize">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Step 04 · Hybrid Optimization</span>
+          <h2>优化求解</h2>
+          <p class="desc">前期近似广搜、后期精确精修，最终重算 Pareto 前沿。左侧配置参数，右侧实时跟踪运行状态。</p>
+        </div>
+        <div class="page-head-actions">
+          <button class="btn btn-ghost" data-goto="review">进入方案库</button>
+          <button class="btn btn-primary" disabled>优化运行中…</button>
+        </div>
+      </div>
+      <div class="precheck ok">✓ 前置就绪：基线仿真（ATC）可行，86/86 工序已排产<span class="grow"></span><button class="link-btn" data-goto="review">查看已有候选方案 →</button></div>
+      <div class="page-body">
+        <div class="opt-layout">
+          <!-- 左：参数配置 -->
+          <div class="sticky-col stack">
+            <div class="card card-pad">
+              <div class="card-head"><div><h3>多目标优化配置</h3><p>选择参与 Pareto 前沿的业务目标。</p></div></div>
+              <div class="obj-grid">
+                <label class="obj-pill on"><input type="checkbox" checked><span class="box">✓</span><div><strong>总延误</strong><small>min · 主订单准交优先</small></div></label>
+                <label class="obj-pill on"><input type="checkbox" checked><span class="box">✓</span><div><strong>总周期</strong><small>min · Makespan 压缩</small></div></label>
+                <label class="obj-pill on"><input type="checkbox" checked><span class="box">✓</span><div><strong>净可用利用率</strong><small>max · 资源效率</small></div></label>
+                <label class="obj-pill"><input type="checkbox"><span class="box">✓</span><div><strong>总等待时间</strong><small>min · 工序间等待</small></div></label>
+              </div>
+              <div class="form-grid mt-18">
+                <label><span>目标方案数</span><input type="number" value="6"></label>
+                <label><span>总预算秒数</span><input type="number" value="300"></label>
+                <label><span>种群规模</span><input type="number" value="24"></label>
+                <label><span>代数</span><input type="number" value="40"></label>
+                <label><span>前期时间占比</span><input type="number" value="0.65" step="0.05"></label>
+                <label><span>精修轮数</span><input type="number" value="2"></label>
+                <label><span>ALNS 强度</span><input type="number" value="1.2" step="0.1"></label>
+                <label><span>基线规则</span><select><option>ATC</option><option>EDD</option><option>SPT</option></select></label>
+              </div>
+              <div class="budget-hint">已按当前规模与参数自动推荐 <strong>300 秒</strong>。当前保留手动值 300 秒，可随时恢复建议值。</div>
+            </div>
+          </div>
+          <!-- 右：运行状态 -->
+          <div class="stack">
+            <div class="card card-pad state-card">
+              <div class="card-head" style="border:0;margin:0;padding:0">
+                <div><h3>优化运行中</h3><p>任务 OPT-20260720-2213 · 已运行 3 分 08 秒 · 预计剩余 42 秒</p></div>
+                <span class="chip blue">阶段 2/2 · 精确精修</span>
+              </div>
+              <div class="progress-ring-wrap mt-18">
+                <div class="ring">
+                  <svg width="108" height="108"><circle cx="54" cy="54" r="46" fill="none" stroke="var(--inset)" stroke-width="9"/><circle cx="54" cy="54" r="46" fill="none" stroke="url(#rg)" stroke-width="9" stroke-linecap="round" stroke-dasharray="289" stroke-dashoffset="107"/><defs><linearGradient id="rg"><stop offset="0%" stop-color="#2f6feb"/><stop offset="100%" stop-color="#6d5de8"/></linearGradient></defs></svg>
+                  <span class="pct">63%</span>
+                </div>
+                <div style="flex:1">
+                  <div class="phase-line">
+                    <div class="phase done">✓ 近似广搜 · 18,420 评估</div>
+                    <div class="phase on">● 精确精修 · 第 1/2 轮</div>
+                    <div class="phase">Pareto 前沿重算</div>
+                  </div>
+                  <div class="bar-track"><div class="bar-fill" style="width:63%"></div></div>
+                </div>
+              </div>
+              <div class="grid-4 mt-18">
+                <div class="kpi-card"><span>近似评估</span><strong>18,420</strong><small>前期广搜吞吐</small></div>
+                <div class="kpi-card"><span>精确评估</span><strong>1,036</strong><small>后期高质量验证</small></div>
+                <div class="kpi-card"><span>候选方案</span><strong>4</strong><small>目标 6 个</small></div>
+                <div class="kpi-card"><span>当前最优总延误</span><strong>31.2h</strong><small>较基线 −33%</small></div>
+              </div>
+            </div>
+            <div class="card card-pad">
+              <div class="card-head"><div><h3>运行日志</h3><p>求解器关键事件流。</p></div></div>
+              <div class="log-box">[22:13:04] 初始化种群 24 · 基线 ATC 注入完成
+[22:13:19] 近似广搜启动 · ALNS 算子池 8 个
+[22:14:51] Gen 12 · 发现新非支配解（延误 34.8h / 周期 298h）
+[22:15:37] 近似阶段完成 · 累计评估 18,420 · 候选池 11
+[22:15:40] 精确精修启动 · 对候选池 Top-6 逐一精评
+[22:16:12] 精修第 1 轮 · 方案三 总延误更新 32.1h → 31.2h
+[22:16:22] 当前 Pareto 前沿大小 4 · 进入第 2 轮精修…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 5 · 方案评审 ======== -->
+    <section class="page" id="page-review">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Step 05 · Solution Review</span>
+          <h2>方案评审</h2>
+          <p class="desc">Pareto、启发式与精确冠军在同一个决策工作台对比；勾选 1–4 个方案后可用 AI 评审。</p>
+        </div>
+        <div class="page-head-actions">
+          <button class="btn btn-ghost" data-goto="export">导出当前方案</button>
+          <button class="btn btn-accent">按诉求让 AI 推荐</button>
+        </div>
+      </div>
+      <div class="precheck warn">⚠ 优化仍在运行（63%），当前方案池为中间结果，完成后建议复核<span class="grow"></span><button class="link-btn" data-goto="optimize">查看优化进度 →</button></div>
+      <div class="page-body stack">
+        <div class="review-hero">
+          <div>
+            <h3>把 Pareto、启发式和精确冠军放到同一个决策工作台</h3>
+            <p>勾选候选后，可并排比较主目标与全量 KPI、查看资源利用率与甘特，或交给 AI 按业务诉求推荐。</p>
+          </div>
+          <div class="stat-cells">
+            <div><span>Pareto</span><strong>4</strong></div>
+            <div><span>启发式</span><strong>2</strong></div>
+            <div><span>精确冠军</span><strong>1</strong></div>
+            <div><span>已选</span><strong id="sel-count">2</strong></div>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active" data-rtab="library">方案库</button>
+          <button class="tab" data-rtab="exact">精确冠军参考</button>
+          <button class="tab" data-rtab="ai">AI 评审助手</button>
+        </div>
+
+        <!-- Tab 1 方案库 -->
+        <div id="rtab-library">
+          <div class="grid-2" style="grid-template-columns:380px 1fr;align-items:start">
+            <!-- 左列：方案列表 -->
+            <div class="stack sticky-col">
+              <div class="card card-pad">
+                <div class="card-head"><div><h3>候选方案</h3><p>勾选进入对比与 AI 评审（最多 4 个）。</p></div></div>
+                <div class="sel-list" id="sol-list">
+                  <button class="sol-card is-selected" data-sol="1">
+                    <span class="check">✓</span>
+                    <div><div class="sname">方案一<span class="chip blue">Pareto</span></div><div class="smeta">hybrid · gen 12</div></div>
+                    <div class="smetrics"><strong>31.2h</strong><span>总延误</span></div>
+                  </button>
+                  <button class="sol-card is-selected" data-sol="2">
+                    <span class="check">✓</span>
+                    <div><div class="sname">方案二<span class="chip blue">Pareto</span></div><div class="smeta">hybrid · gen 18</div></div>
+                    <div class="smetrics"><strong>35.6h</strong><span>总延误</span></div>
+                  </button>
+                  <button class="sol-card" data-sol="3">
+                    <span class="check">✓</span>
+                    <div><div class="sname">方案三<span class="chip blue">Pareto</span></div><div class="smeta">hybrid · gen 21</div></div>
+                    <div class="smetrics"><strong>33.0h</strong><span>总延误</span></div>
+                  </button>
+                  <button class="sol-card" data-sol="4">
+                    <span class="check">✓</span>
+                    <div><div class="sname">方案四<span class="chip info">启发式</span></div><div class="smeta">ATC 基线</div></div>
+                    <div class="smetrics"><strong>46.5h</strong><span>总延误</span></div>
+                  </button>
+                  <button class="sol-card" data-sol="5">
+                    <span class="check">✓</span>
+                    <div><div class="sname">方案五<span class="chip ok">精确冠军</span></div><div class="smeta">exact · total_tardiness</div></div>
+                    <div class="smetrics"><strong>29.8h</strong><span>总延误</span></div>
+                  </button>
+                </div>
+              </div>
+              <div class="card card-pad">
+                <div class="card-head"><div><h3>启发式参照</h3><p>教科书基准锚点，衡量优化器相对经典规则的提升。</p></div></div>
+                <div class="rule-chips">
+                  <button class="rule-chip ready">ATC · 已纳入</button>
+                  <button class="rule-chip ready">EDD · 已纳入</button>
+                  <button class="rule-chip computing">SPT · 计算中…</button>
+                  <button class="rule-chip">CR</button>
+                  <button class="rule-chip">FIFO</button>
+                  <button class="rule-chip">LPT</button>
+                </div>
+              </div>
+            </div>
+            <!-- 右列：对比详情 -->
+            <div class="stack">
+              <div class="card card-pad">
+                <div class="card-head"><div><h3>主目标 + 全量 KPI 对比</h3><p>相对基线（方案四 · ATC）的 Δ 标注；绿=改善，红=变差。</p></div><span class="chip neutral">已选 2/4</span></div>
+                <div class="tbl-wrap">
+                  <table>
+                    <thead><tr><th>方案</th><th>总延误</th><th>总周期</th><th>净可用利用率</th><th>总等待</th></tr></thead>
+                    <tbody>
+                      <tr class="is-best"><td><strong>方案一</strong> <span class="chip blue">Pareto</span></td>
+                        <td class="mono">31.2h<span class="best-tag">最优</span><span class="delta down-good">▼15.3h（−32.9%）</span></td>
+                        <td class="mono">298.5h<span class="delta down-good">▼13.5h（−4.3%）</span></td>
+                        <td class="mono">82.1%<span class="delta down-good">▲3.7pp</span></td>
+                        <td class="mono">18.4h<span class="delta down-good">▼6.2h</span></td></tr>
+                      <tr class="is-selected"><td><strong>方案二</strong> <span class="chip blue">Pareto</span></td>
+                        <td class="mono">35.6h<span class="delta down-good">▼10.9h（−23.4%）</span></td>
+                        <td class="mono">286.0h<span class="best-tag">最优</span><span class="delta down-good">▼26.0h（−8.3%）</span></td>
+                        <td class="mono">84.6%<span class="best-tag">最优</span><span class="delta down-good">▲6.2pp</span></td>
+                        <td class="mono">21.0h<span class="delta down-good">▼3.6h</span></td></tr>
+                      <tr><td><strong>方案四</strong> <span class="chip info">基线 ATC</span></td>
+                        <td class="mono">46.5h</td><td class="mono">312.0h</td><td class="mono">78.4%</td><td class="mono">24.6h</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="card card-pad">
+                <div class="card-head"><div><h3>机器分类净可用利用率</h3><p>方案一 / 方案二 与基线对比。</p></div></div>
+                <div class="util-grid">
+                  <div class="util-row"><span class="uname">数控车床 ×3</span><div class="util-track"><div class="util-fill" style="width:86%;background:var(--success)"></div></div><span class="uval" style="color:var(--success)">86.2%</span></div>
+                  <div class="util-row"><span class="uname">数控铣床 ×2</span><div class="util-track"><div class="util-fill" style="width:81%;background:var(--primary)"></div></div><span class="uval">81.4%</span></div>
+                  <div class="util-row"><span class="uname">磨床 ×2</span><div class="util-track"><div class="util-fill" style="width:74%;background:var(--primary)"></div></div><span class="uval">74.0%</span></div>
+                  <div class="util-row"><span class="uname">装配线 ×2</span><div class="util-track"><div class="util-fill" style="width:58%;background:var(--warning)"></div></div><span class="uval" style="color:var(--warning)">58.3%</span></div>
+                </div>
+                <p class="subtle mt-18">装配线利用率偏低：方案一将 2 道装配工序后移以保主订单准交，可在 AI 评审中追问该取舍。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2 精确冠军 -->
+        <div id="rtab-exact" style="display:none">
+          <div class="grid-2">
+            <div class="card card-pad">
+              <div class="card-head"><div><h3>单目标精确冠军</h3><p>在某一个业务指标上给出高置信冠军方案。</p></div></div>
+              <div class="form-grid">
+                <label style="grid-column:span 2"><span>目标</span><select><option>总延误 (total_tardiness)</option><option>总周期 (makespan)</option><option>净可用利用率</option></select></label>
+                <label><span>时间预算（秒）</span><input type="number" value="600"></label>
+              </div>
+              <div class="mt-18"><button class="btn btn-primary">生成单目标冠军</button></div>
+            </div>
+            <div class="card card-pad">
+              <div class="card-head"><div><h3>加权单目标精确冠军</h3><p>把业务偏好转成加权目标，生成一个冠军方案。</p></div></div>
+              <div class="form-grid">
+                <label><span>总延误权重</span><input type="number" value="1.0" step="0.1"></label>
+                <label><span>总周期权重</span><input type="number" value="0.4" step="0.1"></label>
+                <label><span>利用率权重</span><input type="number" value="0.2" step="0.1"></label>
+                <label><span>等待时间权重</span><input type="number" value="0" step="0.1"></label>
+              </div>
+              <div class="mt-18"><button class="btn btn-primary">生成加权冠军</button></div>
+            </div>
+          </div>
+          <div class="card card-pad mt-18">
+            <div class="card-head"><div><h3>最新精确冠军参考</h3><p>自动纳入方案库、AI 评审和导出流程。</p></div><span class="chip ok">已纳入方案库</span></div>
+            <div class="kv-grid" style="grid-template-columns:repeat(3,1fr)">
+              <div><span>方案</span><strong>方案五</strong></div>
+              <div><span>模式</span><strong>exact_single</strong></div>
+              <div><span>求解状态</span><strong>OPTIMAL (gap 0%)</strong></div>
+              <div><span>总延误</span><strong>29.8h</strong></div>
+              <div><span>总周期</span><strong>305.5h</strong></div>
+              <div><span>净可用利用率</span><strong>79.2%</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 3 AI 评审 -->
+        <div id="rtab-ai" style="display:none">
+          <div class="grid-2" style="grid-template-columns:1fr 1fr">
+            <div class="card card-pad">
+              <div class="card-head"><div><h3>当前纳入 AI 评审的方案</h3><p>AI 从主目标 + 全量 KPI + 风险解释三层给出意见。</p></div><span class="chip blue">2 个方案</span></div>
+              <div class="tbl-wrap">
+                <table>
+                  <thead><tr><th>方案</th><th>来源</th><th>总延误</th><th>总周期</th><th>利用率</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>方案一</strong></td><td>Pareto</td><td class="mono">31.2h</td><td class="mono">298.5h</td><td class="mono">82.1%</td></tr>
+                    <tr><td><strong>方案二</strong></td><td>Pareto</td><td class="mono">35.6h</td><td class="mono">286.0h</td><td class="mono">84.6%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="subtle mt-18">提示：在「方案库」Tab 勾选/取消勾选后，这里会同步更新。</p>
+            </div>
+            <div class="card card-pad">
+              <div class="card-head"><div><h3>对话式评审</h3><p>输入真实业务诉求，AI 会在聊天流中直接回复。</p></div></div>
+              <div class="chat-stream" id="chat">
+                <div class="bubble ai"><strong>AI 方案助手</strong>已纳入方案一、方案二。你可以让我比较、按诉求推荐，或者追问某个方案为什么这样排。</div>
+                <div class="bubble me"><strong>你</strong>我们更看重主订单准交，其次看净可用利用率，哪个方案更适合？</div>
+                <div class="bubble ai"><strong>AI 方案助手</strong>推荐<strong>方案一</strong>。它的总延误 31.2h 比方案二低 12.4%，主订单 ORD-01/ORD-03 全部准交；净可用利用率 82.1% 仅比方案二低 2.5pp。取舍点在装配线：方案一把 2 道装配工序后移了 6 小时，换来主订单准交。若近期装配产能紧张，建议接受方案一。</div>
+              </div>
+              <div class="quick-acts">
+                <button class="btn btn-ghost" data-qa="比较已勾选方案">比较已勾选方案</button>
+                <button class="btn btn-ghost" data-qa="追问：方案一为什么总延误最低？">追问方案一</button>
+                <button class="btn btn-ghost" data-qa="如果更看重总周期呢？">更看重总周期呢？</button>
+              </div>
+              <div class="chat-input">
+                <textarea rows="2" id="chat-text" placeholder="例如：我们更看重主订单准交，其次看净可用利用率，哪个方案更适合？"></textarea>
+                <button class="btn btn-primary" id="chat-send">发送</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 6 · 工作概览 ======== -->
+    <section class="page" id="page-dashboard">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Workflow Overview</span>
+          <h2>工作概览</h2>
+          <p class="desc">确认当前进度、关键结果与下一步操作。</p>
+        </div>
+        <div class="page-head-actions">
+          <button class="btn btn-ghost" data-goto="optimize">优化求解</button>
+          <button class="btn btn-primary" data-goto="review">方案评审</button>
+        </div>
+      </div>
+      <div class="page-body stack">
+        <div class="hero">
+          <div>
+            <span class="eyebrow" style="color:rgba(255,255,255,0.6)">Current workflow</span>
+            <h3>下一步：等待优化求解完成</h3>
+            <p>优化任务正在精确精修阶段（63%），完成后建议复核 Pareto 前沿并进入方案评审导出最终方案。</p>
+            <button class="btn btn-white" data-goto="optimize">查看优化进度</button>
+          </div>
+          <div class="cells">
+            <div><span>当前主目标</span><strong>延误/周期/利用率</strong></div>
+            <div><span>已得方案数</span><strong>4</strong></div>
+            <div><span>当前关注方案</span><strong>方案一</strong></div>
+          </div>
+        </div>
+        <div class="grid-4">
+          <div class="kpi-card"><span>订单</span><strong>6</strong><small>当前实例订单规模</small></div>
+          <div class="kpi-card"><span>工序</span><strong>86</strong><small>当前实例工序总量</small></div>
+          <div class="kpi-card"><span>资源</span><strong>9 / 7 / 18</strong><small>机器 / 工装 / 人员</small></div>
+          <div class="kpi-card"><span>优化状态</span><strong style="color:var(--primary)">running</strong><small>混合优化任务当前状态</small></div>
+        </div>
+        <div class="grid-3">
+          <div class="card card-pad">
+            <div class="card-head"><div><h3>问题规模</h3><p>快速判断当前实例量级。</p></div></div>
+            <div class="kv-grid" style="grid-template-columns:1fr 1fr">
+              <div><span>任务数</span><strong>12</strong></div>
+              <div><span>停机记录</span><strong>5</strong></div>
+              <div><span>在制工序</span><strong>8</strong></div>
+              <div><span>计划起点</span><strong>07-21 08:00</strong></div>
+            </div>
+          </div>
+          <div class="card card-pad">
+            <div class="card-head"><div><h3>优化进展</h3><p>近似广搜与精确评估推进情况。</p></div></div>
+            <div class="kv-grid" style="grid-template-columns:1fr 1fr">
+              <div><span>近似评估</span><strong>18,420</strong></div>
+              <div><span>精确评估</span><strong>1,036</strong></div>
+              <div><span>总评估次数</span><strong>19,456</strong></div>
+              <div><span>耗时</span><strong>188s</strong></div>
+            </div>
+          </div>
+          <div class="card card-pad">
+            <div class="card-head"><div><h3>当前推荐关注</h3><p>评审选中的候选方案摘要。</p></div></div>
+            <div class="kv-grid" style="grid-template-columns:1fr 1fr">
+              <div><span>方案名称</span><strong>方案一</strong></div>
+              <div><span>总延误</span><strong>31.2h</strong></div>
+              <div><span>总周期</span><strong>298.5h</strong></div>
+              <div><span>净可用利用率</span><strong>82.1%</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 7 · 导出与交付 ======== -->
+    <section class="page" id="page-export">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">Export & Delivery</span>
+          <h2>导出与交付</h2>
+          <p class="desc">模板、实例数据与最终方案的统一出口。方案 Excel 导出以评审中聚焦的方案为准。</p>
+        </div>
+      </div>
+      <div class="page-body stack" style="max-width:900px">
+        <div class="card export-card">
+          <div class="eicon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg></div>
+          <div><h4>下载导入模板</h4><p>包含 9 类 Sheet 的标准模板与字段说明，用于准备新场景数据。</p></div>
+          <button class="btn btn-ghost">下载模板</button>
+        </div>
+        <div class="card export-card">
+          <div class="eicon green"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4h16v16H4zM4 9h16M9 4v16"/></svg></div>
+          <div><h4>导出当前实例 CSV</h4><p>当前实例的订单、工序、资源等全量数据打包为 CSV，用于存档或外部分析。</p></div>
+          <button class="btn btn-ghost">导出 CSV</button>
+        </div>
+        <div class="card export-card" style="border-color:rgba(47,111,235,0.35);box-shadow:0 0 0 3px rgba(47,111,235,0.07)">
+          <div class="eicon orange"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m12 2 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 17l9 5 9-5"/></svg></div>
+          <div><h4>导出当前方案 Excel</h4><p>当前聚焦：<strong>方案一</strong>（总延误 31.2h）。含甘特排产明细、资源分配与 KPI 摘要。</p></div>
+          <button class="btn btn-primary">导出方案一</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 8 · 大模型连接 ======== -->
+    <section class="page" id="page-llm">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">LLM Connection</span>
+          <h2>大模型连接</h2>
+          <p class="desc">用于 Pareto 方案比较、推荐和问答解释。未配置时 AI 评审助手不可用。</p>
+        </div>
+        <div class="page-head-actions"><span class="chip ok">● 已连接 · 延迟 218ms</span></div>
+      </div>
+      <div class="page-body" style="max-width:720px">
+        <div class="card card-pad">
+          <div class="card-head"><div><h3>连接配置</h3><p>支持 OpenAI 兼容接口。</p></div></div>
+          <div class="form-grid" style="grid-template-columns:1fr">
+            <label><span>Base URL</span><input type="text" value="https://api.example-llm.cn/v1"></label>
+            <label><span>模型名称</span><input type="text" value="drd-scheduler-pro-2026"></label>
+            <label><span>API Key</span><input type="password" placeholder="已配置，如需更新请重新输入"></label>
+          </div>
+          <div class="mt-18" style="display:flex;gap:10px">
+            <button class="btn btn-primary">保存配置</button>
+            <button class="btn btn-ghost">测试连接</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== 页 9 · 系统状态 ======== -->
+    <section class="page" id="page-system">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow">System Status</span>
+          <h2>系统状态</h2>
+          <p class="desc">查看接口连通性与当前工作上下文。</p>
+        </div>
+      </div>
+      <div class="page-body stack" style="max-width:900px">
+        <div class="grid-4">
+          <div class="kpi-card"><span>后端健康</span><strong style="color:var(--success)">healthy</strong><small>/api/health · 200 OK</small></div>
+          <div class="kpi-card"><span>数据库</span><strong>18.2 MB</strong><small>llm4drd.db</small></div>
+          <div class="kpi-card"><span>当前任务</span><strong class="mono" style="font-size:13px">OPT-…-2213</strong><small>混合优化 · 运行中</small></div>
+          <div class="kpi-card"><span>前端版本</span><strong>v2.0</strong><small>app_v2.js 20260720-5</small></div>
+        </div>
+        <div class="card card-pad">
+          <div class="card-head"><div><h3>工作上下文</h3><p>当前会话状态快照。</p></div></div>
+          <div class="kv-grid" style="grid-template-columns:repeat(4,1fr)">
+            <div><span>当前实例</span><strong style="font-size:11px">2026Q3-总装-演示</strong></div>
+            <div><span>当前页面</span><strong>优化求解</strong></div>
+            <div><span>已选方案</span><strong>2 / 4</strong></div>
+            <div><span>LLM 状态</span><strong style="color:var(--success)">已连接</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+/* ---------- 页面导航 ---------- */
+const pages = document.querySelectorAll('.page');
+const navItems = document.querySelectorAll('.nav-item[data-goto]');
+function goto(key){
+  pages.forEach(p => p.classList.toggle('active', p.id === 'page-' + key));
+  navItems.forEach(n => n.classList.toggle('active', n.dataset.goto === key));
+  document.querySelector('.main').scrollTop = 0;
+}
+document.querySelectorAll('[data-goto]').forEach(el => {
+  el.addEventListener('click', () => goto(el.dataset.goto));
+});
+/* 流程步骤点击：评审步给出提示（模拟前置依赖） */
+document.querySelectorAll('.flow-step').forEach(s => {
+  s.addEventListener('click', () => {
+    const t = s.dataset.goto;
+    if (t === 'review') toast('优化仍在运行（63%）。可以先查看中间候选，完成后建议复核。');
+    goto(t);
+  });
+});
+
+/* ---------- 评审 Tab ---------- */
+const rtabBtns = document.querySelectorAll('[data-rtab]');
+rtabBtns.forEach(b => b.addEventListener('click', () => {
+  rtabBtns.forEach(x => x.classList.toggle('active', x === b));
+  ['library','exact','ai'].forEach(k => {
+    document.getElementById('rtab-' + k).style.display = (k === b.dataset.rtab) ? '' : 'none';
+  });
+}));
+
+/* ---------- 方案勾选（上限 4） ---------- */
+const solList = document.getElementById('sol-list');
+solList.addEventListener('click', e => {
+  const card = e.target.closest('.sol-card');
+  if (!card) return;
+  const selected = solList.querySelectorAll('.sol-card.is-selected');
+  if (!card.classList.contains('is-selected') && selected.length >= 4) {
+    toast('最多勾选 4 个方案（与 AI 评审共用勾选集）。请先取消一个。');
+    return;
+  }
+  card.classList.toggle('is-selected');
+  document.getElementById('sel-count').textContent = solList.querySelectorAll('.sol-card.is-selected').length;
+});
+
+/* ---------- AI 对话演示 ---------- */
+const chat = document.getElementById('chat');
+const chatText = document.getElementById('chat-text');
+function sendChat(msg){
+  if (!msg.trim()) return;
+  chat.insertAdjacentHTML('beforeend', `<div class="bubble me"><strong>你</strong>${msg.replace(/</g,'&lt;')}</div>`);
+  chatText.value = '';
+  chat.scrollTop = chat.scrollHeight;
+  setTimeout(() => {
+    chat.insertAdjacentHTML('beforeend', `<div class="bubble ai"><strong>AI 方案助手</strong>（演示回复）已结合主目标与全量 KPI 分析：方案一在总延误上领先 12.4%，方案二在总周期与利用率上更均衡。若主订单准交是第一优先级，推荐方案一。</div>`);
+    chat.scrollTop = chat.scrollHeight;
+  }, 600);
+}
+document.getElementById('chat-send').addEventListener('click', () => sendChat(chatText.value));
+document.querySelectorAll('[data-qa]').forEach(b => b.addEventListener('click', () => sendChat(b.dataset.qa)));
+chatText.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(chatText.value); } });
+
+/* ---------- 规则卡选择 ---------- */
+document.querySelectorAll('.rule-card').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.rule-card').forEach(x => x.classList.remove('selected'));
+  c.classList.add('selected');
+}));
+
+/* ---------- 目标 pill ---------- */
+document.querySelectorAll('.obj-pill').forEach(p => p.addEventListener('click', e => {
+  e.preventDefault();
+  p.classList.toggle('on');
+}));
+
+/* ---------- Toast ---------- */
+let toastTimer;
+function toast(msg){
+  document.querySelectorAll('.toast').forEach(t => t.remove());
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.remove(), 3600);
+}
+</script>
+</body>
+</html>

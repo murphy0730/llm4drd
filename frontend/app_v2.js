@@ -133,6 +133,7 @@ const app = {
   selectedGraphOrderId: null,
   graphOrderOptions: [],
   graphView: defaultGraphView(),
+  cyGraphInstance: null,
   simResult: null,
   simStatus: null,
   simElapsedTimer: null,
@@ -2364,8 +2365,6 @@ const GRAPH_TYPE_COLORS = {
 };
 // 节点形状尺寸（半径基准，选中时 +4）
 const GRAPH_NODE_SIZES = { order: 24, task: 20, operation: 12, machine: 19, tooling: 17, personnel: 17, other: 15 };
-// 节点内单字标签
-const GRAPH_TYPE_CHARS = { order: "订", task: "任", operation: "工", machine: "机", tooling: "装", personnel: "员", other: "·" };
 // 订单标识色板：固定的一套 12 色，按订单序号（自然排序后的位置）确定性分配，
 // 不哈希、不随机——同一实例任何时刻、任何视图（图谱订单节点外圈 / 面包屑色点 /
 // 甘特条块 / 图例色点）拿到的都是同一套颜色。色板与 design-system token 协调，
@@ -2759,51 +2758,6 @@ function layoutGraph(nodes, edges, selectedId) {
   const height = Math.max(460, GRAPH_GRID_PAD * 2 + Math.max(0, rows - 1) * GRAPH_GRID_ROW + 80);
 
   return { width, height, placed, lanes: [], families: [] };
-}
-
-// 边几何：跨列走直线（按节点半径做边界吸附），同列顺序边向右弓形绕开节点
-function graphEdgePathD(a, b) {
-  const ra = a.r || 18;
-  const rb = b.r || 18;
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  if (Math.abs(dx) < 48) {
-    const dir = dy >= 0 ? 1 : -1;
-    const bow = 68;
-    const sy = a.y + dir * ra;
-    const ty = b.y - dir * rb;
-    return `M ${a.x} ${sy} C ${a.x + bow} ${sy}, ${b.x + bow} ${ty}, ${b.x} ${ty}`;
-  }
-  const dir = dx > 0 ? 1 : -1;
-  return `M ${a.x + dir * ra} ${a.y} L ${b.x - dir * rb} ${b.y}`;
-}
-
-function graphViewportTransform() {
-  return `translate(${app.graphView.panX} ${app.graphView.panY}) scale(${app.graphView.zoom})`;
-}
-
-function applyGraphViewportState(root) {
-  const container = root || document;
-  const viewport = container.querySelector("[data-graph-viewport]");
-  if (viewport) viewport.setAttribute("transform", graphViewportTransform());
-  const badge = container.querySelector("[data-graph-zoom]");
-  if (badge) badge.textContent = `${Math.round(app.graphView.zoom * 100)}%`;
-}
-
-function applyGraphNodePositions(root) {
-  const container = root || document;
-  const positions = app.graphView.positions || {};
-  container.querySelectorAll("[data-graph-node]").forEach((nodeEl) => {
-    const pos = positions[nodeEl.dataset.graphNode];
-    if (!pos) return;
-    nodeEl.setAttribute("transform", `translate(${pos.x} ${pos.y})`);
-  });
-  container.querySelectorAll("[data-graph-link]").forEach((pathEl) => {
-    const source = positions[pathEl.dataset.source];
-    const target = positions[pathEl.dataset.target];
-    if (!source || !target) return;
-    pathEl.setAttribute("d", graphEdgePathD(source, target));
-  });
 }
 
 function fitGraphViewport(bounds) {
@@ -4127,7 +4081,6 @@ function renderInteractiveGraph() {
   });
 
   const selectedNode = graph.selectedNode;
-  const selectedId = graph.selectedId;
   const scope = graph.selectionScope || {};
   const orderOption = selectedGraphOrderOption();
   const orderEntityId = orderOption?.entity_id || entityIdFromGraphId(app.selectedGraphOrderId || "");
@@ -4141,96 +4094,9 @@ function renderInteractiveGraph() {
   });
   const loadedEdgeCount = asArray(app.graphEdges).length;
 
-  const edgeMarkers = { structure: "graph-arrow-structure", resource: "graph-arrow-resource", other: "graph-arrow-other" };
-  const familyLabels = { plan: "规划链 · 冷色", resource: "资源 · 暖色", other: "其他关系" };
-
-  const svg = `
-    <svg viewBox="0 0 ${graph.layout.width} ${graph.layout.height}" class="graph-svg interactive" data-graph-canvas role="img" aria-label="可交互有向异构图">
-      <defs>
-        <pattern id="graph-grid-pattern" width="28" height="28" patternUnits="userSpaceOnUse">
-          <path d="M 28 0 L 0 0 0 28" fill="none" stroke="rgba(163,178,193,0.22)" stroke-width="1"></path>
-        </pattern>
-        <marker id="graph-arrow-structure" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d53c0"></path>
-        </marker>
-        <marker id="graph-arrow-resource" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2620a"></path>
-        </marker>
-        <marker id="graph-arrow-other" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa5b1"></path>
-        </marker>
-      </defs>
-      <rect x="0" y="0" width="${graph.layout.width}" height="${graph.layout.height}" rx="26" fill="url(#graph-grid-pattern)" class="graph-canvas-bg"></rect>
-      <g data-graph-viewport transform="${graphViewportTransform()}">
-        <g data-graph-lanes>
-          ${(graph.layout.families || []).map((fam) => `<text class="graph-family-label graph-family-${fam.family}" x="${fam.x + 6}" y="24">${escapeHtml(familyLabels[fam.family] || fam.family)}</text>`).join("")}
-          ${(graph.layout.lanes || []).map((lane) => `
-            <rect class="graph-lane graph-lane-${lane.family}" x="${lane.x}" y="${lane.y}" width="${lane.width}" height="${lane.height}" rx="16"></rect>
-            <text class="graph-lane-label" x="${lane.x + 16}" y="${lane.y + 26}">${escapeHtml(lane.label)}</text>
-            <text class="graph-lane-count" x="${lane.x + 16}" y="${lane.y + 42}">${formatInt(lane.count)} 个节点</text>
-          `).join("")}
-        </g>
-        <g data-graph-links>
-          ${graph.visibleEdges.map((edge) => {
-            const source = graph.positions[edge.source];
-            const target = graph.positions[edge.target];
-            if (!source || !target) return "";
-            const highlighted = graph.highlightedNodeIds.has(edge.source) && graph.highlightedNodeIds.has(edge.target);
-            const group = ["structure", "resource", "other"].includes(edge.group) ? edge.group : "other";
-            return `
-              <path
-                class="graph-link graph-link-${group} ${highlighted ? "highlighted" : ""}"
-                data-graph-link
-                data-source="${escapeHtml(edge.source)}"
-                data-target="${escapeHtml(edge.target)}"
-                d="${graphEdgePathD(source, target)}"
-                marker-end="url(#${edgeMarkers[group]})"
-              ></path>
-            `;
-          }).join("")}
-        </g>
-        <g data-graph-nodes>
-          ${graph.visibleNodes.map((node) => {
-            const pos = graph.positions[node.id];
-            if (!pos) return "";
-            const baseR = pos.r || GRAPH_NODE_SIZES[node.type] || GRAPH_NODE_SIZES.other;
-            const isSelected = node.id === selectedId;
-            const isNeighbor = graph.neighborIds.has(node.id) && !isSelected;
-            const isScoped = graph.highlightedNodeIds.has(node.id);
-            const r = isSelected ? baseR + 4 : baseR;
-            const charFontSize = node.type === "operation" ? 9 : node.type === "order" ? 13 : 11;
-            const charDy = node.type === "tooling" ? Math.round(r * 0.3 + 4) : 4;
-            const labelY = Math.round((node.type === "order" ? r * 0.85 : r) + 15);
-            const orderRing = node.type === "order"
-              ? `<circle class="graph-node-order-ring" r="${(r * 1.25 + 7).toFixed(1)}" style="stroke:${orderColorFor(node.entity_id || entityIdFromGraphId(node.id))}"></circle>`
-              : "";
-            return `
-              <g
-                class="graph-node ${isSelected ? "selected" : isNeighbor ? "neighbor" : isScoped ? "scoped" : ""}"
-                data-type="${escapeHtml(node.type)}"
-                data-action="focus-graph-node"
-                data-id="${escapeHtml(node.id)}"
-                data-graph-node="${escapeHtml(node.id)}"
-                data-node-label="${escapeHtml(node.label || node.id)}"
-                data-node-type-label="${escapeHtml(graphTypeLabel(node.type))}"
-                data-node-degree="${formatInt(nodeDegree.get(node.id) || 0)}"
-                data-node-entity-id="${escapeHtml(node.entity_id || entityIdFromGraphId(node.id))}"
-                transform="translate(${pos.x} ${pos.y})"
-                style="cursor:pointer"
-              >
-                <title>${escapeHtml(`${graphTypeLabel(node.type)}\n${node.label || node.id}\nID: ${node.id}\n关联关系: ${formatInt(nodeDegree.get(node.id) || 0)}`)}</title>
-                <circle class="graph-node-hitbox" r="${Math.max(r + 12, 28)}"></circle>
-                ${orderRing}
-                ${graphNodeShapeSVG(node.type, r, `class="graph-node-shape" fill="${graphTypeColor(node.type)}"`)}
-                <text class="graph-node-char" y="${charDy}" text-anchor="middle" font-size="${charFontSize}">${escapeHtml(GRAPH_TYPE_CHARS[node.type] || "·")}</text>
-                <text class="graph-node-label" y="${labelY}" text-anchor="middle">${escapeHtml(String(node.label).slice(0, 18))}</text>
-              </g>
-            `;
-          }).join("")}
-        </g>
-      </g>
-    </svg>
-  `;
+  // 绘图层改用 cytoscape（力导向/层次布局）：仍复用 buildGraphViewModel 的筛选结果，
+  // 但忽略其算出的 SVG lane 坐标；节点/边由 mountInteractiveGraph() 挂载后交给 cytoscape 布局。
+  const svg = `<div class="graph-cytoscape-canvas" data-graph-canvas></div>`;
 
   const nodeTypeFilters = Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
       <button class="filter-chip ${enabled ? "active" : ""}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
@@ -4459,6 +4325,7 @@ function renderInteractiveGraph() {
       </div>
       <div class="split-panel graph-split">
         <article class="surface-card graph-stage-card">
+          <button class="btn btn-ghost graph-fs-exit" type="button" data-action="toggle-graph-fullscreen">退出全屏</button>
           ${canvasStats}
           <div class="graph-hover-preview" data-graph-hover-preview>
             ${selectedNode ? `当前选中：${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / 关联关系 ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "将鼠标悬浮到节点上，可快速预览该节点名称、类型与关联关系强度。"}
@@ -4508,139 +4375,132 @@ function renderInteractiveGraph() {
 }
 
 function mountInteractiveGraph() {
-  const svg = document.querySelector("[data-graph-canvas]");
-  if (!svg || svg.dataset.bound === "1") return;
-  svg.dataset.bound = "1";
+  const container = document.querySelector(".page.active [data-graph-canvas]") || document.querySelector("[data-graph-canvas]");
+  if (!container || container.dataset.bound === "1") return;
+  container.dataset.bound = "1";
 
-  const getSvgScale = () => {
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    return {
-      x: viewBox.width / Math.max(rect.width, 1),
-      y: viewBox.height / Math.max(rect.height, 1),
-    };
+  if (typeof window.cytoscape !== "function") {
+    container.innerHTML = '<div class="empty-state"><h3>图谱组件加载失败</h3><p>请确认 /static/vendor 下的 Cytoscape 运行库完整。</p></div>';
+    return;
+  }
+
+  if (app.cyGraphInstance) {
+    try { app.cyGraphInstance.destroy(); } catch (_) { /* 忽略销毁失败 */ }
+    app.cyGraphInstance = null;
+  }
+
+  const root = container.closest(".graph-workbench") || document;
+  const hoverPreview = root.querySelector("[data-graph-hover-preview]");
+
+  // 复用 buildGraphViewModel 的筛选结果（节点类型/关系层级/搜索/焦点模式），
+  // 但忽略其算出的 SVG lane 坐标，节点位置改由 cytoscape 的 dagre 层次布局决定。
+  const graph = buildGraphViewModel();
+  const nodes = asArray(graph?.visibleNodes);
+  const edges = asArray(graph?.visibleEdges);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+
+  const nodeDegree = new Map(nodes.map((node) => [node.id, 0]));
+  edges.forEach((edge) => {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return;
+    nodeDegree.set(edge.source, (nodeDegree.get(edge.source) || 0) + 1);
+    nodeDegree.set(edge.target, (nodeDegree.get(edge.target) || 0) + 1);
+  });
+
+  const elements = [
+    ...nodes.map((node) => ({
+      data: {
+        id: node.id,
+        label: node.label || node.entity_id || node.id,
+        node_type: node.type,
+        entity_id: node.entity_id || "",
+        type_label: graphTypeLabel(node.type),
+        degree: nodeDegree.get(node.id) || 0,
+      },
+    })),
+    ...edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)).map((edge, index) => ({
+      data: {
+        id: `cy-edge-${edge.id || index}`,
+        source: edge.source,
+        target: edge.target,
+        edge_type: edge.edgeType,
+        edge_group: ["structure", "resource", "other"].includes(edge.group) ? edge.group : "other",
+      },
+    })),
+  ];
+
+  const cy = window.cytoscape({
+    container,
+    elements,
+    // 节点形状/配色严格对齐 8545cc0 的 cytoscape 原版样式（各 node_type 对应 shape + background-color）
+    style: [
+      { selector: "node", style: { "label": "data(label)", "font-size": 9, "color": "#32485a", "text-valign": "bottom", "text-margin-y": 7, "text-max-width": 100, "text-wrap": "ellipsis", "width": 24, "height": 24, "border-width": 2, "border-color": "#ffffff" } },
+      { selector: 'node[node_type="order"]', style: { "background-color": graphTypeColor("order"), "shape": "diamond", "width": 38, "height": 38, "font-size": 11, "font-weight": 700 } },
+      { selector: 'node[node_type="task"]', style: { "background-color": graphTypeColor("task"), "shape": "round-rectangle", "width": 32, "height": 22 } },
+      { selector: 'node[node_type="operation"]', style: { "background-color": graphTypeColor("operation"), "shape": "ellipse", "width": 19, "height": 19, "font-size": 8 } },
+      { selector: 'node[node_type="machine"]', style: { "background-color": graphTypeColor("machine"), "shape": "hexagon", "width": 32, "height": 32 } },
+      { selector: 'node[node_type="tooling"]', style: { "background-color": graphTypeColor("tooling"), "shape": "round-diamond", "width": 29, "height": 29 } },
+      { selector: 'node[node_type="personnel"]', style: { "background-color": graphTypeColor("personnel"), "shape": "pentagon", "width": 29, "height": 29 } },
+      { selector: "edge", style: { "width": 1.2, "line-color": "#9caebe", "target-arrow-color": "#9caebe", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 0.7, "opacity": 0.62 } },
+      { selector: 'edge[edge_group="structure"]', style: { "line-color": "#0f4c81", "target-arrow-color": "#0f4c81", "opacity": 0.72 } },
+      { selector: 'edge[edge_group="resource"]', style: { "line-style": "dashed", "line-color": "#b76800", "target-arrow-color": "#b76800", "opacity": 0.58 } },
+      { selector: ".cy-selected", style: { "border-width": 5, "border-color": "#102f4c", "width": 46, "height": 46, "font-size": 12, "font-weight": 700, "z-index": 9999 } },
+      { selector: ".cy-neighbor", style: { "border-width": 3, "border-color": "#0f4c81", "opacity": 1, "z-index": 100 } },
+      { selector: ".cy-neighbor-edge", style: { "width": 3, "opacity": 1, "z-index": 100 } },
+      { selector: ".cy-dimmed", style: { "opacity": 0.55 } },
+    ],
+    minZoom: 0.05,
+    maxZoom: 5,
+    boxSelectionEnabled: false,
+  });
+  app.cyGraphInstance = cy;
+
+  const runLayout = () => {
+    try {
+      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 150, nodeSep: 28, edgeSep: 10, ranker: "tight-tree", padding: 40, fit: true, animate: false }).run();
+    } catch (error) {
+      console.warn("Dagre layout unavailable, falling back to breadthfirst", error);
+      cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: true }).run();
+    }
   };
+  runLayout();
 
-  const root = svg.closest(".graph-workbench") || document;
-  const hoverPreview = root.querySelector("[data-graph-hover-preview]") || root.querySelector("#graph-hover-preview");
-  applyGraphViewportState(root);
-  applyGraphNodePositions(root);
+  // 高亮当前选中节点及其邻域，与右侧详情面板的选中态保持一致
+  const selected = cy.getElementById(app.selectedGraphNodeId || "");
+  if (selected.length) {
+    cy.elements().addClass("cy-dimmed");
+    const neighborhood = selected.neighborhood();
+    selected.removeClass("cy-dimmed").addClass("cy-selected");
+    neighborhood.nodes().removeClass("cy-dimmed").addClass("cy-neighbor");
+    selected.connectedEdges().removeClass("cy-dimmed").addClass("cy-neighbor-edge");
+    // 不再缩放到选中邻域：保持布局的 fit:true 全览，让全部节点默认呈现
+  }
 
-  const updateHoverPreview = (nodeEl) => {
-    if (!hoverPreview) return;
-    if (!nodeEl) {
-      const selected = Array.from(root.querySelectorAll("[data-graph-node]")).find((node) => node.dataset.graphNode === (app.selectedGraphNodeId || ""));
-      if (selected) {
-        hoverPreview.textContent = `\u5f53\u524d\u9009\u4e2d\uff1a${selected.dataset.nodeTypeLabel || "-"} / ${selected.dataset.nodeLabel || "-"} / \u5173\u8054\u5173\u7cfb ${selected.dataset.nodeDegree || "0"}`;
+  const zoomPill = root.querySelector("[data-graph-zoom]");
+  const syncZoomPill = () => { if (zoomPill) zoomPill.textContent = `${Math.round(cy.zoom() * 100)}%`; };
+  cy.on("zoom", syncZoomPill);
+  syncZoomPill();
+
+  if (hoverPreview) {
+    cy.on("mouseover", "node", (event) => {
+      const data = event.target.data();
+      hoverPreview.textContent = `悬浮预览：${data.type_label || "-"} / ${data.label || "-"} / 关联关系 ${data.degree || 0}`;
+    });
+    cy.on("mouseout", "node", () => {
+      const sel = cy.getElementById(app.selectedGraphNodeId || "");
+      if (sel.length) {
+        const d = sel.data();
+        hoverPreview.textContent = `当前选中：${d.type_label || "-"} / ${d.label || "-"} / 关联关系 ${d.degree || 0}`;
       } else {
-        hoverPreview.textContent = "\u60ac\u6d6e\u8282\u70b9\u53ef\u5feb\u901f\u9884\u89c8\u5176\u7c7b\u578b\u3001\u6807\u7b7e\u548c\u5173\u7cfb\u6570\uff0c\u70b9\u51fb\u540e\u53f3\u4fa7\u4f1a\u8054\u52a8\u5237\u65b0\u5b8c\u6574\u8be6\u60c5\u3002";
+        hoverPreview.textContent = "将鼠标悬浮到节点上，可快速预览该节点名称、类型与关联关系强度。";
       }
-      return;
-    }
-    hoverPreview.textContent = `\u60ac\u6d6e\u9884\u89c8\uff1a${nodeEl.dataset.nodeTypeLabel || "-"} / ${nodeEl.dataset.nodeLabel || "-"} / \u5173\u8054\u5173\u7cfb ${nodeEl.dataset.nodeDegree || "0"}`;
-  };
+    });
+  }
 
-  let drag = null;
-  let dragMoved = false;
-
-  svg.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    const mouseX = ((event.clientX - rect.left) / Math.max(rect.width, 1)) * viewBox.width;
-    const mouseY = ((event.clientY - rect.top) / Math.max(rect.height, 1)) * viewBox.height;
-    const currentZoom = app.graphView.zoom;
-    const nextZoom = Math.max(0.45, Math.min(2.4, currentZoom * (event.deltaY < 0 ? 1.12 : 0.88)));
-    const ratio = nextZoom / currentZoom;
-    app.graphView.panX = mouseX - (mouseX - app.graphView.panX) * ratio;
-    app.graphView.panY = mouseY - (mouseY - app.graphView.panY) * ratio;
-    app.graphView.zoom = nextZoom;
-    applyGraphViewportState(root);
-  }, { passive: false });
-
-  svg.addEventListener("pointerdown", (event) => {
-    const nodeEl = event.target.closest("[data-graph-node]");
-    const scales = getSvgScale();
-    if (nodeEl) {
-      const id = nodeEl.dataset.graphNode;
-      const origin = app.graphView.positions[id];
-      if (!origin) return;
-      drag = {
-        type: "node",
-        id,
-        startX: event.clientX,
-        startY: event.clientY,
-        origin: { ...origin },
-        scales,
-      };
-      dragMoved = false;
-      svg.classList.add("dragging-node");
-    } else {
-      drag = {
-        type: "pan",
-        startX: event.clientX,
-        startY: event.clientY,
-        originPanX: app.graphView.panX,
-        originPanY: app.graphView.panY,
-        scales,
-      };
-      dragMoved = false;
-      svg.classList.add("panning");
-    }
-    // 注意：这里不做 setPointerCapture——按下即捕获会让随后 click 事件
-    // 重定向到 svg 本身（Chrome 行为），导致"点击节点选中"永远落空；
-    // 改为首次位移超阈值时再捕获（见 pointermove），纯点击不捕获。
-  });
-
-  svg.addEventListener("pointermove", (event) => {
-    if (!drag) return;
-    if (Math.abs(event.clientX - drag.startX) > 2 || Math.abs(event.clientY - drag.startY) > 2) {
-      dragMoved = true;
-      if (event.pointerId != null && !svg.hasPointerCapture(event.pointerId)) {
-        try { svg.setPointerCapture(event.pointerId); } catch (_) { /* 忽略捕获失败 */ }
-      }
-    }
-    if (drag.type === "pan") {
-      app.graphView.panX = drag.originPanX + (event.clientX - drag.startX) * drag.scales.x;
-      app.graphView.panY = drag.originPanY + (event.clientY - drag.startY) * drag.scales.y;
-      applyGraphViewportState(root);
-      return;
-    }
-    const position = app.graphView.positions[drag.id];
-    if (!position) return;
-    position.x = drag.origin.x + ((event.clientX - drag.startX) * drag.scales.x) / app.graphView.zoom;
-    position.y = drag.origin.y + ((event.clientY - drag.startY) * drag.scales.y) / app.graphView.zoom;
-    applyGraphNodePositions(root);
-  });
-
-  const release = (event) => {
-    if (!drag) return;
-    if (dragMoved) app.graphSuppressClickUntil = Date.now() + 180;
-    drag = null;
-    dragMoved = false;
-    svg.classList.remove("panning");
-    svg.classList.remove("dragging-node");
-    if (event?.pointerId != null && svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId);
-  };
-
-  svg.addEventListener("pointerup", release);
-  svg.addEventListener("pointercancel", release);
-  svg.addEventListener("pointerleave", (event) => {
-    if (drag?.type === "pan") release(event);
-    updateHoverPreview(null);
-  });
-
-  svg.addEventListener("click", (event) => {
-    const nodeEl = event.target.closest("[data-graph-node]");
-    if (!nodeEl) return;
-    if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
-    app.selectedGraphNodeId = nodeEl.dataset.graphNode || nodeEl.dataset.id || null;
+  // 点节点 → 复用现有选中逻辑：更新 selectedGraphNodeId 并整页重渲染，
+  // 右侧详情面板与关系解释照常由 renderInteractiveGraph 更新。
+  cy.on("tap", "node", (event) => {
+    app.selectedGraphNodeId = event.target.id();
     renderCurrentPage();
-  });
-
-  svg.addEventListener("pointermove", (event) => {
-    const nodeEl = event.target.closest("[data-graph-node]");
-    updateHoverPreview(nodeEl || null);
   });
 }
 
@@ -4682,6 +4542,9 @@ function mountGantts() {
       {
         editable: false,
         selectable: false,
+        // 关闭 vis 内置 XSS 净化：分组标签内容为本地调度数据（订单号/机器名等，非外部 HTML），
+        // 净化会剥掉 .gantt-order-dot / .gantt-group-count 等 span 的 class/style，导致订单色点丢失、标签样式失效
+        xss: { disabled: true },
         zoomable: true,
         moveable: true,
         horizontalScroll: true,
@@ -5756,10 +5619,14 @@ async function handleAction(action, target) {
     return renderCurrentPage();
   }
   if (action === "zoom-graph-in") {
+    const cy = app.cyGraphInstance;
+    if (cy) { cy.zoom({ level: Math.min(cy.maxZoom(), cy.zoom() * 1.15), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }); return; }
     app.graphView.zoom = Math.min(2.4, app.graphView.zoom * 1.15);
     return renderCurrentPage();
   }
   if (action === "zoom-graph-out") {
+    const cy = app.cyGraphInstance;
+    if (cy) { cy.zoom({ level: Math.max(cy.minZoom(), cy.zoom() * 0.87), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }); return; }
     app.graphView.zoom = Math.max(0.45, app.graphView.zoom * 0.87);
     return renderCurrentPage();
   }
@@ -5776,6 +5643,8 @@ async function handleAction(action, target) {
     return renderCurrentPage();
   }
   if (action === "fit-graph-view") {
+    const cy = app.cyGraphInstance;
+    if (cy) { cy.fit(undefined, 40); return; }
     fitGraphViewport(app.graphView.bounds);
     return renderCurrentPage();
   }
@@ -5914,7 +5783,9 @@ async function handleAction(action, target) {
     return navigate("workflow");
   }
   if (action === "toggle-graph-fullscreen") {
-    const shell = target.closest(".graph-workbench") || document.querySelector(".graph-workbench");
+    // 只全屏图谱舞台（画布 + 统计条 + 图例），不含 toolbar/筛选/右侧节点信息栏
+    const workbench = target.closest(".graph-workbench") || document.querySelector(".graph-workbench");
+    const shell = workbench?.querySelector(".graph-stage-card");
     if (!shell || !shell.requestFullscreen) {
       toast("当前浏览器不支持图谱全屏显示。", "warning");
       return;
@@ -5931,14 +5802,20 @@ async function handleAction(action, target) {
 
 function bindGlobalEvents() {
   document.addEventListener("fullscreenchange", () => {
-    const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-workbench")
+    const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-stage-card")
       ? document.fullscreenElement
       : null;
     document.querySelectorAll('[data-action="toggle-graph-fullscreen"]').forEach((button) => {
-      const active = !!fullscreenGraph && button.closest(".graph-workbench") === fullscreenGraph;
+      const active = !!fullscreenGraph && button.closest(".graph-workbench")?.querySelector(".graph-stage-card") === fullscreenGraph;
       button.textContent = active ? "退出全屏" : "全屏查看";
       button.setAttribute("aria-pressed", active ? "true" : "false");
     });
+    // 全屏进出会改变 cytoscape 容器尺寸，需要 resize + 重新适配视图
+    if (app.cyGraphInstance) {
+      requestAnimationFrame(() => {
+        try { app.cyGraphInstance.resize(); app.cyGraphInstance.fit(undefined, 40); } catch (_) { /* 忽略 */ }
+      });
+    }
   });
 
   document.addEventListener("click", async (event) => {

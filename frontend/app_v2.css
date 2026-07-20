@@ -1231,14 +1231,13 @@ a {
   min-height: 620px;
 }
 
-.graph-svg {
+/* cytoscape 绘图容器：需要显式尺寸，背景透出外层 .graph-shell 的渐变 */
+.graph-cytoscape-canvas {
   width: 100%;
+  height: 620px;
   min-height: 620px;
-  height: auto;
-}
-
-.graph-node text {
-  pointer-events: none;
+  border-radius: 12px;
+  background: transparent;
 }
 
 
@@ -1247,18 +1246,37 @@ a {
   gap: 16px;
 }
 
-.graph-workbench:fullscreen {
+/* 全屏只作用于图谱舞台（画布 + 统计条 + 图例），不含 toolbar 与右侧详情卡 */
+.graph-stage-card:fullscreen {
   padding: 20px;
   background: linear-gradient(180deg, rgba(246, 249, 252, 0.99), rgba(235, 241, 246, 0.99));
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  position: relative;
 }
 
-.graph-workbench:fullscreen .graph-shell {
-  min-height: calc(100vh - 340px);
+.graph-stage-card:fullscreen .graph-shell {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
-.graph-workbench:fullscreen .graph-svg {
-  min-height: calc(100vh - 340px);
+.graph-stage-card:fullscreen .graph-cytoscape-canvas {
+  height: 100%;
+  min-height: 0;
+}
+
+/* 舞台内浮动「退出全屏」按钮：仅全屏时显示（非全屏时用 toolbar 里的按钮） */
+.graph-fs-exit {
+  display: none;
+}
+
+.graph-stage-card:fullscreen .graph-fs-exit {
+  display: inline-flex;
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 5;
 }
 
 
@@ -1436,85 +1454,6 @@ a {
   background: rgba(255, 255, 255, 0.72);
   color: var(--text-soft);
   font-size: 12px;
-}
-
-.graph-svg.interactive {
-  user-select: none;
-  touch-action: none;
-  cursor: grab;
-}
-
-.graph-svg.interactive.panning {
-  cursor: grabbing;
-}
-
-.graph-svg.interactive.dragging-node {
-  cursor: grabbing;
-}
-
-.graph-canvas-bg {
-  stroke: rgba(166, 181, 198, 0.34);
-  stroke-width: 1;
-}
-
-.graph-link {
-  stroke: #9aa5b1;
-  stroke-width: 1.35;
-  opacity: 0.66;
-  fill: none;
-}
-
-.graph-link-structure { stroke: #1d53c0; }
-
-.graph-link-resource {
-  stroke: #c2620a;
-  stroke-dasharray: 7 4;
-}
-
-.graph-link-other {
-  stroke: #9aa5b1;
-  stroke-dasharray: 2 4;
-  opacity: 0.45;
-}
-
-.graph-link.highlighted {
-  stroke-width: 2.4;
-  opacity: 0.95;
-}
-
-.graph-link-other.highlighted { stroke: #6b7a8c; }
-
-.graph-node .graph-node-shape {
-  stroke: rgba(255, 255, 255, 0.85);
-  stroke-width: 2;
-  filter: drop-shadow(0 8px 18px rgba(16, 46, 78, 0.16));
-}
-
-.graph-node-hitbox {
-  stroke: none !important;
-  filter: none !important;
-  fill: rgba(255, 255, 255, 0.001);
-}
-
-.graph-node.selected .graph-node-shape {
-  stroke: rgba(11, 46, 79, 0.92);
-  stroke-width: 3;
-  filter: drop-shadow(0 14px 24px rgba(15, 76, 129, 0.26));
-}
-
-.graph-node.neighbor .graph-node-shape {
-  stroke: rgba(255, 255, 255, 0.95);
-  stroke-width: 3;
-}
-
-.graph-node.scoped:not(.selected):not(.neighbor) .graph-node-shape {
-  stroke: rgba(15, 76, 129, 0.4);
-}
-
-.graph-node-label {
-  fill: #32485a;
-  font-size: 10px;
-  transition: opacity 0.15s var(--ease);
 }
 
 .graph-zoom-pill {
@@ -2440,25 +2379,7 @@ a {
   margin-top: 16px;
 }
 
-/* === 图谱 V2：层级泳道 / 图例坞 / 图级统计条 / 面包屑 / 详情面板 === */
-.graph-lane { stroke-width: 1; }
-.graph-lane-plan { fill: rgba(47, 111, 235, 0.05); stroke: rgba(47, 111, 235, 0.16); }
-.graph-lane-resource { fill: rgba(194, 98, 10, 0.05); stroke: rgba(194, 98, 10, 0.16); }
-.graph-lane-other { fill: rgba(100, 116, 139, 0.05); stroke: rgba(100, 116, 139, 0.16); }
-.graph-lane-label { font-size: 13px; font-weight: 700; fill: var(--text); }
-.graph-lane-count { font-size: 10px; fill: var(--text-faint); }
-.graph-family-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; }
-.graph-family-plan { fill: #2f6feb; }
-.graph-family-resource { fill: #c2620a; }
-.graph-family-other { fill: var(--text-faint); }
-
-.graph-node-char { fill: #fff; font-weight: 700; pointer-events: none; }
-.graph-node-order-ring { fill: none; stroke-width: 3; opacity: 0.9; }
-.graph-node[data-type="operation"] .graph-node-label { opacity: 0; }
-.graph-node[data-type="operation"].selected .graph-node-label,
-.graph-node[data-type="operation"].neighbor .graph-node-label,
-.graph-node[data-type="operation"]:hover .graph-node-label { opacity: 1; }
-
+/* === 图谱 V2：图例坞 / 图级统计条 / 面包屑 / 详情面板 === */
 .graph-canvas-stats {
   display: flex;
   flex-wrap: wrap;
@@ -2607,10 +2528,10 @@ a {
   overflow: visible;
 }
 .gantt-canvas .vis-labelset .vis-label.vis-nested-group .vis-inner { padding-left: 22px; }
-/* 左侧标签面板：整体不裁切，且首行标签下移一格避开顶部时间轴，防止首行首列文字被盖住 */
+/* 左侧标签面板：整体不裁切，首行留白避开顶部时间轴 */
 .gantt-canvas .vis-panel.vis-left,
 .gantt-canvas .vis-labelset { overflow: visible; }
-.gantt-canvas .vis-labelset .vis-label:first-child .vis-inner { padding-top: 16px; }
+.gantt-canvas .vis-labelset .vis-label:first-child .vis-inner { padding-top: 12px; }
 
 .gantt-canvas .vis-labelset .vis-label.gantt-group-order {
   background: var(--surface-strong);
@@ -2620,7 +2541,7 @@ a {
   font-weight: 700;
   color: var(--text);
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
 }
 /* 任务令行与订单行同用 flex + gap，确保「任务令号」与「x道工序」徽标之间有明确间距 */
