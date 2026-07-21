@@ -633,12 +633,16 @@ function mountMultiSelectFilters() {
     const total = source.options.length;
 
     const syncAllBox = () => {
-      allBox.checked = working.size === 0 || working.size >= total;
+      // 仅当显式勾选了全部选项时才自动勾上全选框；空集（语义上=全部）不强制勾选，
+      // 避免用户取消全选后被 syncAllBox 立即重新勾上。
+      const allSelected = total > 0 && working.size >= total;
+      if (allBox.checked !== allSelected) allBox.checked = allSelected;
     };
+    // 初始：空集 = 全部，全选框默认勾上
+    allBox.checked = working.size === 0 || working.size >= total;
     const updateSummary = () => {
       summaryText.textContent = multiSelectSummary(source.options, Array.from(working), source.noun, source.unit);
     };
-    syncAllBox();
 
     const commit = () => {
       // 空集合与全选都表示"全部"，统一提交为空数组，让上游按无筛选处理
@@ -676,11 +680,16 @@ function mountMultiSelectFilters() {
     }
 
     allBox.addEventListener("change", () => {
-      working.clear();
       if (allBox.checked) {
         source.options.forEach((o) => working.add(o.id));
+      } else {
+        working.clear();
       }
-      list.querySelectorAll("[data-multi-select-id]").forEach((box) => { box.checked = allBox.checked; });
+      // 重渲染选项列表以反映最新勾选态（而非仅操作当前已渲染的 DOM）
+      const q = search ? search.value.trim().toLowerCase() : "";
+      const matched = q ? source.options.filter((o) => String(o.label).toLowerCase().includes(q)) : source.options;
+      renderOptions(matched.slice(0, MULTI_SELECT_RENDER_CAP));
+      syncAllBox();
       updateSummary();
     });
 
@@ -1847,15 +1856,7 @@ function workflowSteps() {
 }
 
 function renderFlowbar() {
-  const bar = el("flowbar");
-  if (!bar) return;
   const steps = workflowSteps();
-  bar.innerHTML = steps.map((step, index) => `
-    <button class="flow-step ${escapeHtml(step.state || "todo")}" type="button" data-nav="${escapeHtml(step.key)}" title="${escapeHtml(step.detail || step.label)}">
-      <span class="idx">${step.state === "done" ? "✓" : step.state === "blocked" ? "!" : index + 1}</span>
-      <div><strong>${escapeHtml(step.label)}</strong><small>${escapeHtml(step.detail || "")}</small></div>
-    </button>
-  `).join("");
   // 侧栏状态灯 / 徽标与进度条同源
   const toneMap = { import: "lamp-import", graph: "lamp-graph", simulate: "lamp-simulate", optimize: "lamp-optimize" };
   steps.forEach((step) => {
@@ -3090,7 +3091,7 @@ function renderSimulatePage() {
   } else if (app.simResult) {
     renderPrecheck("simulate-precheck", "ok", `✓ 基线仿真（${escapeHtml(app.simResult.rule || app.simRule)}）可行，${completed} / ${total} 工序已排产<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="optimize">下一步：优化求解 →</button>`);
   } else {
-    renderPrecheck("simulate-precheck", "info", `选择派工规则后运行仿真，结果将作为优化求解的基线参照。<span class="grow"></span><button class="btn btn-primary btn-xs" type="button" data-action="run-simulate">运行仿真</button>`);
+    renderPrecheck("simulate-precheck", "info", `选择派工规则后点击右侧「运行仿真」按钮，结果将作为优化求解的基线参照。`);
   }
   // 规则卡片选择（ATC/EDD/SPT/CR/FIFO/LPT + 一句话业务解释）
   const ruleCards = `
@@ -3145,7 +3146,9 @@ function renderSimulatePage() {
         { footer: `当前仅展示前 ${Math.min(20, asArray(app.simResult.gantt).length)} 条工序记录。` },
       )}
     </article>
-  ` : `<article class="surface-card">${renderEmptyState("尚未运行仿真", "运行一次规则仿真后，这里会展示完整的时间轴、状态分布和停机遮罩。")}</article>`;
+  ` : app.simBusy
+    ? `<article class="surface-card">${renderEmptyState("仿真计算中…", `正在运行规则仿真（${escapeHtml(app.simRule)}），完成后将自动展示甘特图与指标。`)}</article>`
+    : `<article class="surface-card">${renderEmptyState("尚未运行仿真", "选择派工规则后点击「运行仿真」按钮，这里会展示完整的时间轴、状态分布和停机遮罩。")}</article>`;
   container.innerHTML = `<div class="stack">${ruleCards}${infeasibleBanner}${kpiCards}${detail}</div>`;
   requestAnimationFrame(() => mountGantts());
 }
@@ -5244,9 +5247,15 @@ async function handleImportFile(file) {
     }
     if (app.currentPage !== "import") await navigate("import");
     else await renderCurrentPage();
+    syncTopbarAndNav();
     refreshWorkflowOverview({ force: true });
     // 强校验通过后自动构建图谱，构建进度显示在「图谱构建」页
-    if (!failed) await handleBuildGraph();
+    if (!failed) {
+      await handleBuildGraph();
+      // 图谱构建完成后再次刷新侧栏状态灯
+      syncTopbarAndNav();
+      refreshWorkflowOverview({ force: true });
+    }
   } catch (error) {
     setImportProgress({ busy: false, percent: 100, tone: "error", label: "导入失败", note: error.message });
     toast(`导入失败：${error.message}`, "error");

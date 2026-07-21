@@ -29,7 +29,6 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --topbar-h: 56px;
-  --flowbar-h: 58px;
   --sidebar-w: 224px;
   /* 浅底色阶（由各语义色派生，重构 v3 组件使用；--accent-soft 已被甘特实色渐变占用，浅底用 --accent-tint） */
   --primary-soft: rgba(47, 111, 235, 0.09);

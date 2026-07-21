@@ -2605,10 +2605,10 @@ a {
 /* ---------- 应用骨架 ---------- */
 .app {
   display: grid;
-  grid-template-rows: var(--topbar-h) var(--flowbar-h) 1fr;
+  grid-template-rows: var(--topbar-h) 1fr;
   grid-template-columns: var(--sidebar-w) 1fr;
   height: 100vh;
-  grid-template-areas: "topbar topbar" "flowbar flowbar" "sidebar main";
+  grid-template-areas: "topbar topbar" "sidebar main";
 }
 .topbar {
   grid-area: topbar;
@@ -2616,12 +2616,6 @@ a {
   padding: 0 20px; background: var(--surface);
   border-bottom: 1px solid var(--line); z-index: 30;
   height: auto; min-height: 0; box-shadow: none;
-}
-.flowbar {
-  grid-area: flowbar;
-  display: flex; align-items: stretch;
-  background: var(--surface); border-bottom: 1px solid var(--line);
-  padding: 0 24px; z-index: 29;
 }
 .sidebar {
   grid-area: sidebar;
@@ -2676,30 +2670,6 @@ a {
 .kpi-strip .cell:last-child { border-right: 0; }
 .kpi-strip .cell span { display: block; font-size: 9.5px; color: var(--text-faint); }
 .kpi-strip .cell strong { font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-
-/* ---------- 流程进度条（工作流唯一权威表达） ---------- */
-.flow-step {
-  position: relative; flex: 1; display: flex; align-items: center; gap: 10px;
-  padding: 0 18px; cursor: pointer; transition: background 0.15s var(--ease);
-  border-right: 1px solid var(--line); background: none; border-top: 0; border-bottom: 0;
-  font-family: inherit; text-align: left; color: var(--text);
-}
-.flow-step:last-child { border-right: 0; }
-.flow-step:hover { background: var(--surface-strong); }
-.flow-step .idx {
-  width: 25px; height: 25px; border-radius: 50%; display: grid; place-items: center;
-  font-family: var(--font-mono); font-size: 11px; flex-shrink: 0;
-  border: 1.5px solid var(--line-strong); color: var(--text-faint); background: var(--surface);
-}
-.flow-step.done .idx { background: var(--success); border-color: var(--success); color: #fff; }
-.flow-step.current .idx { background: var(--primary); border-color: var(--primary); color: #fff; box-shadow: 0 0 0 4px var(--primary-soft); }
-.flow-step.blocked .idx { background: var(--danger); border-color: var(--danger); color: #fff; }
-.flow-step strong { display: block; font-size: 12.5px; font-weight: 600; }
-.flow-step small { display: block; font-size: 10px; color: var(--text-faint); margin-top: 1px; }
-.flow-step.done small { color: var(--success); }
-.flow-step.current small { color: var(--primary); }
-.flow-step.blocked small { color: var(--danger); }
-.flow-step.current { background: linear-gradient(to bottom, var(--primary-soft), transparent); box-shadow: inset 0 -2px 0 var(--primary); }
 
 /* ---------- 侧栏（精简：仅页面入口，无步骤编号） ---------- */
 .nav-group { margin-bottom: 18px; }
