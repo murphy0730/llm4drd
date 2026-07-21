@@ -7,141 +7,165 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>LLM4DRD 智能调度决策中枢</title>
-  <link rel="stylesheet" href="/static/app_v2.css?v=20260720-6">
-  <link rel="stylesheet" href="/static/design-system.css?v=20260717-1">
+  <link rel="stylesheet" href="/static/app_v2.css?v=20260721-1">
+  <link rel="stylesheet" href="/static/design-system.css?v=20260720-2">
   <link rel="stylesheet" href="/static/vendor/vis-timeline-graph2d.min.css?v=7.7.3">
 </head>
 <body>
-  <div class="app-shell">
+  <div class="app">
+    <!-- ================= 顶栏：品牌 + 场景 pill + 实例 KPI 条 + LLM 状态 ================= -->
     <header class="topbar">
-      <div class="brand-block">
+      <div class="brand">
+        <button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="折叠/展开侧边栏" title="折叠/展开侧边栏">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5h17M3.5 12h17M3.5 19h17"/></svg>
+        </button>
         <div class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M7.2 18.4 18.6 7M15.1 5.7l3.2-1.6 1.6 3.2-1.7 1.6M5.2 15.8c-1.7-2.5-1.4-5.6.6-7.8M8.1 17.7c-2.7-3.5-2.4-8.4.7-11.5"/></svg>
         </div>
-        <div class="brand-copy">
-          <h1>LLM4DRD</h1>
-          <p>智能调度决策中枢</p>
+        <div><h1>LLM4DRD</h1><p>智能调度决策中枢</p></div>
+      </div>
+      <button class="scene-pill" type="button" data-action="goto-new-scene" title="返回数据导入页">
+        <span class="dot"></span>
+        <span id="topbar-scene-name">未加载实例</span>
+        <small id="topbar-scene-meta"></small>
+      </button>
+      <div class="topbar-right">
+        <div class="kpi-strip">
+          <div class="cell"><span>订单</span><strong id="topbar-orders">-</strong></div>
+          <div class="cell"><span>任务令</span><strong id="topbar-tasks">-</strong></div>
+          <div class="cell"><span>工序</span><strong id="topbar-operations">-</strong></div>
+          <div class="cell"><span>机器</span><strong id="topbar-machines">-</strong></div>
+          <div class="cell"><span>工装</span><strong id="topbar-toolings">-</strong></div>
+          <div class="cell"><span>人员</span><strong id="topbar-personnel">-</strong></div>
         </div>
-      </div>
-
-      <div class="topbar-status">
-        <div class="status-box"><span>订单</span><strong id="topbar-orders">-</strong></div>
-        <div class="status-box"><span>任务令</span><strong id="topbar-tasks">-</strong></div>
-        <div class="status-box"><span>工序</span><strong id="topbar-operations">-</strong></div>
-        <div class="status-box"><span>机器</span><strong id="topbar-machines">-</strong></div>
-        <div class="status-box"><span>工装</span><strong id="topbar-toolings">-</strong></div>
-        <div class="status-box"><span>人员</span><strong id="topbar-personnel">-</strong></div>
-      </div>
-
-      <div class="topbar-scene">
-        <button class="scene-pill" type="button" data-action="goto-new-scene">
-          <span id="topbar-scene-name">未加载实例</span>
+        <button class="llm-status" type="button" data-nav="llm" id="llm-status-pill" title="大模型连接配置">
+          <span class="pulse"></span><span id="llm-status-text">LLM 未配置</span>
         </button>
       </div>
     </header>
 
-    <div class="workspace">
-      <aside class="sidebar" aria-label="主导航">
-        <div class="sidebar-group">
-          <div class="sidebar-title">调度流程</div>
-          <button class="nav-item" type="button" data-nav="new-scene"><span class="nav-index">01</span>数据导入</button>
-          <button class="nav-item requires-scene" type="button" data-nav="simulate"><span class="nav-index">02</span>规则仿真</button>
-          <button class="nav-item requires-scene" type="button" data-nav="optimize-launch"><span class="nav-index">03</span>优化求解</button>
-          <button class="nav-item requires-scene" type="button" data-nav="solution-review"><span class="nav-index">04</span>方案评审</button>
-        </div>
+    <!-- ================= 流程进度条（工作流唯一权威表达，全局常驻） ================= -->
+    <nav class="flowbar" id="flowbar" aria-label="调度流程进度"></nav>
 
-        <div class="sidebar-group sidebar-utility">
-          <div class="sidebar-title">辅助</div>
-          <button class="nav-item requires-scene" type="button" data-nav="dashboard">工作概览</button>
-          <div class="sidebar-title">系统</div>
-          <button class="nav-item" type="button" data-nav="llm-config">大模型连接</button>
-          <button class="nav-item" type="button" data-nav="settings">系统状态</button>
-        </div>
-      </aside>
+    <!-- ================= 侧栏（无步骤编号，按组） ================= -->
+    <aside class="sidebar" aria-label="主导航">
+      <div class="nav-group">
+        <div class="nav-title">调度流程</div>
+        <button class="nav-item" type="button" data-nav="import">数据导入<span class="lamp" id="lamp-import"></span></button>
+        <button class="nav-item requires-scene" type="button" data-nav="graph">图谱构建<span class="lamp" id="lamp-graph"></span></button>
+        <button class="nav-item requires-scene" type="button" data-nav="simulate">规则仿真<span class="lamp" id="lamp-simulate"></span></button>
+        <button class="nav-item requires-scene" type="button" data-nav="optimize">优化求解<span class="lamp" id="lamp-optimize"></span></button>
+        <button class="nav-item requires-scene" type="button" data-nav="review">方案评审<span class="badge" id="badge-review" hidden></span></button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">分析</div>
+        <button class="nav-item requires-scene" type="button" data-nav="dashboard">工作概览</button>
+      </div>
+      <div class="nav-spacer"></div>
+      <div class="nav-note" id="nav-note" hidden></div>
+      <div class="nav-group">
+        <div class="nav-title">系统</div>
+        <button class="nav-item requires-scene" type="button" data-nav="export">导出与交付</button>
+        <button class="nav-item" type="button" data-nav="llm">大模型连接<span class="lamp" id="lamp-llm"></span></button>
+        <button class="nav-item" type="button" data-nav="system">系统状态</button>
+      </div>
+    </aside>
 
-      <main class="main-stage">
-        <section class="page active" id="page-new-scene">
-          <div class="page-body">
-            <article class="surface-card">
-              <div class="upload-panel">
-                <div class="upload-dropzone">
-                  <strong>拖入 Excel 或点击选择文件</strong>
-                  <span>支持 planning_context / orders / tasks / operations / machines / toolings / personnel / downtimes / initial_state</span>
-                  <input id="import-file" type="file" accept=".xlsx,.xls,.xlsm" hidden>
-                  <div class="upload-actions">
-                    <button class="btn btn-primary" type="button" data-action="trigger-import">选择 Excel</button>
-                    <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
-                  </div>
-                </div>
-                <div class="import-progress" id="import-progress" hidden aria-live="polite">
-                  <div class="import-progress-head">
-                    <span class="import-spinner" aria-hidden="true"></span>
-                    <strong id="import-progress-label">正在上传 Excel…</strong>
-                  </div>
-                  <div class="import-progress-track"><i id="import-progress-bar" style="width:0%"></i></div>
-                  <p class="import-progress-note" id="import-progress-note">请勿关闭页面，导入完成后会在本页显示数据强校验结果。</p>
-                </div>
+    <!-- ================= 主区域 ================= -->
+    <main class="main">
+      <!-- 页 1 · 数据导入 -->
+      <section class="page active" id="page-import">
+        <div class="page-body">
+          <div id="import-precheck"></div>
+          <div class="stack">
+            <div class="drop-hero" id="drop-hero">
+              <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div>
+              <h3>拖入 Excel，或点击选择文件</h3>
+              <p>支持 .xlsx / .xls / .xlsm，至少包含 planning_context 与 orders 两个 Sheet</p>
+              <div class="sheet-tags">
+                <code>planning_context</code><code>orders</code><code>tasks</code><code>operations</code><code>machines</code><code>toolings</code><code>personnel</code><code>downtimes</code><code>initial_state</code>
               </div>
-            </article>
+              <input id="import-file" type="file" accept=".xlsx,.xls,.xlsm" hidden>
+              <button class="btn btn-primary" type="button" data-action="trigger-import">选择 Excel</button>
+              <button class="btn btn-ghost" type="button" data-action="download-template" style="margin-left:8px">下载模板</button>
+              <div class="import-progress" id="import-progress" hidden aria-live="polite">
+                <div class="import-progress-head">
+                  <span class="import-spinner" aria-hidden="true"></span>
+                  <strong id="import-progress-label">正在上传 Excel…</strong>
+                </div>
+                <div class="import-progress-track"><i id="import-progress-bar" style="width:0%"></i></div>
+                <p class="import-progress-note" id="import-progress-note">请勿关闭页面，导入完成后会在本页显示数据强校验结果。</p>
+              </div>
+            </div>
             <div id="new-scene-validation"></div>
-            <div id="new-scene-graph"></div>
           </div>
-        </section>
+        </div>
+      </section>
 
-        <section class="page" id="page-dashboard">
-          <div class="page-header">
-            <div>
-              <span class="eyebrow">Workflow overview</span>
-              <h2>工作概览</h2>
-              <p>确认当前进度、关键结果与下一步操作。</p>
-            </div>
-            <div class="page-header-actions">
-              <button class="btn btn-ghost" type="button" data-action="goto-workflow-step" data-step="4">优化求解</button>
-              <button class="btn btn-primary" type="button" data-action="goto-review">方案评审</button>
-            </div>
-          </div>
-          <div class="page-body" id="dashboard-content"></div>
-        </section>
+      <!-- 页 2 · 图谱构建（画布最大化） -->
+      <section class="page" id="page-graph">
+        <div class="page-body flush">
+          <div id="graph-precheck"></div>
+          <div id="graph-content"></div>
+        </div>
+      </section>
 
-        <section class="page" id="page-workflow">
-          <div class="page-body">
-            <div class="workflow-content" id="workflow-content"></div>
-          </div>
-        </section>
+      <!-- 页 3 · 规则仿真 -->
+      <section class="page" id="page-simulate">
+        <div class="page-body">
+          <div id="simulate-precheck"></div>
+          <div id="simulate-content"></div>
+        </div>
+      </section>
 
-        <section class="page" id="page-review">
-          <div class="page-body">
-            <div class="tab-strip">
-              <button class="tab-btn" type="button" data-review-tab="library">方案库</button>
-              <button class="tab-btn" type="button" data-review-tab="exact">精确冠军参考</button>
-              <button class="tab-btn" type="button" data-review-tab="ai">AI 评审助手</button>
-            </div>
-            <div id="review-content"></div>
-          </div>
-        </section>
+      <!-- 页 4 · 优化求解 -->
+      <section class="page" id="page-optimize">
+        <div class="page-body">
+          <div id="optimize-precheck"></div>
+          <div id="optimize-content"></div>
+        </div>
+      </section>
 
-        <section class="page" id="page-system">
-          <div class="page-header">
-            <div>
-              <span class="eyebrow">System</span>
-              <h2>系统与导出</h2>
-              <p>维护大模型连接、文件导出与演示交付相关设置。</p>
-            </div>
-          </div>
-          <div class="page-body">
-            <div class="tab-strip">
-              <button class="tab-btn" type="button" data-system-tab="llm">大模型连接</button>
-              <button class="tab-btn" type="button" data-system-tab="export">文件导出</button>
-              <button class="tab-btn" type="button" data-system-tab="settings">系统状态</button>
-            </div>
-            <div id="system-content"></div>
-          </div>
-        </section>
-      </main>
-    </div>
+      <!-- 页 5 · 方案评审（标题带 + Tab 由 JS 渲染进 review-content） -->
+      <section class="page" id="page-review">
+        <div class="page-body page-body--wide">
+          <div id="review-precheck"></div>
+          <div id="review-content"></div>
+        </div>
+      </section>
 
-    <div class="toast-stack" id="toast-stack"></div>
+      <!-- 页 6 · 工作概览 -->
+      <section class="page" id="page-dashboard">
+        <div class="page-body">
+          <div id="dashboard-content"></div>
+        </div>
+      </section>
+
+      <!-- 页 7 · 导出与交付 -->
+      <section class="page" id="page-export">
+        <div class="page-body page-body--narrow">
+          <div id="export-content"></div>
+        </div>
+      </section>
+
+      <!-- 页 8 · 大模型连接 -->
+      <section class="page" id="page-llm">
+        <div class="page-body page-body--narrow">
+          <div id="llm-precheck"></div>
+          <div id="llm-content"></div>
+        </div>
+      </section>
+
+      <!-- 页 9 · 系统状态 -->
+      <section class="page" id="page-system">
+        <div class="page-body page-body--narrow">
+          <div id="system-content"></div>
+        </div>
+      </section>
+    </main>
   </div>
+
+  <div class="toast-stack" id="toast-stack"></div>
 
   <script src="/static/vendor/vis-timeline-graph2d.min.js?v=7.7.3"></script>
   <script src="/static/vendor/cytoscape.min.js?v=3.30.4"></script>
@@ -149,6 +173,6 @@
   <script src="/static/vendor/cytoscape-dagre.js?v=2.5.0"></script>
   <script src="/static/optimize_progress.js?v=20260717-1"></script>
   <script src="/static/review_runtime.js?v=20260719-3"></script>
-  <script src="/static/app_v2.js?v=20260720-6"></script>
+  <script src="/static/app_v2.js?v=20260721-1"></script>
 </body>
 </html>

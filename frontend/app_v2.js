@@ -1,6 +1,7 @@
 const CONFIG = {
   API_BASE: "/api",
   HISTORY_KEY: "llm4drd_v2_scene_history",
+  SIDEBAR_COLLAPSED_KEY: "llm4drd_v2_sidebar_collapsed",
   OPT_POLL_MS: 1500,
   TABLE_LIMIT: 40,
   HEURISTIC_RULES: ["ATC", "EDD", "SPT", "CR", "FIFO", "LPT"],
@@ -88,29 +89,34 @@ const REVIEW_KPI_KEYS = [
 ];
 
 const NAV_MAP = {
-  // “当前实例”页面已移除；旧书签 hash 统一落到“数据导入”。
-  "scene-library": { page: "new-scene" },
-  "new-scene": { page: "new-scene" },
+  // 重构 v3：9 个一级页面；工作流只由顶部流程进度条表达，侧栏无步骤编号。
+  import: { page: "import" },
+  graph: { page: "graph", requiresScene: true },
+  simulate: { page: "simulate", requiresScene: true },
+  optimize: { page: "optimize", requiresScene: true },
+  review: { page: "review", reviewTab: "library", requiresScene: true },
   dashboard: { page: "dashboard", requiresScene: true },
+  export: { page: "export", requiresScene: true },
+  llm: { page: "llm" },
+  system: { page: "system" },
+  // 旧书签 hash 兼容映射
+  "new-scene": { page: "import" },
+  "scene-library": { page: "import" },
+  workflow: { page: "simulate", requiresScene: true },
+  "optimize-config": { page: "optimize", requiresScene: true },
+  "optimize-launch": { page: "optimize", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
-  // 旧的通用 "workflow" 书签 hash（原 rail 导航已移除）统一落到「规则仿真」。
-  workflow: { page: "workflow", workflowStep: 3, requiresScene: true },
-  // 图谱视图已并入「数据导入」页，旧的 graph 书签 hash 落到该页。
-  graph: { page: "new-scene" },
-  simulate: { page: "workflow", workflowStep: 3, requiresScene: true },
-  "optimize-config": { page: "workflow", workflowStep: 4, requiresScene: true },
-  "optimize-launch": { page: "workflow", workflowStep: 4, requiresScene: true },
   "pareto-library": { page: "review", reviewTab: "library", requiresScene: true },
   "exact-reference": { page: "review", reviewTab: "exact", requiresScene: true },
   "ai-review": { page: "review", reviewTab: "ai", requiresScene: true },
-  "llm-config": { page: "system", systemTab: "llm" },
-  "export-data": { page: "system", systemTab: "export" },
-  settings: { page: "system", systemTab: "settings" },
+  "llm-config": { page: "llm" },
+  "export-data": { page: "export", requiresScene: true },
+  settings: { page: "system" },
 };
 
 const app = {
-  currentPage: "new-scene",
-  currentNav: "new-scene",
+  currentPage: "import",
+  currentNav: "import",
   currentSceneId: null,
   currentScene: null,
   sceneHistory: [],
@@ -122,6 +128,9 @@ const app = {
   simBusy: false,
   instanceDb: null,
   downtimes: [],
+  // 流程进度条聚合状态：来自 GET /api/workflow/overview，带节流时间戳
+  workflowOverview: null,
+  workflowOverviewAt: 0,
   graphMeta: null,
   graphNodes: [],
   graphEdges: [],
@@ -149,6 +158,8 @@ const app = {
   optimizeObjectiveCatalog: [],
   exactObjectiveCatalog: [],
   llmConfig: null,
+  // LLM 测试连接的最近一次结果（顶栏/大模型页状态条使用）
+  llmTestResult: null,
   health: null,
   systemTab: "llm",
   reviewTab: "library",
@@ -203,7 +214,6 @@ const app = {
   // 评审：某方案每日机器分类利用率缓存 schemeId -> { loading, error, days, types }
   reviewDailyUtilCache: {},
   // 方案每日利用率趋势详情：当前展开的方案 id（null = 未展开）
-  reviewUtilTrendId: null,
   // 甘特图机器筛选与分页：canvasId -> { type, downtimeOnly, query, page }
   ganttMachineFilter: {},
   // 甘特图订单内二级筛选：canvasId -> { status, query, from, to }
@@ -327,6 +337,7 @@ const api = {
   },
   validateInstance(force = false) { return this.json(`/instance/validate${force ? "?force=true" : ""}`); },
   getWorkflowProgress() { return this.json("/workflow/progress"); },
+  getWorkflowOverview() { return this.json("/workflow/overview"); },
   saveReviewProgress(payload) { return this.json("/workflow/review", "PUT", payload); },
   exportValidation() { return this.request("/instance/validate/export"); },
   downloadTemplate() { return this.request("/instance/template"); },
@@ -879,64 +890,123 @@ function optimizeProgress(status) {
   return window.OptimizeProgress.optimizeProgress(status);
 }
 
+// 优化三阶段映射：coarse→近似广搜；exact_promotion/elite_refine→精确精修；finalize→Pareto 前沿重算
+const OPT_PHASE_STAGES = [
+  { key: "coarse", label: "近似广搜", phases: ["coarse"] },
+  { key: "refine", label: "精确精修", phases: ["exact_promotion", "elite_refine"] },
+  { key: "pareto", label: "Pareto 前沿重算", phases: ["finalize"] },
+];
+
+function optimizeStageIndex(status) {
+  const state = String(status?.status || "").toLowerCase();
+  if (state === "done" || state === "completed" || state === "success") return OPT_PHASE_STAGES.length;
+  const phase = String(status?.phase || "").toLowerCase();
+  const idx = OPT_PHASE_STAGES.findIndex((stage) => stage.phases.includes(phase));
+  return idx; // -1 = 尚未进入第一阶段（初始化/图上下文）
+}
+
 function renderOptimizeStatus() {
   const status = app.optimizeStatus;
-  if (!status) return "";
-  const state = String(status.status || "running").toLowerCase();
+  const result = app.optimizeResult;
+  if (!status && !result) return "";
+  const state = String(status?.status || (result ? "done" : "running")).toLowerCase();
   const failed = state === "error" || state === "failed";
   const done = state === "done" || state === "completed" || state === "success";
-  const activity = window.OptimizeProgress.optimizeActivity(status);
+  const activity = window.OptimizeProgress.optimizeActivity(status || {});
   const tone = failed ? "danger" : done ? "success" : activity.stalled ? "warning" : "info";
-  const label = failed ? "优化失败" : done ? "优化完成" : state === "submitting" ? "正在提交优化任务" : "优化正在运行";
-  const progress = optimizeProgress(status);
-  const message = failed
-    ? (status.error || status.message || "未收到具体错误说明")
+  const label = failed ? "优化失败" : done ? "优化完成" : state === "submitting" ? "正在提交优化任务" : "优化运行中";
+  const progress = done ? 100 : optimizeProgress(status || {});
+  const CIRC = 276.5;
+  const stageIdx = optimizeStageIndex(status);
+  const phaseChip = failed
+    ? `<span class="chip err">执行失败</span>`
     : done
-      ? (status.message || "优化完成，方案已可用于评审")
-      : (activity.message || status.message || "任务已提交，正在等待优化器返回进度");
-  const phaseCompleted = Number(status.phase_completed);
-  const phaseTotal = Number(status.phase_total);
-  const phaseWork = Number.isFinite(phaseCompleted) && Number.isFinite(phaseTotal) && phaseTotal > 0
-    ? `${formatInt(phaseCompleted)} / ${formatInt(phaseTotal)}`
-    : "等待工作量明细";
+      ? `<span class="chip ok">全部阶段完成</span>`
+      : stageIdx >= 0
+        ? `<span class="chip blue">阶段 ${stageIdx + 1}/3 · ${OPT_PHASE_STAGES[stageIdx].label}</span>`
+        : `<span class="chip blue">初始化 · ${escapeHtml(optimizePhaseLabel(status?.phase || state))}</span>`;
+  const stageStat = (stage, idx) => {
+    if (idx === 0) return `${formatInt(status?.approximate_evaluations || result?.approximate_evaluations || 0)} 评估`;
+    if (idx === 1) return `${formatInt(status?.exact_evaluations || result?.exact_evaluations || 0)} 评估`;
+    return done ? "已完成" : "待执行";
+  };
+  const phaseLine = OPT_PHASE_STAGES.map((stage, idx) => {
+    const cls = done || idx < stageIdx ? "done" : idx === stageIdx ? "on" : "";
+    const mark = done || idx < stageIdx ? "✓" : idx === stageIdx ? "●" : "";
+    return `<div class="phase ${cls}">${mark ? `${mark} ` : ""}${stage.label} · ${stageStat(stage, idx)}</div>`;
+  }).join("");
+  const message = failed
+    ? (status?.error || status?.message || "未收到具体错误说明")
+    : done
+      ? (status?.message || "优化完成，方案已可用于评审")
+      : (activity.message || status?.message || "任务已提交，正在等待优化器返回进度");
+  const bestObjective = (() => {
+    if (!done || !result) return null;
+    const key = asArray(result.objective_keys)[0];
+    const best = bestMetricValue(asArray(result.solutions), key);
+    if (!key || best === null || best === undefined) return null;
+    return { key, value: metricDisplay({ objectives: { [key]: best } }, key) };
+  })();
   return `
-    <article class="optimize-run-status ${tone}" id="optimize-run-status" role="status" aria-live="polite">
-      <div class="optimize-run-head">
-        <div>
-          <span class="eyebrow">Live optimization</span>
-          <h3>${escapeHtml(label)}</h3>
+    <div class="card card-pad state-card ${done ? "success" : failed ? "danger" : ""}" id="optimize-run-status" role="status" aria-live="polite">
+      <div class="card-head" style="border:0;margin:0;padding:0">
+        <div><h3>${escapeHtml(label)}</h3><p>任务 ${escapeHtml(app.optimizeTaskId || "待分配")} · 已运行 ${formatDurationSeconds(status?.elapsed_s || result?.elapsed_s || 0)}${activity.stalled && !failed && !done ? ` · 真实进度静止 ${formatDurationSeconds(activity.secondsSinceRealProgress)}` : ""}</p></div>
+        ${phaseChip}
+      </div>
+      <div class="progress-ring-wrap mt-16">
+        <div class="ring">
+          <svg width="104" height="104">
+            <circle cx="52" cy="52" r="44" fill="none" stroke="var(--inset)" stroke-width="9"/>
+            <circle cx="52" cy="52" r="44" fill="none" stroke="${failed ? "var(--danger)" : "var(--primary)"}" stroke-width="9" stroke-linecap="round" stroke-dasharray="${CIRC}" stroke-dashoffset="${(CIRC * (1 - progress / 100)).toFixed(1)}"/>
+          </svg>
+          <span class="pct">${progress}%</span>
         </div>
-        ${statusChip(failed ? "失败" : done ? "完成" : `${progress}%`, tone)}
+        <div style="flex:1">
+          <div class="phase-line">${phaseLine}</div>
+          <div class="bar-track"><div class="bar-fill" style="width:${progress}%"></div></div>
+          <p class="subtle mt-16" style="margin-top:10px">${escapeHtml(message)}</p>
+        </div>
       </div>
-      <div class="optimize-run-progress"><i style="width:${progress}%"></i></div>
-      <p class="optimize-run-message">${escapeHtml(message)}</p>
-      <div class="optimize-run-meta">
-        <span>阶段：${escapeHtml(optimizePhaseLabel(status.phase || state))}</span>
-        <span>任务 ID：${escapeHtml(app.optimizeTaskId || "待分配")}</span>
-        <span>已耗时：${formatDurationSeconds(status.elapsed_s || 0)}</span>
-        <span>当前代数：${formatInt(status.current_generation || 0)} / ${formatInt(status.config?.generations || app.optimizeForm.generations)}</span>
-        <span>阶段工作量：${escapeHtml(phaseWork)}</span>
-        <span>最近真实进度：${activity.lastRealProgressAt ? escapeHtml(formatDateTime(activity.lastRealProgressAt)) : "等待首次真实进度"}</span>
-        <span>真实进度静止：${formatDurationSeconds(activity.secondsSinceRealProgress)}</span>
-        <span>连接心跳：${status.updated_at || status.received_at ? escapeHtml(formatDateTime(status.updated_at || status.received_at)) : "等待首次心跳"}</span>
+      <div class="grid-4 mt-16">
+        <div class="kpi-card"><span>近似评估</span><strong>${formatInt(status?.approximate_evaluations || result?.approximate_evaluations || 0)}</strong><small>前期广搜吞吐</small></div>
+        <div class="kpi-card"><span>精确评估</span><strong>${formatInt(status?.exact_evaluations || result?.exact_evaluations || 0)}</strong><small>后期高质量验证</small></div>
+        <div class="kpi-card"><span>候选方案</span><strong>${formatInt(result?.found_solution_count || result?.solutions?.length || status?.archive_size || status?.coarse_pool_size || 0)}</strong><small>目标 ${formatInt(app.optimizeForm.targetSolutionCount)} 个</small></div>
+        <div class="kpi-card"><span>${bestObjective ? `当前最优${escapeHtml(getObjectiveLabel(bestObjective.key))}` : "可行率"}</span><strong>${bestObjective ? bestObjective.value : formatPercent(status?.feasible_ratio || 0)}</strong><small>${bestObjective ? "Pareto 前沿判优" : "候选池可行占比"}</small></div>
       </div>
-      ${activity.stalled && !failed && !done ? `<div class="graph-build-warning">${escapeHtml(activity.message)}</div>` : ""}
       ${failed ? `
-        <div class="optimize-error-detail">
-          <strong>${escapeHtml(status.error_type ? `错误类型：${status.error_type}` : "失败原因")}</strong>
+        <div class="optimize-error-detail mt-16">
+          <strong>${escapeHtml(status?.error_type ? `错误类型：${status.error_type}` : "失败原因")}</strong>
           <span>请根据上方原因检查实例数据与优化参数后重试；若仍失败，可将下方技术详情提供给开发人员。</span>
-          ${status.technical_detail ? `<details><summary>查看技术详情</summary><pre>${escapeHtml(status.technical_detail)}</pre></details>` : ""}
+          ${status?.technical_detail ? `<details><summary>查看技术详情</summary><pre>${escapeHtml(status.technical_detail)}</pre></details>` : ""}
         </div>
       ` : ""}
-      ${!failed ? `
-        <div class="optimize-run-stats">
-          <span>近似评估 <strong>${formatInt(status.approximate_evaluations || 0)}</strong></span>
-          <span>精确评估 <strong>${formatInt(status.exact_evaluations || 0)}</strong></span>
-          <span>候选池 <strong>${formatInt(status.coarse_pool_size || status.archive_size || 0)}</strong></span>
-          <span>可行率 <strong>${formatPercent(status.feasible_ratio || 0)}</strong></span>
-        </div>
-      ` : ""}
-    </article>
+    </div>
+  `;
+}
+
+// 运行日志流：后端 hybrid status 的 events 字段（无该字段的旧后端回退到当前活动文案）
+function renderOptimizeLogCard() {
+  const status = app.optimizeStatus;
+  if (!status && !app.optimizeResult) return "";
+  const events = asArray(status?.events);
+  let lines;
+  if (events.length) {
+    lines = events.map((event) => {
+      const ts = event.ts ? new Date(Number(event.ts) * 1000) : null;
+      const stamp = ts && !Number.isNaN(ts.getTime())
+        ? `${String(ts.getHours()).padStart(2, "0")}:${String(ts.getMinutes()).padStart(2, "0")}:${String(ts.getSeconds()).padStart(2, "0")}`
+        : "--:--:--";
+      return `[${stamp}] ${event.text || ""}`;
+    }).join("\n");
+  } else {
+    const fallback = status?.message || window.OptimizeProgress.optimizeActivity(status || {}).message || "等待求解器事件…";
+    lines = `[--] ${fallback}`;
+  }
+  return `
+    <div class="card card-pad">
+      <div class="card-head"><div><h3>运行日志</h3><p>求解器关键事件流。</p></div></div>
+      <div class="log-box" id="optimize-log-box">${escapeHtml(lines)}</div>
+    </div>
   `;
 }
 
@@ -1211,41 +1281,48 @@ function normalizeCandidate(raw, overrides = {}) {
   };
 }
 
+// 方案显示命名：一律「方案一 / 方案二 / 方案三…」（中文序号，按候选顺序分配），
+// 界面任何位置不得出现后端 S-xxxxxxxx 式 solution_id；id/solutionId 字段本身不动。
+const CHINESE_NUMERALS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+function schemeDisplayName(index) {
+  const n = index + 1;
+  let num;
+  if (n <= 10) num = CHINESE_NUMERALS[n];
+  else if (n < 20) num = `十${CHINESE_NUMERALS[n - 10]}`;
+  else num = `${CHINESE_NUMERALS[Math.floor(n / 10)]}十${n % 10 ? CHINESE_NUMERALS[n % 10] : ""}`;
+  return `方案${num}`;
+}
+
+// 来源徽标（对比表方案名旁的小 chip）：基线 ATC / Pareto / 启发式 EDD / 精确冠军
+function candidateSourceTag(item) {
+  const source = String(item?.source || "");
+  if (source === "baseline") return { label: `基线 ${item.raw?.rule_name || item.heuristicRuleName || "ATC"}`, cls: "info" };
+  if (source === "exact_reference") return { label: "精确冠军", cls: "ok" };
+  if (source === "reference" || source === "heuristic") return { label: `启发式 ${item.heuristicRuleName || ""}`.trim(), cls: "neutral" };
+  return { label: "Pareto", cls: "blue" };
+}
+
 function getReviewCandidates() {
   const items = [];
   if (app.optimizeResult?.baseline) {
-    items.push(normalizeCandidate(app.optimizeResult.baseline, {
-      source: "baseline",
-      name: `基线方案 · ${app.optimizeResult.baseline.rule_name || "ATC"}`,
-    }));
+    items.push(normalizeCandidate(app.optimizeResult.baseline, { source: "baseline" }));
   }
-  asArray(app.optimizeResult?.solutions).forEach((item, index) => {
-    items.push(normalizeCandidate(item, {
-      source: item.source || "pareto",
-      name: `方案${index + 1}`,
-    }));
+  asArray(app.optimizeResult?.solutions).forEach((item) => {
+    items.push(normalizeCandidate(item, { source: item.source || "pareto" }));
   });
-  asArray(app.optimizeResult?.reference_solutions).forEach((item, index) => {
-    items.push(normalizeCandidate(item, {
-      source: item.source || "reference",
-      name: item.rule_name ? `启发式参考 · ${item.rule_name}` : `参照方案${index + 1}`,
-    }));
+  asArray(app.optimizeResult?.reference_solutions).forEach((item) => {
+    items.push(normalizeCandidate(item, { source: item.source || "reference" }));
   });
-  asArray(app.referenceSolutions).forEach((item, index) => {
-    items.push(normalizeCandidate(item, {
-      source: item.source || "heuristic",
-      name: item.rule_name ? `启发式参考 · ${item.rule_name}` : `参照方案${index + 1}`,
-    }));
+  asArray(app.referenceSolutions).forEach((item) => {
+    items.push(normalizeCandidate(item, { source: item.source || "heuristic" }));
   });
   if (app.exactReference) {
-    items.push(normalizeCandidate(app.exactReference, {
-      source: "exact_reference",
-      name: app.exactReference.exact_info?.label || app.exactReference.solution_id || "精确冠军参考",
-    }));
+    items.push(normalizeCandidate(app.exactReference, { source: "exact_reference" }));
   }
   const uniq = new Map();
   items.filter(Boolean).forEach((item) => uniq.set(item.id, item));
-  return Array.from(uniq.values());
+  // 去重后按顺序统一分配中文序号显示名
+  return Array.from(uniq.values()).map((item, index) => ({ ...item, name: schemeDisplayName(index) }));
 }
 
 function ensureReviewSelection() {
@@ -1325,7 +1402,7 @@ function renderCandidateMetricMatrix(candidates, title = "主目标 + 全量 KPI
         ["方案", "来源", ...primaryKeys.map((key) => getObjectiveLabel(key)), ...extraKeys.map((key) => getObjectiveLabel(key))],
         items.map((item) => [
           escapeHtml(item.name),
-          escapeHtml(item.source),
+          escapeHtml(candidateSourceTag(item).label),
           ...primaryKeys.map((key) => metricDisplay(item, key)),
           ...extraKeys.map((key) => metricDisplay(item, key)),
         ]),
@@ -1570,7 +1647,11 @@ function showPage(pageName) {
 function updateShell() {
   const hasScene = !!app.currentScene;
   const summary = getSceneSummary();
-  el("topbar-scene-name").textContent = hasScene ? app.currentScene.name : "未加载场景";
+  el("topbar-scene-name").textContent = hasScene ? app.currentScene.name : "未加载实例";
+  const sceneMeta = el("topbar-scene-meta");
+  if (sceneMeta) sceneMeta.textContent = hasScene ? `${formatInt(summary.orders)}订单 · ${formatInt(summary.operations)}工序` : "";
+  const sceneDot = document.querySelector(".scene-pill .dot");
+  if (sceneDot) sceneDot.classList.toggle("missing", !hasScene);
   el("topbar-orders").textContent = hasScene ? formatInt(summary.orders) : "-";
   el("topbar-tasks").textContent = hasScene ? formatInt(summary.tasks) : "-";
   el("topbar-operations").textContent = hasScene ? formatInt(summary.operations) : "-";
@@ -1578,9 +1659,140 @@ function updateShell() {
   el("topbar-toolings").textContent = hasScene ? formatInt(summary.toolings) : "-";
   el("topbar-personnel").textContent = hasScene ? formatInt(summary.personnel) : "-";
 
+  // LLM 状态 pill：已配置 Key → 已连接（测试成功后带延迟信息），未配置 → 警告态
+  const llmPill = el("llm-status-pill");
+  const llmText = el("llm-status-text");
+  if (llmPill && llmText) {
+    const configured = !!app.llmConfig?.has_key;
+    const tested = app.llmTestResult?.status === "ok";
+    llmText.textContent = tested ? "LLM 已连接" : configured ? "LLM 已配置" : "LLM 未配置";
+    llmPill.classList.toggle("warn", !configured);
+  }
+
   document.querySelectorAll(".requires-scene").forEach((node) => {
     node.classList.toggle("is-disabled", !hasScene);
   });
+
+  // 流程进度条 + 侧栏状态灯：优先用后端聚合接口，未返回前用前端状态推导兜底
+  renderFlowbar();
+  refreshWorkflowOverview();
+}
+
+// 前端兜底推导 5 步状态（与后端 /api/workflow/overview 同构；接口可用后以服务端为准）
+function deriveWorkflowSteps() {
+  const hasScene = !!app.currentScene;
+  const summary = getSceneSummary();
+  const validation = app.validation;
+  const graphReady = !!app.graphMeta && app.graphMeta.cache_ready !== false;
+  const sim = app.simResult;
+  const simFeasible = sim?.metrics?.feasible !== false;
+  const optStatus = String(app.optimizeStatus?.status || "").toLowerCase();
+  const optRunning = optimizeIsRunning();
+  const optDone = !!app.optimizeResult || optStatus === "done";
+  const optError = ["error", "failed"].includes(optStatus);
+  const selectedCount = app.reviewSelection.length;
+  const candidateCount = getReviewCandidates().length;
+
+  const steps = [];
+  if (!hasScene) {
+    steps.push({ key: "import", state: "current", tone: "none", label: "数据导入", detail: "未导入实例" });
+  } else if (validation?.status === "failed") {
+    steps.push({ key: "import", state: "done", tone: "err", label: "数据导入", detail: `校验失败 · ${formatInt(validation.error_count || 0)} 错误` });
+  } else if (validation?.status === "warning") {
+    steps.push({ key: "import", state: "done", tone: "warn", label: "数据导入", detail: `校验通过 · ${formatInt(validation.warning_count || 0)} 警告` });
+  } else if (validation) {
+    steps.push({ key: "import", state: "done", tone: "ok", label: "数据导入", detail: "校验通过" });
+  } else {
+    steps.push({ key: "import", state: "done", tone: "warn", label: "数据导入", detail: `${formatInt(summary.orders)} 订单 · 未校验` });
+  }
+  steps.push(!hasScene
+    ? { key: "graph", state: "todo", tone: "none", label: "图谱构建", detail: "待导入" }
+    : graphReady
+      ? { key: "graph", state: "done", tone: "ok", label: "图谱构建", detail: `${formatInt(app.graphMeta.total_nodes)} 节点 · ${formatInt(app.graphMeta.total_edges)} 边` }
+      : { key: "graph", state: "todo", tone: "none", label: "图谱构建", detail: "未构建" });
+  steps.push(!hasScene
+    ? { key: "simulate", state: "todo", tone: "none", label: "规则仿真", detail: "待导入" }
+    : sim
+      ? { key: "simulate", state: "done", tone: simFeasible ? "ok" : "warn", label: "规则仿真", detail: `${sim.rule || app.simRule} · ${simFeasible ? "可行" : "不完整"}` }
+      : { key: "simulate", state: "todo", tone: "none", label: "规则仿真", detail: "未运行" });
+  steps.push(optRunning
+    ? { key: "optimize", state: "current", tone: "run", label: "优化求解", detail: `运行中 · ${optimizeProgress(app.optimizeStatus)}%` }
+    : optError
+      ? { key: "optimize", state: "blocked", tone: "err", label: "优化求解", detail: "优化失败" }
+      : optDone
+        ? { key: "optimize", state: "done", tone: "ok", label: "优化求解", detail: `${formatInt(app.optimizeResult?.found_solution_count || app.optimizeResult?.solutions?.length || 0)} 候选方案` }
+        : { key: "optimize", state: "todo", tone: "none", label: "优化求解", detail: "未运行" });
+  steps.push(selectedCount
+    ? { key: "review", state: "done", tone: "ok", label: "方案评审", detail: `已选 ${selectedCount} 个方案`, badge: `${selectedCount}/4` }
+    : candidateCount
+      ? { key: "review", state: optDone ? "current" : "todo", tone: "none", label: "方案评审", detail: `已有 ${formatInt(candidateCount)} 候选`, badge: "0/4" }
+      : { key: "review", state: "todo", tone: "none", label: "方案评审", detail: "暂无候选", badge: "0/4" });
+  // current 唯一：第一个非 done 非 blocked 的步骤
+  if (!steps.some((step) => step.state === "current")) {
+    const next = steps.find((step) => step.state === "todo");
+    if (next) next.state = "current";
+  }
+  return steps;
+}
+
+function workflowSteps() {
+  const steps = app.workflowOverview?.steps;
+  return Array.isArray(steps) && steps.length ? steps : deriveWorkflowSteps();
+}
+
+function renderFlowbar() {
+  const bar = el("flowbar");
+  if (!bar) return;
+  const steps = workflowSteps();
+  bar.innerHTML = steps.map((step, index) => `
+    <button class="flow-step ${escapeHtml(step.state || "todo")}" type="button" data-nav="${escapeHtml(step.key)}" title="${escapeHtml(step.detail || step.label)}">
+      <span class="idx">${step.state === "done" ? "✓" : step.state === "blocked" ? "!" : index + 1}</span>
+      <div><strong>${escapeHtml(step.label)}</strong><small>${escapeHtml(step.detail || "")}</small></div>
+    </button>
+  `).join("");
+  // 侧栏状态灯 / 徽标与进度条同源
+  const toneMap = { import: "lamp-import", graph: "lamp-graph", simulate: "lamp-simulate", optimize: "lamp-optimize" };
+  steps.forEach((step) => {
+    const lampId = toneMap[step.key];
+    if (lampId) {
+      const lamp = el(lampId);
+      if (lamp) lamp.className = `lamp ${step.tone && step.tone !== "none" ? step.tone : ""}`;
+    }
+    if (step.key === "review") {
+      const badge = el("badge-review");
+      if (badge) {
+        badge.hidden = !step.badge;
+        badge.textContent = step.badge || "";
+      }
+    }
+  });
+  const llmLamp = el("lamp-llm");
+  if (llmLamp) llmLamp.className = `lamp ${app.llmConfig?.has_key ? "ok" : "warn"}`;
+  // 侧栏优化运行提示
+  const note = el("nav-note");
+  if (note) {
+    if (optimizeIsRunning()) {
+      note.hidden = false;
+      note.innerHTML = `<strong>优化运行中</strong>${escapeHtml(optimizePhaseLabel(app.optimizeStatus?.phase || ""))} · 已运行 ${formatDurationSeconds(app.optimizeStatus?.elapsed_s || 0)}，完成后可进入方案评审。`;
+    } else {
+      note.hidden = true;
+      note.innerHTML = "";
+    }
+  }
+}
+
+// 聚合状态节流刷新：默认 5s 一次；关键动作完成后可 force
+async function refreshWorkflowOverview({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - app.workflowOverviewAt < 5000) return;
+  app.workflowOverviewAt = now;
+  try {
+    const payload = await api.getWorkflowOverview();
+    app.workflowOverview = payload;
+    renderFlowbar();
+  } catch {
+    // 接口不可用（旧后端）时保持前端推导，不打扰用户
+  }
 }
 
 async function navigate(navKey, pushHash = true) {
@@ -1589,10 +1801,10 @@ async function navigate(navKey, pushHash = true) {
     const ready = await ensureSceneLoaded();
     if (!ready) {
       toast("请先在“数据导入”页生成或导入实例。", "warning");
-      app.currentNav = "new-scene";
-      app.currentPage = "new-scene";
-      setActiveNav("new-scene");
-      showPage("new-scene");
+      app.currentNav = "import";
+      app.currentPage = "import";
+      setActiveNav("import");
+      showPage("import");
       return;
     }
   }
@@ -1661,72 +1873,75 @@ function renderDashboard() {
   const summary = getSceneSummary();
   const selected = getSelectedReviewCandidate();
   const objectiveKeys = app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys || [];
+  // 流程进度由顶部全局进度条表达，本页只保留 Hero + KPI + 三列详情
   const flowSteps = [
-    { index: "01", label: "实例准备", done: !!app.currentScene, nav: "new-scene" },
-    { index: "02", label: "约束校验", done: Number(summary.operations || 0) > 0 && Number(summary.machines || 0) > 0, nav: "new-scene" },
-    { index: "03", label: "基线仿真", done: !!app.simResult, nav: "simulate" },
-    { index: "04", label: "优化求解", done: !!app.optimizeResult, nav: "optimize-launch" },
-    { index: "05", label: "方案评审", done: !!selected, nav: "solution-review" },
+    { label: "数据导入", done: !!app.currentScene, nav: "import" },
+    { label: "图谱构建", done: !!app.graphMeta, nav: "graph" },
+    { label: "规则仿真", done: !!app.simResult, nav: "simulate" },
+    { label: "优化求解", done: !!app.optimizeResult, nav: "optimize" },
+    { label: "方案评审", done: !!selected, nav: "review" },
   ];
   const activeStep = flowSteps.findIndex((item) => !item.done);
   const nextStep = flowSteps[activeStep < 0 ? flowSteps.length - 1 : activeStep];
+  const optState = app.optimizeStatus?.status || (app.optimizeResult ? "done" : "not-started");
+  const heroTitle = optimizeIsRunning()
+    ? "下一步：等待优化求解完成"
+    : activeStep < 0 ? "当前调度流程已完成" : `下一步：${escapeHtml(nextStep.label)}`;
+  const heroDesc = optimizeIsRunning()
+    ? `优化任务正在${escapeHtml(optimizePhaseLabel(app.optimizeStatus?.phase || ""))}（${optimizeProgress(app.optimizeStatus)}%），完成后建议复核 Pareto 前沿并进入方案评审导出最终方案。`
+    : activeStep < 0 ? "实例、仿真和候选方案均已就绪，可继续复核并导出最终方案。" : "按业务顺序推进，每一步的结果会自动成为下一步的输入。";
   container.innerHTML = `
-    <article class="surface-card executive-hero">
-      <div class="executive-hero-copy">
-        <span class="eyebrow">Current workflow</span>
-        <h3>${activeStep < 0 ? "当前调度流程已完成" : `下一步：${escapeHtml(nextStep.label)}`}</h3>
-        <p>${activeStep < 0 ? "实例、仿真和候选方案均已就绪，可继续复核并导出最终方案。" : "按业务顺序推进，每一步的结果会自动成为下一步的输入。"}</p>
-        <div class="form-actions"><button class="btn btn-primary" type="button" data-nav-jump="${escapeHtml(nextStep.nav)}">${activeStep < 0 ? "返回方案评审" : `继续${escapeHtml(nextStep.label)}`}</button></div>
+    <div class="stack">
+      <div class="hero">
+        <div>
+          <span style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6)">Current workflow</span>
+          <h3>${heroTitle}</h3>
+          <p>${heroDesc}</p>
+          <button class="btn btn-white" type="button" data-nav-jump="${escapeHtml(nextStep.nav)}">${activeStep < 0 ? "返回方案评审" : `继续${escapeHtml(nextStep.label)}`}</button>
+        </div>
+        <div class="cells">
+          <div><span>当前主目标</span><strong>${escapeHtml(objectiveShortList(objectiveKeys))}</strong></div>
+          <div><span>已得方案数</span><strong>${formatInt(app.optimizeResult?.found_solution_count || app.optimizeResult?.solutions?.length || 0)}</strong></div>
+          <div><span>当前关注方案</span><strong>${escapeHtml(selected?.name || "未指定")}</strong></div>
+        </div>
       </div>
-      <div class="executive-hero-metrics">
-        <div><span>\u5f53\u524d\u4e3b\u76ee\u6807</span><strong>${escapeHtml(objectiveShortList(objectiveKeys))}</strong></div>
-        <div><span>\u5df2\u5f97\u65b9\u6848\u6570</span><strong>${formatInt(app.optimizeResult?.found_solution_count || app.optimizeResult?.solutions?.length || 0)}</strong></div>
-        <div><span>\u5f53\u524d\u5173\u6ce8\u65b9\u6848</span><strong>${escapeHtml(selected?.name || "\u672a\u6307\u5b9a")}</strong></div>
+      <div class="grid-4">
+        <div class="kpi-card"><span>订单</span><strong>${formatInt(summary.orders)}</strong><small>当前实例订单规模</small></div>
+        <div class="kpi-card"><span>工序</span><strong>${formatInt(summary.operations)}</strong><small>当前实例工序总量</small></div>
+        <div class="kpi-card"><span>资源</span><strong>${formatInt(summary.machines)} / ${formatInt(summary.toolings)} / ${formatInt(summary.personnel)}</strong><small>机器 / 工装 / 人员</small></div>
+        <div class="kpi-card"><span>优化状态</span><strong style="color:var(--primary)">${escapeHtml(optState)}</strong><small>混合优化任务当前状态</small></div>
       </div>
-    </article>
-    <nav class="workflow-overview" aria-label="调度流程进度">
-      ${flowSteps.map((item, index) => `
-        <button class="workflow-overview-step ${item.done ? "done" : index === activeStep ? "active" : "pending"}" type="button" data-nav-jump="${item.nav}">
-          <span>${item.done ? "✓" : item.index}</span>
-          <strong>${item.label}</strong>
-          <small>${item.done ? "已完成" : index === activeStep ? "下一步" : "待开始"}</small>
-        </button>
-      `).join("")}
-    </nav>
-    ${renderKpiCards([
-      { label: "\u8ba2\u5355", value: formatInt(summary.orders), hint: "\u5f53\u524d\u5b9e\u4f8b\u8ba2\u5355\u89c4\u6a21" },
-      { label: "\u5de5\u5e8f", value: formatInt(summary.operations), hint: "\u5f53\u524d\u5b9e\u4f8b\u5de5\u5e8f\u603b\u91cf" },
-      { label: "\u8d44\u6e90", value: `${formatInt(summary.machines)} / ${formatInt(summary.toolings)} / ${formatInt(summary.personnel)}`, hint: "\u673a\u5668 / \u5de5\u88c5 / \u4eba\u5458" },
-      { label: "\u4f18\u5316\u72b6\u6001", value: escapeHtml(app.optimizeStatus?.status || (app.optimizeResult ? "done" : "not-started")), hint: "\u6df7\u5408\u4f18\u5316\u4efb\u52a1\u5f53\u524d\u72b6\u6001" },
-    ])}
-    <div class="three-column">
-      <article class="surface-card">
-        <div class="card-head"><h3>\u95ee\u9898\u89c4\u6a21</h3><p>\u5e2e\u52a9\u5feb\u901f\u5224\u65ad\u5f53\u524d\u5b9e\u4f8b\u662f\u8054\u8c03\u7ea7\u3001\u4e2d\u578b\u8fd8\u662f\u6f14\u793a\u7ea7\u5927\u5b9e\u4f8b\u3002</p></div>
-        ${renderKeyValueGrid([
-          { label: "\u4efb\u52a1\u6570", value: formatInt(summary.tasks) },
-          { label: "\u505c\u673a\u8bb0\u5f55", value: formatInt(app.downtimes.length) },
-          { label: "\u5728\u5236\u5de5\u5e8f", value: formatInt(summary.ops_in_progress || 0) },
-          { label: "\u8ba1\u5212\u8d77\u70b9", value: formatDateTime(app.instanceDetails?.plan_start_at) },
-        ])}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>\u4f18\u5316\u8fdb\u5c55</h3><p>\u5173\u6ce8\u524d\u671f\u8fd1\u4f3c\u5e7f\u641c\u548c\u540e\u671f\u7cbe\u786e\u8bc4\u4f30\u7684\u63a8\u8fdb\u60c5\u51b5\u3002</p></div>
-        ${renderKeyValueGrid([
-          { label: "\u8fd1\u4f3c\u8bc4\u4f30", value: formatInt(app.optimizeResult?.approximate_evaluations || app.optimizeStatus?.approximate_evaluations || 0) },
-          { label: "\u7cbe\u786e\u8bc4\u4f30", value: formatInt(app.optimizeResult?.exact_evaluations || app.optimizeStatus?.exact_evaluations || 0) },
-          { label: "\u603b\u8bc4\u4f30\u6b21\u6570", value: formatInt(app.optimizeResult?.total_evaluations || app.optimizeStatus?.total_evaluations || 0) },
-          { label: "\u8017\u65f6", value: formatDurationSeconds(app.optimizeResult?.elapsed_s || app.optimizeStatus?.elapsed_s || 0) },
-        ])}
-      </article>
-      <article class="surface-card">
-        <div class="card-head"><h3>\u5f53\u524d\u63a8\u8350\u5173\u6ce8</h3><p>\u5982\u679c\u5df2\u7ecf\u6709\u65b9\u6848\u7ed3\u679c\uff0c\u4f18\u5148\u5173\u6ce8\u5f53\u524d\u8bc4\u5ba1\u9009\u4e2d\u7684\u5019\u9009\u65b9\u6848\u3002</p></div>
-        ${selected ? renderKeyValueGrid([
-          { label: "\u65b9\u6848\u540d\u79f0", value: escapeHtml(selected.name || "-") },
-          { label: "\u603b\u5ef6\u8bef", value: metricDisplay(selected, "total_tardiness") },
-          { label: "\u603b\u5468\u671f", value: metricDisplay(selected, "makespan") },
-          { label: "\u51c0\u53ef\u7528\u5229\u7528\u7387", value: metricDisplay(selected, "avg_net_available_utilization") },
-        ]) : renderEmptyState("\u8fd8\u6ca1\u6709\u5019\u9009\u65b9\u6848", "\u5148\u8fd0\u884c\u6df7\u5408\u4f18\u5316\uff0c\u6216\u751f\u6210\u542f\u53d1\u5f0f / \u7cbe\u786e\u53c2\u8003\u65b9\u6848\u540e\u518d\u6765\u8fd9\u91cc\u6c47\u603b\u67e5\u770b\u3002")}
-      </article>
+      <div class="grid-3">
+        <article class="surface-card">
+          <div class="card-head"><div><h3>问题规模</h3></div></div>
+          <div class="kv-grid" style="grid-template-columns:1fr 1fr">
+            <div><span>任务数</span><strong>${formatInt(summary.tasks)}</strong></div>
+            <div><span>停机记录</span><strong>${formatInt(app.downtimes.length)}</strong></div>
+            <div><span>在制工序</span><strong>${formatInt(summary.ops_in_progress || 0)}</strong></div>
+            <div><span>计划起点</span><strong>${escapeHtml(formatDateTime(app.instanceDetails?.plan_start_at))}</strong></div>
+          </div>
+        </article>
+        <article class="surface-card">
+          <div class="card-head"><div><h3>优化进展</h3></div></div>
+          <div class="kv-grid" style="grid-template-columns:1fr 1fr">
+            <div><span>近似评估</span><strong>${formatInt(app.optimizeResult?.approximate_evaluations || app.optimizeStatus?.approximate_evaluations || 0)}</strong></div>
+            <div><span>精确评估</span><strong>${formatInt(app.optimizeResult?.exact_evaluations || app.optimizeStatus?.exact_evaluations || 0)}</strong></div>
+            <div><span>总评估次数</span><strong>${formatInt(app.optimizeResult?.total_evaluations || app.optimizeStatus?.total_evaluations || 0)}</strong></div>
+            <div><span>耗时</span><strong>${formatDurationSeconds(app.optimizeResult?.elapsed_s || app.optimizeStatus?.elapsed_s || 0)}</strong></div>
+          </div>
+        </article>
+        <article class="surface-card">
+          <div class="card-head"><div><h3>当前推荐关注</h3></div></div>
+          ${selected ? `
+          <div class="kv-grid" style="grid-template-columns:1fr 1fr">
+            <div><span>方案名称</span><strong>${escapeHtml(selected.name || "-")}</strong></div>
+            <div><span>总延误</span><strong>${metricDisplay(selected, "total_tardiness")}</strong></div>
+            <div><span>总周期</span><strong>${metricDisplay(selected, "makespan")}</strong></div>
+            <div><span>净可用利用率</span><strong>${metricDisplay(selected, "avg_net_available_utilization")}</strong></div>
+          </div>
+          ` : renderEmptyState("还没有候选方案", "先运行混合优化，或生成启发式 / 精确参考方案后再来这里汇总查看。")}
+        </article>
+      </div>
     </div>
   `;
 }
@@ -2249,18 +2464,9 @@ function renderTimeline(entries, options = {}) {
         return renderCurrentPage();
       },
     });
-  const orderSelector = orderOptions.length > 1 || !allowAll ? `
-    <div class="field-inline">
-      <span>订单</span>
-      ${orderControl}
-      <span>分组</span>
-      <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
-        <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
-        <option value="machine" ${groupMode === "machine" ? "selected" : ""}>按机器资源</option>
-      </select>
-    </div>
-  ` : "";
-
+  // 设计稿 v3：甘特筛选只保留 4 个并排成一排——订单（多选）、机器类型（多选）、工序状态、分组；
+  // 已按反馈移除：仅含停机、机器号搜索、工序搜索、时间窗输入（底层筛选状态保持默认值，不再渲染控件）。
+  const showOrderControl = orderOptions.length > 1 || !allowAll;
   const facet = data.machineFacet;
   const machineTypeControl = facet ? renderMultiSelectFilter({
     id: `${id}-mtype`,
@@ -2275,28 +2481,28 @@ function renderTimeline(entries, options = {}) {
       return renderCurrentPage();
     },
   }) : "";
-  const machineFilterBar = facet ? `
-    <div class="field-inline gantt-filter-bar">
-      <span>机器类型</span>
-      ${machineTypeControl}
-      <label class="gantt-filter-check"><input type="checkbox" data-gantt-downtime-only data-canvas="${escapeHtml(id)}" ${facet.filter.downtimeOnly ? "checked" : ""}> 仅含停机（${formatInt(facet.downtimeGroups)} 台）</label>
-      <input type="search" class="gantt-filter-query" placeholder="搜索机器号…" value="${escapeHtml(facet.filter.query)}" data-gantt-machine-query data-canvas="${escapeHtml(id)}">
-    </div>
-  ` : "";
-  const entryFilterBar = `
-    <div class="field-inline gantt-filter-bar">
-      <span>工序状态</span>
+  const hitText = facet
+    ? `命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} ${groupMode === "order" ? "道工序行" : "台机器"}`
+    : `共 ${formatInt(data.groups.length)} 行`;
+  const filterRow = `
+    <div class="gantt-filter-row nowrap">
+      ${showOrderControl ? `<span class="flabel">订单</span>${orderControl}<span class="sep3"></span>` : ""}
+      ${facet ? `<span class="flabel">机器类型</span>${machineTypeControl}<span class="sep3"></span>` : ""}
+      <span class="flabel">工序状态</span>
       <select data-gantt-status-filter data-canvas="${escapeHtml(id)}">
         <option value="__all__" ${entryFilter.status === "__all__" ? "selected" : ""}>全部状态</option>
         <option value="completed" ${entryFilter.status === "completed" ? "selected" : ""}>已完成</option>
         <option value="processing" ${entryFilter.status === "processing" ? "selected" : ""}>进行中</option>
         <option value="future" ${entryFilter.status === "future" ? "selected" : ""}>未来排产</option>
       </select>
-      <input type="search" class="gantt-filter-query" placeholder="搜索工序/任务/机器…" value="${escapeHtml(entryFilter.query)}" data-gantt-entry-query data-canvas="${escapeHtml(id)}">
-      <span>时间窗(h)</span>
-      <input type="number" class="gantt-filter-num" placeholder="起" value="${escapeHtml(String(entryFilter.from))}" data-gantt-time-from data-canvas="${escapeHtml(id)}">
-      <span>~</span>
-      <input type="number" class="gantt-filter-num" placeholder="止" value="${escapeHtml(String(entryFilter.to))}" data-gantt-time-to data-canvas="${escapeHtml(id)}">
+      <span class="sep3"></span>
+      <span class="flabel">分组</span>
+      <select data-gantt-group-mode data-canvas="${escapeHtml(id)}">
+        <option value="order" ${groupMode === "order" ? "selected" : ""} ${allowOrderMode ? "" : "disabled"}>按订单层级</option>
+        <option value="machine" ${groupMode === "machine" ? "selected" : ""}>按机器资源</option>
+      </select>
+      <span class="grow"></span>
+      <span class="flabel">${escapeHtml(hitText)}</span>
     </div>
   `;
   const pager = facet && facet.pageCount > 1 ? `
@@ -2333,18 +2539,11 @@ function renderTimeline(entries, options = {}) {
   return `
     <div class="surface-card">
       <div class="card-head">
-        <h3>${escapeHtml(options.title || "资源甘特图")}</h3>
-        <p>条块颜色=订单标识色（与图谱订单节点外圈一致），质感区分已完成 / 进行中 / 未来排产；红色竖线为"现在"进度分界；斜纹遮罩显示班次外与停机占用（悬停可见起止与类型）。</p>
+        <div><h3>${escapeHtml(options.title || "资源甘特图")}</h3>
+        <p>条块颜色=订单标识色，质感区分已完成 / 进行中 / 未来排产；红色竖线为"现在"进度分界；斜纹遮罩显示班次外与停机占用。</p></div>
+        ${selectedOrder === "__all__" ? `<span class="chip info">${escapeHtml(hitText)}</span>` : `<span class="chip info">${escapeHtml(selectedOrder)}</span>`}
       </div>
-      ${orderSelector}
-      ${machineFilterBar}
-      ${entryFilterBar}
-      <div class="timeline-summary-strip">
-        <div class="timeline-summary-card"><span>当前展示</span><strong>${selectedOrderColor ? `<i class="gantt-order-dot" style="background:${selectedOrderColor}"></i>` : ""}${selectedOrder === "__all__" ? "全部订单" : escapeHtml(selectedOrder)}（共 ${formatInt(orderOptions.length)} 个订单${serverMode ? ` / ${formatInt(serverOrders.totalOperations || 0)} 道工序` : ""}）</strong></div>
-        <div class="timeline-summary-card"><span>${groupMode === "order" ? "工序行 / 涉及机器" : "工序 / 资源行数"}</span><strong>${groupMode === "order" ? `${formatInt(visibleEntries.length)} / ${formatInt(facet ? facet.machineGroups : 0)} 台` : `${formatInt(visibleEntries.length)} / ${formatInt(data.groups.length)}${facet ? `（共 ${formatInt(facet.totalGroups)} 台）` : ""}`}</strong></div>
-        <div class="timeline-summary-card"><span>已完成 / 进行中 / 未来</span><strong>${formatInt(statusCounts.completed)} / ${formatInt(statusCounts.processing)} / ${formatInt(statusCounts.future)}</strong></div>
-        <div class="timeline-summary-card"><span>时间基准</span><strong>${data.hasRealBase ? "计划起始时间" : "相对小时（无 plan_start_at）"}</strong></div>
-      </div>
+      ${filterRow}
       ${pager}
       ${legendHtml}
       <div class="gantt-canvas" id="${escapeHtml(id)}"></div>
@@ -2772,74 +2971,61 @@ function fitGraphViewport(bounds) {
   app.graphView.panY = 80 - bounds.minY * zoom;
 }
 
-function renderGraphSection() {
-  const graphMetaGrid = app.graphMeta
-    ? renderKeyValueGrid([
-      { label: "节点", value: formatInt(app.graphMeta.total_nodes) },
-      { label: "边", value: formatInt(app.graphMeta.total_edges) },
-      { label: "创建时间", value: formatDateTime(app.graphMeta.created_at) },
-      { label: "节点类型", value: formatInt(Object.keys(app.graphMeta.node_type_counts || {}).length) },
-    ], "context-grid cols-4")
-    : graphBuildIsRunning()
-      ? ""
-      : renderEmptyState("尚未构建图谱", "数据强校验通过后会自动构建图谱，也可以点击下方按钮手动构建。");
-  return `
-    <div class="workflow-stage-stack">
-      <article class="surface-card">
-        <div class="card-head"><h3>图谱构建</h3></div>
-        ${renderGraphBuildStatus()}
-        ${graphMetaGrid}
-        <div class="form-actions form-actions--gap">
-          <button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>
-        </div>
-      </article>
-      ${app.graphMeta ? renderInteractiveGraph() : ""}
-    </div>
-  `;
-}
-
-function renderWorkflowStep3() {
+function renderSimulatePage() {
+  const container = el("simulate-content");
+  if (!container) return;
   const simMetrics = app.simResult?.metrics || {};
-  const simulationPanel = `
+  const completed = formatInt(simMetrics.completed_operations || 0);
+  const total = formatInt(simMetrics.total_operations || 0);
+  const infeasible = !!app.simResult && simMetrics.feasible === false;
+  // 前置检查条
+  if (infeasible) {
+    renderPrecheck("simulate-precheck", "err", `⚠ 仿真不完整：仅完成 ${completed} / ${total} 道工序，下方指标不可用于决策。<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="import">去查看校验结果 →</button>`);
+  } else if (app.simResult) {
+    renderPrecheck("simulate-precheck", "ok", `✓ 基线仿真（${escapeHtml(app.simResult.rule || app.simRule)}）可行，${completed} / ${total} 工序已排产<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="optimize">下一步：优化求解 →</button>`);
+  } else {
+    renderPrecheck("simulate-precheck", "info", `选择派工规则后运行仿真，结果将作为优化求解的基线参照。<span class="grow"></span><button class="btn btn-primary btn-xs" type="button" data-action="run-simulate">运行仿真</button>`);
+  }
+  // 规则卡片选择（ATC/EDD/SPT/CR/FIFO/LPT + 一句话业务解释）
+  const ruleCards = `
     <article class="surface-card">
-      <div class="card-head"><h3>规则仿真</h3><p>先用规则基线验证数据、班次、停机和初始在制状态是否合理，再决定是否进入优化。</p></div>
-      <div class="field-inline">
-        <span>规则</span>
-        <select id="workflow-sim-rule">
-          ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.simRule ? "selected" : ""}>${rule}</option>`).join("")}
-        </select>
+      <div class="card-head">
+        <div><h3>选择派工规则</h3><p>当前 ${escapeHtml(app.simRule)}。仿真结果作为优化求解的基线参照。</p></div>
+        <button class="btn btn-primary" type="button" data-action="run-simulate" ${app.simBusy ? "disabled" : ""}>${app.simBusy ? "仿真运行中…" : "运行仿真"}</button>
       </div>
-      <div class="form-actions form-actions--gap">
-        <button class="btn btn-primary" type="button" data-action="run-simulate">运行仿真</button>
+      <div class="rule-grid">
+        ${CONFIG.HEURISTIC_RULES.map((rule) => `
+          <button class="rule-card ${rule === app.simRule ? "selected" : ""}" type="button" data-action="select-sim-rule" data-rule="${escapeHtml(rule)}">
+            <strong>${escapeHtml(rule)}</strong><p>${escapeHtml(HEURISTIC_RULE_BLURB[rule] || "经典派工规则")}</p>
+          </button>
+        `).join("")}
       </div>
-      <div id="sim-status">${renderSimStatusInner(app.simStatus)}</div>
-      ${app.simResult && simMetrics.feasible === false ? `
-        <div class="sim-infeasible-banner" role="alert">
-          <strong>仿真结果不完整，下方指标不可用于决策</strong>
-          <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)} 道工序，请到“数据导入”页运行数据校验。`)}</span>
-          ${renderInfeasibleDetail(app.simResult.diagnosis_detail)}
-          <div class="form-actions"><button class="btn btn-secondary" type="button" data-nav-jump="new-scene">去查看校验结果</button></div>
-        </div>
-      ` : ""}
-      ${app.simResult ? renderKeyValueGrid([
-        { label: "总延误", value: formatDurationHours(simMetrics.total_tardiness) },
-        { label: "总周期", value: formatDurationHours(simMetrics.makespan) },
-        { label: "净可用利用率", value: formatPercent(simMetrics.avg_net_available_utilization) },
-        { label: "关键资源净可用利用率", value: formatPercent(simMetrics.critical_net_available_utilization) },
-        { label: "总等待时间", value: formatDurationHours(simMetrics.total_wait_time) },
-        { label: "完成工序", value: `${formatInt(simMetrics.completed_operations)} / ${formatInt(simMetrics.total_operations)}` },
-      ]) : renderEmptyState("尚未运行仿真", "运行一次规则仿真后，这里会展示完整的时间轴、状态分布和停机遮罩。")}
+      <div id="sim-status" class="mt-16">${renderSimStatusInner(app.simStatus)}</div>
     </article>
   `;
-
-  const simulationDetail = app.simResult ? `
+  const kpiCards = app.simResult ? `
+    <div class="grid-4">
+      <div class="kpi-card"><span>总延误</span><strong>${formatDurationHours(simMetrics.total_tardiness)}</strong><small>相对基线规则的参考值</small></div>
+      <div class="kpi-card"><span>总周期 (Makespan)</span><strong>${formatDurationHours(simMetrics.makespan)}</strong><small>完整排产周期</small></div>
+      <div class="kpi-card"><span>净可用利用率</span><strong>${formatPercent(simMetrics.avg_net_available_utilization)}</strong><small>机器加权平均</small></div>
+      <div class="kpi-card"><span>完成工序</span><strong>${completed} / ${total}</strong><small style="color:${infeasible ? "var(--danger)" : "var(--success)"}">${infeasible ? "存在未排产工序" : "全部排产成功"}</small></div>
+    </div>
+  ` : "";
+  const infeasibleBanner = infeasible ? `
+    <div class="sim-infeasible-banner" role="alert">
+      <strong>仿真结果不完整，指标不可用于决策</strong>
+      <span>${escapeHtml(app.simResult.diagnosis || `仅完成 ${completed} / ${total} 道工序，请到“数据导入”页运行数据校验。`)}</span>
+      ${renderInfeasibleDetail(app.simResult.diagnosis_detail)}
+    </div>
+  ` : "";
+  const detail = app.simResult ? `
     ${renderTimeline(app.simResult.gantt, {
       title: `规则仿真甘特图 · ${app.simRule}`,
       canvasId: "gantt-sim",
       solutionIds: [app.simResult.solution_id || `RULE:${app.simRule}`],
     })}
     <article class="surface-card">
-      <div class="card-head"><h3>仿真明细预览</h3><p>核查开始/结束时间、状态、订单和资源分配是否符合业务直觉。</p></div>
+      <div class="card-head"><div><h3>仿真明细预览</h3><p>核查开始/结束时间、状态、订单和资源分配是否符合业务直觉。</p></div></div>
       ${renderSimpleTable(
         ["工序", "订单", "机器", "状态", "开始", "结束"],
         asArray(app.simResult.gantt).slice(0, 20).map((item) => [
@@ -2853,92 +3039,134 @@ function renderWorkflowStep3() {
         { footer: `当前仅展示前 ${Math.min(20, asArray(app.simResult.gantt).length)} 条工序记录。` },
       )}
     </article>
-  ` : "";
-
-  return `
-    <div class="workflow-stage-stack">
-      ${simulationPanel}
-      ${simulationDetail}
-    </div>
-  `;
-}
-
-function renderObjectiveSelectors() {
-  const catalog = asArray(app.optimizeObjectiveCatalog);
-  return `
-    <div class="objective-grid">
-      ${catalog.map((item) => `
-        <label class="objective-pill">
-          <input type="checkbox" data-objective-key="${escapeHtml(item.key)}" ${app.optimizeForm.objectiveKeys.includes(item.key) ? "checked" : ""}>
-          <strong>${escapeHtml(item.label || getObjectiveLabel(item.key))}</strong>
-          <span>${escapeHtml(item.description || "")}</span>
-        </label>
-      `).join("")}
-    </div>
-  `;
-}
-
-function renderWorkflowStep4() {
-  const status = app.optimizeStatus;
-  const result = app.optimizeResult;
-  const recommendedBudget = refreshOptimizeBudgetRecommendation({ preserveManual: true });
-  return `
-    <article class="surface-card">
-      <div class="card-head"><h3>多目标优化配置</h3><p>前期做近似广搜，后期做精确精修，最终重算 Pareto 前沿。</p></div>
-      ${renderObjectiveSelectors()}
-      <div class="form-grid">
-        <label><span>目标方案数</span><input id="opt-target-count" type="number" min="2" value="${app.optimizeForm.targetSolutionCount}"></label>
-        <label><span>总预算秒数</span><input id="opt-time-limit" type="number" min="5" value="${app.optimizeForm.timeLimitS}"></label>
-        <label><span>种群规模</span><input id="opt-population" type="number" min="4" value="${app.optimizeForm.populationSize}"></label>
-        <label><span>代数</span><input id="opt-generations" type="number" min="1" value="${app.optimizeForm.generations}"></label>
-        <label><span>前期时间占比</span><input id="opt-coarse-ratio" type="number" min="0.2" max="0.95" step="0.05" value="${app.optimizeForm.coarseTimeRatio}"></label>
-        <label><span>精修轮数</span><input id="opt-refine-rounds" type="number" min="1" value="${app.optimizeForm.refineRounds}"></label>
-        <label><span>ALNS 强度</span><input id="opt-alns-aggression" type="number" min="0.5" max="3" step="0.1" value="${app.optimizeForm.alnsAggression}"></label>
-        <label><span>基线规则</span>
-          <select id="opt-baseline-rule">
-            ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.optimizeForm.baselineRuleName ? "selected" : ""}>${rule}</option>`).join("")}
-          </select>
-        </label>
-      </div>
-      <div class="subtle-note" id="opt-budget-hint">${app.optimizeForm.timeLimitTouched
-        ? `建议约 ${recommendedBudget} 秒。当前保留手动值 ${app.optimizeForm.timeLimitS} 秒，可随时恢复建议值。`
-        : `已按当前规模与参数自动推荐 ${recommendedBudget} 秒，可继续手动修改。`}</div>
-      <div class="form-actions">
-        <button class="btn btn-primary" type="button" data-action="start-hybrid-optimize" ${optimizeIsRunning() ? "disabled aria-busy=\"true\"" : ""}>${optimizeIsRunning() ? "优化运行中…" : "启动优化"}</button>
-        <button class="btn btn-secondary" type="button" data-action="apply-budget-recommendation">采用建议预算</button>
-        <button class="btn btn-ghost" type="button" data-nav-jump="pareto-library">进入方案库</button>
-      </div>
-    </article>
-    ${renderOptimizeStatus()}
-    ${(status || result) && !["error", "failed"].includes(String(status?.status || "").toLowerCase()) ? `
-      <article class="surface-card">
-        <div class="card-head"><h3>优化进度与结果</h3><p>自动显示近似评估、精确评估与候选池规模。</p></div>
-        ${renderKpiCards([
-          { label: "状态", value: escapeHtml(status?.status || result?.status || "unknown"), hint: "实时轮询状态" },
-          { label: "近似评估", value: formatInt(status?.approximate_evaluations || result?.approximate_evaluations || 0), hint: "前期广搜吞吐" },
-          { label: "精确评估", value: formatInt(status?.exact_evaluations || result?.exact_evaluations || 0), hint: "后期高质量验证" },
-          { label: "候选方案", value: formatInt(result?.found_solution_count || result?.solutions?.length || 0), hint: `已请求 ${formatInt(app.optimizeForm.targetSolutionCount)} 个` },
-        ])}
-      </article>
-    ` : ""}
-  `;
-}
-
-function renderWorkflow() {
-  const container = el("workflow-content");
-  let html = "";
-  if (app.workflowStep === 3) html = renderWorkflowStep3();
-  if (app.workflowStep === 4) html = renderWorkflowStep4();
-  container.innerHTML = html;
+  ` : `<article class="surface-card">${renderEmptyState("尚未运行仿真", "运行一次规则仿真后，这里会展示完整的时间轴、状态分布和停机遮罩。")}</article>`;
+  container.innerHTML = `<div class="stack">${ruleCards}${infeasibleBanner}${kpiCards}${detail}</div>`;
   requestAnimationFrame(() => mountGantts());
 }
 
-function renderNewScene() {
+// 多目标选择：紧凑 chip 流式网格（目标很多时自然换行），方向 min/max 小字标注
+function renderObjectiveSelectors() {
+  const catalog = asArray(app.optimizeObjectiveCatalog);
+  return `
+    <div class="obj-chip-grid">
+      ${catalog.map((item) => {
+        const on = app.optimizeForm.objectiveKeys.includes(item.key);
+        return `
+        <label class="obj-chip ${on ? "on" : ""}" title="${escapeHtml(item.description || "")}">
+          <input type="checkbox" data-objective-key="${escapeHtml(item.key)}" ${on ? "checked" : ""} hidden>
+          <span class="obox">✓</span>${escapeHtml(item.label || getObjectiveLabel(item.key))}<small>${escapeHtml(item.direction || "")}</small>
+        </label>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderOptimizePage() {
+  const container = el("optimize-content");
+  if (!container) return;
+  const status = app.optimizeStatus;
+  const result = app.optimizeResult;
+  const recommendedBudget = refreshOptimizeBudgetRecommendation({ preserveManual: true });
+  // 前置检查条
+  const simFeasible = app.simResult ? app.simResult.metrics?.feasible !== false : null;
+  if (optimizeIsRunning()) {
+    renderPrecheck("optimize-precheck", "info", `● 优化正在运行（${optimizeProgress(status)}%），进度与日志在右侧实时更新。<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="review">查看已有候选方案 →</button>`);
+  } else if (result) {
+    renderPrecheck("optimize-precheck", "ok", `✓ 优化已完成 · ${formatInt(result.found_solution_count || result.solutions?.length || 0)} 个候选方案可评审<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="review">下一步：方案评审 →</button>`);
+  } else if (simFeasible) {
+    renderPrecheck("optimize-precheck", "ok", `✓ 前置就绪：基线仿真（${escapeHtml(app.simResult?.rule || app.simRule)}）可行，可启动优化求解`);
+  } else if (app.simResult) {
+    renderPrecheck("optimize-precheck", "warn", `⚠ 基线仿真不完整，建议先回「规则仿真」排查，再启动优化。<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="simulate">返回规则仿真 →</button>`);
+  } else {
+    renderPrecheck("optimize-precheck", "warn", `⚠ 尚未运行基线仿真，建议先完成「规则仿真」作为对照基线。<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="simulate">先去规则仿真 →</button>`);
+  }
+  const configCard = `
+    <div class="sticky-col stack">
+      <div class="card card-pad">
+        <div class="card-head"><div><h3>多目标优化配置</h3><p id="opt-obj-count">已选 ${formatInt(app.optimizeForm.objectiveKeys.length)} / ${formatInt(app.optimizeObjectiveCatalog.length)} 个目标，参与 Pareto 前沿求解。</p></div></div>
+        ${renderObjectiveSelectors()}
+        <div class="form-grid mt-16">
+          <label><span>目标方案数</span><input id="opt-target-count" type="number" min="2" value="${app.optimizeForm.targetSolutionCount}"></label>
+          <label><span>总预算秒数</span><input id="opt-time-limit" type="number" min="5" value="${app.optimizeForm.timeLimitS}"></label>
+          <label><span>种群规模</span><input id="opt-population" type="number" min="4" value="${app.optimizeForm.populationSize}"></label>
+          <label><span>代数</span><input id="opt-generations" type="number" min="1" value="${app.optimizeForm.generations}"></label>
+          <label><span>前期时间占比</span><input id="opt-coarse-ratio" type="number" min="0.2" max="0.95" step="0.05" value="${app.optimizeForm.coarseTimeRatio}"></label>
+          <label><span>精修轮数</span><input id="opt-refine-rounds" type="number" min="1" value="${app.optimizeForm.refineRounds}"></label>
+          <label><span>ALNS 强度</span><input id="opt-alns-aggression" type="number" min="0.5" max="3" step="0.1" value="${app.optimizeForm.alnsAggression}"></label>
+          <label><span>基线规则</span>
+            <select id="opt-baseline-rule">
+              ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.optimizeForm.baselineRuleName ? "selected" : ""}>${rule}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="budget-hint" id="opt-budget-hint">${app.optimizeForm.timeLimitTouched
+          ? `已按当前规模与参数自动推荐 <strong>${recommendedBudget} 秒</strong>。当前保留手动值 ${app.optimizeForm.timeLimitS} 秒，可随时恢复建议值。`
+          : `已按当前规模与参数自动推荐 <strong>${recommendedBudget} 秒</strong>，可继续手动修改。`}</div>
+        <div class="mt-16" style="display:flex;gap:9px">
+          <button class="btn btn-primary" type="button" data-action="start-hybrid-optimize" ${optimizeIsRunning() ? "disabled aria-busy=\"true\"" : ""}>${optimizeIsRunning() ? "优化运行中…" : "启动优化"}</button>
+          <button class="btn btn-ghost" type="button" data-action="apply-budget-recommendation">采用建议预算</button>
+        </div>
+      </div>
+    </div>
+  `;
+  const statusStack = status || result
+    ? `${renderOptimizeStatus()}${renderOptimizeLogCard()}`
+    : `<div class="card card-pad">${renderEmptyState("尚未启动优化", "配置左侧目标与参数后点击「启动优化」，这里会实时显示进度环、阶段指示与运行日志。")}</div>`;
+  container.innerHTML = `<div class="opt-layout">${configCard}<div class="stack">${statusStack}</div></div>`;
+}
+
+// 前置检查条：每页唯一的状态通栏（替代旧的大标题 Header 区）
+function renderPrecheck(targetId, tone, innerHtml) {
+  const box = el(targetId);
+  if (!box) return;
+  box.innerHTML = innerHtml ? `<div class="precheck ${tone}">${innerHtml}</div>` : "";
+}
+
+function renderImportPage() {
   const validationBox = el("new-scene-validation");
   if (validationBox) validationBox.innerHTML = app.currentScene ? renderValidationPanel() : "";
-  const graphBox = el("new-scene-graph");
-  if (graphBox) graphBox.innerHTML = app.currentScene ? renderGraphSection() : "";
-  if (app.currentScene && app.graphMeta) requestAnimationFrame(() => mountInteractiveGraph());
+  if (!app.currentScene) {
+    renderPrecheck("import-precheck", "info", `尚未加载实例：请先上传 Excel 或下载模板准备数据。`);
+    return;
+  }
+  const v = app.validation;
+  if (app.validationBusy) {
+    renderPrecheck("import-precheck", "info", `正在对实例数据做强校验…`);
+  } else if (v?.status === "failed") {
+    renderPrecheck("import-precheck", "err", `✕ 数据强校验未通过（${formatInt(v.error_count || 0)} 条错误），仿真/优化结果不可用，请先修复。`);
+  } else if (v?.status === "warning") {
+    renderPrecheck("import-precheck", "ok", `✓ 数据强校验已通过（${formatInt(v.warning_count || 0)} 条警告不影响仿真）<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="graph">下一步：图谱构建 →</button>`);
+  } else if (v) {
+    renderPrecheck("import-precheck", "ok", `✓ 数据强校验已通过<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="graph">下一步：图谱构建 →</button>`);
+  } else {
+    renderPrecheck("import-precheck", "warn", `实例已加载，尚未运行数据强校验。`);
+  }
+}
+
+function renderGraphPage() {
+  const container = el("graph-content");
+  if (!container) return;
+  const meta = app.graphMeta;
+  if (graphBuildIsRunning()) {
+    renderPrecheck("graph-precheck", "info", `图谱正在构建中 · ${formatInt(app.graphBuildStatus?.progress || 0)}%，页面会自动更新。`);
+  } else if (meta) {
+    renderPrecheck("graph-precheck", "ok", `✓ 图谱已构建完成 · 构建于 ${escapeHtml(formatDateTime(meta.created_at))} · 耗时 ${escapeHtml(formatDurationSeconds((meta.build_time_ms || 0) / 1000))}<span class="grow"></span><button class="btn btn-ghost btn-xs" type="button" data-action="build-graph">重新构建</button><button class="link-btn" type="button" data-nav-jump="simulate">下一步：规则仿真 →</button>`);
+  } else {
+    renderPrecheck("graph-precheck", "warn", `图谱尚未构建：图谱是仿真与优化的数据准备阶段。<span class="grow"></span><button class="btn btn-primary btn-xs" type="button" data-action="build-graph">构建图谱</button>`);
+  }
+  let html = "";
+  if (graphBuildIsRunning() || app.graphBuildStatus?.status === "error") html += renderGraphBuildStatus();
+  if (meta) {
+    html += renderInteractiveGraph();
+  } else if (!graphBuildIsRunning()) {
+    html += `<div class="card card-pad">${renderEmptyState("尚未构建图谱", "点击上方「构建图谱」按钮，或完成数据校验后自动构建。", '<button class="btn btn-primary" type="button" data-action="build-graph">构建图谱</button>')}</div>`;
+  }
+  container.innerHTML = html;
+  if (meta) requestAnimationFrame(() => mountInteractiveGraph());
+}
+
+function renderNewScene() {
+  renderImportPage();
 }
 
 function renderValidationPanel() {
@@ -2961,41 +3189,48 @@ function renderValidationPanel() {
   }
   const failed = validation.status === "failed";
   const tone = failed ? "danger" : validation.status === "warning" ? "warning" : "success";
-  const label = failed ? "校验未通过" : validation.status === "warning" ? "校验通过（有警告）" : "校验通过";
+  const label = failed ? "校验未通过" : validation.status === "warning" ? "校验通过 · 有警告" : "校验通过";
   const issues = [...asArray(validation.errors), ...asArray(validation.warnings)];
   const collapsed = !!app.validationCollapsed;
+  // 三档大色块摘要：通过项/警告/错误。后端校验接口只返回错误/警告明细与实体统计，
+  // 「通过项」按已校验实体总数（stats 各计数之和）扣除问题项近似（设计稿口径，后端无逐条通过计数）。
+  const statsTotal = ["orders", "tasks", "operations", "machines", "toolings", "personnel"]
+    .reduce((sum, key) => sum + Number(validation.stats?.[key] || 0), 0);
+  const errCount = Number(validation.error_count || 0);
+  const warnCount = Number(validation.warning_count || 0);
+  const passCount = Math.max(0, statsTotal - errCount - warnCount);
   return `
     <article class="surface-card validation-panel ${tone} ${collapsed ? "is-collapsed" : ""}">
       <div class="card-head">
-        <div class="validation-head-main">
-          <h3>数据强校验</h3>
+        <div><h3>数据强校验</h3><p>错误级问题会导致仿真/优化静默失败。</p></div>
+        <div style="display:flex;gap:10px;align-items:center">
           ${statusChip(label, tone === "danger" ? "danger" : tone)}
+          ${renderCollapseButton("toggle-validation-collapse", collapsed, "数据强校验详情")}
         </div>
-        ${renderCollapseButton("toggle-validation-collapse", collapsed, "数据强校验详情")}
       </div>
       <div class="validation-body collapsible-body">
-        <p class="subtle-note">覆盖数据完整性、关联关系与约束条件；错误级问题会导致仿真/优化静默失败。</p>
-        ${renderKeyValueGrid([
-          { label: "错误", value: formatInt(validation.error_count || 0) },
-          { label: "警告", value: formatInt(validation.warning_count || 0) },
-          { label: "校验时间", value: formatDateTime(validation.checked_at) },
-          { label: "日历天数", value: `${formatInt(validation.stats?.calendar?.final_days || 0)} 天` },
-        ])}
-        ${issues.length ? renderSimpleTable(
-          ["级别", "问题 Sheet", "类别", "实体", "问题明细"],
-          issues.slice(0, 50).map((item) => [
-            statusChip(item.severity === "error" ? "错误" : "警告", item.severity === "error" ? "danger" : "warning"),
-            escapeHtml(item.sheet || "-"),
-            escapeHtml(item.category || "-"),
-            escapeHtml(item.entity || "-"),
-            escapeHtml(item.message || "-"),
-          ]),
-          { footer: issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条，导出 Excel 可查看全部。` : `共 ${issues.length} 条问题。` },
-        ) : '<div class="subtle-note">未发现脏数据或格式问题，可以进入仿真与优化。</div>'}
-        <div class="form-actions">
+        <div class="valid-summary">
+          <div class="ok"><strong>${formatInt(passCount)}</strong><span>通过项</span></div>
+          <div class="warn"><strong>${formatInt(warnCount)}</strong><span>警告</span></div>
+          <div class="err"><strong>${formatInt(errCount)}</strong><span>错误</span></div>
+        </div>
+        ${issues.length ? `<div class="tbl-wrap mt-16"><table>
+          <thead><tr><th>级别</th><th>问题 Sheet</th><th>类别</th><th>实体</th><th>问题明细</th></tr></thead>
+          <tbody>
+            ${issues.slice(0, 50).map((item) => `<tr>
+              <td>${statusChip(item.severity === "error" ? "错误" : "警告", item.severity === "error" ? "danger" : "warning")}</td>
+              <td class="mono">${escapeHtml(item.sheet || "-")}</td>
+              <td>${escapeHtml(item.category || "-")}</td>
+              <td class="mono">${escapeHtml(item.entity || "-")}</td>
+              <td>${escapeHtml(item.message || "-")}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>
+        <p class="subtle mt-16">${issues.length > 50 ? `共 ${issues.length} 条问题，仅展示前 50 条，导出 Excel 可查看全部。` : `共 ${issues.length} 条问题。`}</p>` : '<p class="subtle mt-16">未发现脏数据或格式问题，可以进入仿真与优化。</p>'}
+        <div class="mt-16" style="display:flex;gap:10px">
           <button class="btn btn-ghost" type="button" data-action="run-validation">重新校验</button>
           ${issues.length ? '<button class="btn btn-ghost" type="button" data-action="export-validation">导出校验结果 Excel</button>' : ""}
-          ${failed ? '<span class="subtle-note">请先修复上述错误（可在下方各标签页直接编辑数据），否则仿真指标会显示为 0。</span>' : ""}
+          ${failed ? '<span class="subtle">请先修复上述错误，否则仿真指标会显示为 0。</span>' : ""}
         </div>
       </div>
     </article>
@@ -3030,16 +3265,30 @@ function bestMetricValue(preview, key) {
 // —— 方案对比：可配置列 + 与基线 KPI 对比 ——
 const REVIEW_COMPARE_HIDDEN_LS = "review-compare-hidden-cols-v1";
 
-function getReviewHiddenColumns() {
+function reviewCompareAllKeys() {
+  const primaryKeys = activePrimaryObjectiveKeys();
+  return { primaryKeys, allKeys: [...primaryKeys, ...REVIEW_KPI_KEYS.filter((key) => !primaryKeys.includes(key))] };
+}
+
+// 默认显示：3 个主目标 + 2 个常用 KPI（共 5 列）；localStorage 无记录时应用默认
+function reviewDefaultHiddenColumns(allKeys, primaryKeys) {
+  const visible = new Set([...primaryKeys, ...allKeys.filter((key) => !primaryKeys.includes(key)).slice(0, 2)]);
+  return new Set(allKeys.filter((key) => !visible.has(key)));
+}
+
+function getReviewHiddenColumns(allKeys, primaryKeys) {
   try {
-    return new Set(asArray(JSON.parse(localStorage.getItem(REVIEW_COMPARE_HIDDEN_LS) || "[]")));
+    const raw = localStorage.getItem(REVIEW_COMPARE_HIDDEN_LS);
+    if (raw === null) return reviewDefaultHiddenColumns(allKeys, primaryKeys);
+    return new Set(asArray(JSON.parse(raw)));
   } catch {
-    return new Set();
+    return reviewDefaultHiddenColumns(allKeys, primaryKeys);
   }
 }
 
 function setReviewColumnHidden(key, hidden) {
-  const set = getReviewHiddenColumns();
+  const { allKeys, primaryKeys } = reviewCompareAllKeys();
+  const set = getReviewHiddenColumns(allKeys, primaryKeys);
   if (hidden) set.add(key); else set.delete(key);
   try { localStorage.setItem(REVIEW_COMPARE_HIDDEN_LS, JSON.stringify(Array.from(set))); } catch { /* 隐私模式忽略 */ }
 }
@@ -3072,16 +3321,15 @@ function compareDeltaHtml(item, key, baseline) {
   return `<span class="cmp-delta ${tone}"><span class="cmp-arrow" aria-hidden="true">${arrow}</span>${absStr}${pctStr}</span>`;
 }
 
-// 方案对比表：单一决策工作台。左列勾选（共享上限 4），中列方案名+来源·模式副标题，
-// 随后主目标 KPI + 其他 KPI（可配置列，每列最佳值加粗、并与基线方案对比），末列逐行操作。聚焦方案置顶，勾选行按方案色高亮。
+// 方案对比表：单一决策工作台。左列勾选（共享上限 4），方案名 + 来源 chip，
+// 随后主目标 KPI（带标记）+ 其他 KPI（列配置勾选，默认 3 主目标 + 2 常用共 5 列），
+// 每列与基线方案 Δ 对比、最优值加粗标「最优」；末列「◎ 详情 / ✦ AI 评审 / ⬇ 导出」。
+// 方案多时表体纵向滚动 + 表头吸顶；行内最优方案整行淡绿。
 function renderReviewCandidateComparison() {
   const candidates = getReviewCandidates();
   if (!candidates.length) return "";
-  const primaryKeys = activePrimaryObjectiveKeys();
-  const extraKeys = REVIEW_KPI_KEYS.filter((key) => !primaryKeys.includes(key));
-  const allKeys = [...primaryKeys, ...extraKeys];
-  // 可配置列：默认全部显示，隐藏集存 localStorage；主目标列亦可隐藏
-  const hidden = getReviewHiddenColumns();
+  const { primaryKeys, allKeys } = reviewCompareAllKeys();
+  const hidden = getReviewHiddenColumns(allKeys, primaryKeys);
   const visibleKeys = allKeys.filter((key) => !hidden.has(key));
   // 基线方案：对比的锚点，用于每个 KPI 单元格的 Δ 标注
   const baseline = candidates.find((item) => item.source === "baseline") || null;
@@ -3091,57 +3339,74 @@ function renderReviewCandidateComparison() {
     ? [candidates.find((item) => item.id === focusedId), ...candidates.filter((item) => item.id !== focusedId)]
     : candidates;
   const bestByKey = Object.fromEntries(visibleKeys.map((key) => [key, bestMetricValue(candidates, key)]));
+  // 行内最优：在可见列上拿到最多「最优」的方案整行淡绿（is-best-row）
+  const bestWinCount = new Map(candidates.map((item) => [item.id, 0]));
+  candidates.forEach((item) => {
+    visibleKeys.forEach((key) => {
+      const best = bestByKey[key];
+      const value = metricValue(item, key);
+      if (best !== null && value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) === best) {
+        bestWinCount.set(item.id, (bestWinCount.get(item.id) || 0) + 1);
+      }
+    });
+  });
+  const maxWins = Math.max(0, ...bestWinCount.values());
+  const bestRowId = maxWins > 0 ? candidates.find((item) => bestWinCount.get(item.id) === maxWins)?.id : null;
   const cell = (item, key) => {
     const value = metricValue(item, key);
     const best = bestByKey[key];
     const isBest = best !== null && value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) === best;
     const disp = metricDisplay(item, key);
     const isBaselineRow = baseline && item.id === baseline.id;
-    const delta = isBaselineRow ? `<span class="cmp-delta cmp-base">基准</span>` : compareDeltaHtml(item, key, baseline);
-    return `<td class="${isBest ? "is-best" : ""}"><div class="cmp-cell"><span class="cmp-value">${isBest ? `<strong>${disp}</strong>` : disp}</span>${delta}</div></td>`;
+    const delta = isBaselineRow ? `<span class="delta flat">基准</span>` : compareDeltaHtml(item, key, baseline);
+    return `<td data-col="${escapeHtml(key)}" class="${isBest ? "is-best" : ""}"><div class="cmp-cell"><span class="mono cmp-value">${isBest ? `<strong>${disp}</strong><span class="best-tag">最优</span>` : disp}</span>${delta}</div></td>`;
   };
   const rows = ordered.map((item) => {
     const checked = app.reviewSelection.includes(item.id);
     const colorIdx = schemeColorIndex(item.id);
-    const rowClass = [checked ? "is-selected" : "", colorIdx >= 0 ? `scheme-c-${colorIdx}` : ""].filter(Boolean).join(" ");
+    const rowClass = [checked ? "is-selected" : "", item.id === bestRowId ? "is-best-row" : "", colorIdx >= 0 ? `scheme-c-${colorIdx}` : ""].filter(Boolean).join(" ");
+    const tag = candidateSourceTag(item);
+    const detailOn = item.id === app.reviewGanttSchemeId;
     return `<tr class="${rowClass}">
       <td class="compare-check"><input type="checkbox" data-action="toggle-candidate" data-id="${escapeHtml(item.id)}" ${checked ? "checked" : ""} aria-label="勾选 ${escapeHtml(item.name)}"></td>
       <td class="compare-name">
         <strong>${colorIdx >= 0 ? `<span class="scheme-dot" style="background:${schemeColorToken(colorIdx)}"></span>` : ""}${escapeHtml(item.name)}</strong>
+        <span class="chip ${tag.cls}">${escapeHtml(tag.label)}</span>
       </td>
       ${visibleKeys.map((key) => cell(item, key)).join("")}
-      <td class="compare-ops">
-        <button class="op-btn" type="button" data-action="focus-candidate" data-id="${escapeHtml(item.id)}" title="查看详情" aria-label="查看详情">◎</button>
-        <button class="op-btn" type="button" data-action="send-candidate-to-ai" data-id="${escapeHtml(item.id)}" title="送入 AI 评审" aria-label="送入 AI 评审">✦</button>
-        <button class="op-btn" type="button" data-action="export-selected-solution" data-id="${escapeHtml(item.id)}" title="导出该方案" aria-label="导出该方案">⬇</button>
-      </td>
+      <td class="compare-ops"><div class="row-ops">
+        <button class="op-btn detail ${detailOn ? "on" : ""}" type="button" data-action="focus-candidate" data-id="${escapeHtml(item.id)}" title="联动下方利用率与排程甘特">◎ 详情</button>
+        <button class="op-btn ai" type="button" data-action="send-candidate-to-ai" data-id="${escapeHtml(item.id)}" title="送入 AI 评审">✦ AI 评审</button>
+        <button class="op-btn exp" type="button" data-action="export-selected-solution" data-id="${escapeHtml(item.id)}" title="导出该方案 Excel">⬇ 导出</button>
+      </div></td>
     </tr>`;
   }).join("");
-  const headers = ["方案", ...visibleKeys.map((key) => getObjectiveLabel(key)), "操作"];
   const colConfig = `
     <details class="col-config" ${app.reviewColConfigOpen ? "open" : ""}>
       <summary data-col-config-summary>列配置（${formatInt(visibleKeys.length)}/${formatInt(allKeys.length)}）</summary>
       <div class="col-config-panel">
-        ${allKeys.map((key) => `<label class="col-config-item"><input type="checkbox" data-compare-col="${escapeHtml(key)}" ${hidden.has(key) ? "" : "checked"}> ${escapeHtml(getObjectiveLabel(key))}</label>`).join("")}
+        <div class="cp-head"><span>勾选要展示的 KPI 列</span><button type="button" data-action="reset-compare-cols">恢复默认</button></div>
+        ${allKeys.map((key) => `<label class="col-config-item"><input type="checkbox" data-compare-col="${escapeHtml(key)}" ${hidden.has(key) ? "" : "checked"}> ${escapeHtml(getObjectiveLabel(key))}${primaryKeys.includes(key) ? ' <span class="primary-tag">主目标</span>' : ""}</label>`).join("")}
       </div>
     </details>`;
-  const baselineHint = baseline ? `每个 KPI 与基线方案（${escapeHtml(baseline.name)}）对比，箭头随数值升降，<span class="cmp-good">绿=改善</span> / <span class="cmp-bad">红=变差</span>，括号内为相对基线百分比。` : "未加载基线方案，暂不显示对比箭头。";
+  const primaryLabels = primaryKeys.map((key) => getObjectiveLabel(key)).join(" / ");
+  const baselineHint = baseline ? `每个 KPI 与基线方案（${escapeHtml(baseline.name)}）对比，箭头随数值升降，<span style="color:var(--success)">绿=改善</span> / <span style="color:var(--danger)">红=变差</span>，括号内为相对基线百分比。方案较多时表格纵向滚动，表头吸顶。` : "未加载基线方案，暂不显示对比箭头。";
   return `
     <article class="surface-card">
-      <div class="card-head">
+      <div class="card-head" style="align-items:center">
         <div>
           <h3>方案对比</h3>
-          <p>勾选方案即同时驱动利用率对比、甘特联动与 AI 评审（共享上限 4）；「查看详情」将该行置顶。${baselineHint}</p>
+          <p>默认展示主目标（<span style="color:var(--primary)">${escapeHtml(primaryLabels)}</span>）+ 2 个常用 KPI；更多指标在列配置中勾选。</p>
         </div>
         ${colConfig}
       </div>
-      ${renderPrimaryObjectiveBadges(primaryKeys)}
-      <div class="table-shell">
+      <div class="tbl-wrap">
         <table class="data-table compare-table">
-          <thead><tr><th class="compare-check"><span class="sr-only">选择方案</span></th>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+          <thead><tr><th class="compare-check" style="width:34px"><span class="sr-only">选择方案</span></th><th>方案</th>${visibleKeys.map((key) => `<th data-col="${escapeHtml(key)}">${escapeHtml(getObjectiveLabel(key))}</th>`).join("")}<th style="width:250px">操作</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
+      <p class="subtle mt-16">${baselineHint}</p>
     </article>
   `;
 }
@@ -3166,42 +3431,22 @@ function ensureReviewDailyUtil(schemeId) {
   return app.reviewDailyUtilCache[schemeId];
 }
 
-// 每日机器分类利用率趋势：每个机器类型一条折线（横轴 D1..Dn，纵轴利用率%），与表格同口径同色。
-function renderDailyUtilTrendSvg(days, types) {
-  const W = Math.max(360, 40 + days.length * 46);
-  const H = 200;
-  const padL = 40, padR = 12, padT = 12, padB = 26;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const xOf = (i) => padL + (days.length <= 1 ? plotW / 2 : (i / (days.length - 1)) * plotW);
-  const yOf = (v) => padT + (1 - Math.max(0, Math.min(1, v))) * plotH;
-  const gridY = [0, 0.25, 0.5, 0.75, 1].map((v) => `
-    <line x1="${padL}" y1="${yOf(v)}" x2="${W - padR}" y2="${yOf(v)}" class="util-trend-grid"></line>
-    <text x="${padL - 6}" y="${yOf(v) + 3}" class="util-trend-axis" text-anchor="end">${Math.round(v * 100)}</text>`).join("");
-  const xLabels = days.map((d, i) => `<text x="${xOf(i)}" y="${H - 8}" class="util-trend-axis" text-anchor="middle">D${escapeHtml(String(d))}</text>`).join("");
-  const lines = types.map((type, ti) => {
-    const color = schemeColorToken(ti % SCHEME_COLOR_TOKENS.length);
-    const pts = asArray(type.per_day).map((v, i) => (v === null || v === undefined) ? null : `${xOf(i)},${yOf(v)}`).filter(Boolean).join(" ");
-    return pts ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2"></polyline>` : "";
-  }).join("");
-  const legend = types.map((type, ti) => `<span class="legend-item"><span class="legend-swatch" style="background:${schemeColorToken(ti % SCHEME_COLOR_TOKENS.length)}"></span>${escapeHtml(type.type_name)}</span>`).join("");
-  return `
-    <div class="util-trend">
-      <div class="table-shell"><svg viewBox="0 0 ${W} ${H}" class="util-trend-svg" role="img" aria-label="每日机器分类利用率趋势">${gridY}${xLabels}${lines}</svg></div>
-      <div class="legend">${legend}</div>
-    </div>
-  `;
-}
-
 function renderReviewTypeUtilization() {
   ensureReviewGanttSchemeSelection();
   const candidates = getReviewCandidates();
   const schemeId = app.reviewGanttSchemeId;
   const schemeName = candidates.find((c) => c.id === schemeId)?.name || schemeId || "";
+  const legend = `
+    <div class="util-legend">
+      <span><i style="background:rgba(220,38,38,0.55)"></i>≥90% 过载</span>
+      <span><i style="background:rgba(180,83,9,0.45)"></i>&lt;60% 偏低</span>
+      <span><i style="background:rgba(18,161,80,0.5)"></i>行内最佳</span>
+    </div>`;
   const head = `
-    <div class="card-head">
-      <h3>机器分类利用率对比</h3>
-      <p>按天展示当前方案（${escapeHtml(String(schemeName))}）各机器类型的日利用率；日利用率 = 该类型当日有排产时长 /（该类型机器数 × 当日 24h），每行最佳值加粗。选方案由甘特/对比表「查看详情」联动。</p>
+    <div class="card-head" style="align-items:center">
+      <div><h3>机器分类利用率对比 · 当前方案 <span style="color:var(--primary)">${escapeHtml(String(schemeName))}</span></h3>
+      <p>日利用率 = 该类型当日有排产时长 /（该类型机器数 × 当日 24h）；用于定位哪天、哪类机器过载或闲置。点击对比表「◎ 详情」可切换方案。</p></div>
+      ${legend}
     </div>`;
   if (!candidates.length || !schemeId) {
     return `<article class="surface-card">${head}<div class="empty-state"><p>请先运行优化或加载参照方案。</p></div></article>`;
@@ -3214,7 +3459,7 @@ function renderReviewTypeUtilization() {
   if (st.loading) {
     inner = `<div class="empty-state"><p>正在计算每日机器分类利用率…</p></div>`;
   } else if (st.error) {
-    inner = `<div class="empty-state"><p>加载失败：${escapeHtml(st.error)}</p><button class="btn-ghost" data-action="retry-daily-util">重试</button></div>`;
+    inner = `<div class="empty-state"><p>加载失败：${escapeHtml(st.error)}</p><button class="btn btn-ghost btn-xs" type="button" data-action="retry-daily-util">重试</button></div>`;
   } else if (!asArray(st.types).length) {
     inner = `<div class="empty-state"><p>该方案的排程未覆盖任何机台类型。</p></div>`;
   } else {
@@ -3223,38 +3468,24 @@ function renderReviewTypeUtilization() {
       const vals = asArray(type.per_day).filter((v) => v !== null && v !== undefined);
       const best = vals.length ? Math.max(...vals) : null;
       const cells = asArray(type.per_day).map((v) => {
-        if (v === null || v === undefined) return "<td>-</td>";
+        if (v === null || v === undefined) return "<td class=\"pct\">-</td>";
         const isBest = best !== null && v === best;
-        const pct = isBest ? `<strong>${formatPercent(v)}</strong>` : formatPercent(v);
-        return `<td class="${isBest ? "is-best" : ""}">${pct}</td>`;
+        // ≥90% 过载红、<60% 偏低黄、行内最佳绿加粗（行内最佳优先于过载/偏低配色）
+        const cls = isBest ? "pct is-best" : v >= 0.9 ? "pct hi" : v < 0.6 ? "pct lo" : "pct";
+        return `<td class="${cls}">${formatPercent(v)}</td>`;
       }).join("");
       return `<tr><td><strong>${escapeHtml(type.type_name)}</strong></td>${cells}</tr>`;
     }).join("");
-    const trend = app.reviewUtilTrendId === schemeId ? `
-      <div class="util-trend-panel">
-        <div class="card-head"><h3>${escapeHtml(String(schemeName))} 每日机器分类利用率趋势</h3></div>
-        ${renderDailyUtilTrendSvg(days, st.types)}
-      </div>` : "";
     inner = `
-      <div class="table-shell">
-        <table class="data-table util-table">
+      <div class="tbl-wrap util-table-wrap">
+        <table class="util-day-table">
           <thead><tr><th>机器类型</th>${days.map((d) => `<th>D${escapeHtml(String(d))}</th>`).join("")}</tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
-      ${trend}
     `;
   }
-  // 2.4：默认折叠
-  return `
-    <article class="surface-card">
-      <details class="util-collapse">
-        <summary>机器分类利用率对比 · 当前方案 ${escapeHtml(String(schemeName))}</summary>
-        ${head}
-        ${inner}
-      </details>
-    </article>
-  `;
+  return `<article class="surface-card">${head}${inner}</article>`;
 }
 
 // 评审方案排程甘特：单方案 + 订单多选，复用统一甘特（renderTimeline，按机器分组 + 4 天默认窗口）。
@@ -3290,7 +3521,7 @@ function ensureReviewSchemeSchedule(schemeId) {
 function renderReviewGantt() {
   ensureReviewGanttSchemeSelection();
   const candidates = getReviewCandidates();
-  const emptyHead = `<div class="card-head"><h3>排程甘特（按机器）</h3><p>点击「方案对比」操作列的「查看详情」切换方案；默认显示前 4 天，可滚动查看全部。</p></div>`;
+  const emptyHead = `<div class="card-head"><div><h3>排程甘特 · 当前方案</h3><p>与「◎ 详情」联动；样式与筛选能力和规则仿真甘特一致；默认显示前 4 天，可滚动查看全部。</p></div></div>`;
   if (!candidates.length) {
     return `<article class="surface-card">${emptyHead}<div class="empty-state"><p>暂无方案，请先运行优化或加载参照方案。</p></div></article>`;
   }
@@ -3310,7 +3541,7 @@ function renderReviewGantt() {
     return `<article class="surface-card"><div class="empty-state"><p>该方案没有可显示的排程。</p></div></article>`;
   }
   return renderTimeline(st.entries, {
-    title: `排程甘特 · ${schemeName}`,
+    title: `排程甘特 · 当前方案 ${schemeName}`,
     canvasId: "gantt-review-scheme",
     solutionIds: [schemeId],
   });
@@ -3320,105 +3551,80 @@ function renderReviewLibraryTab() {
   ensureReviewSelection();
   ensureReferenceSolutions();
   const candidates = getReviewCandidates();
-  const selected = getSelectedReviewCandidates();
-  const exactCount = candidates.filter((item) => String(item.source || "").includes("exact")).length;
-  const heuristicCount = candidates.filter((item) => String(item.source || "").includes("heuristic") || item.heuristicRuleName).length;
-  const paretoCount = Math.max(0, candidates.length - exactCount - heuristicCount);
   return `
-    <article class="surface-card decision-band decision-band--inline">
-      <h3>把 Pareto、启发式和精确冠军放到同一个决策工作台里</h3>
-      <div class="decision-band-stats">
-        <div><span>Pareto</span><strong>${formatInt(paretoCount)}</strong></div>
-        <div><span>启发式</span><strong>${formatInt(heuristicCount)}</strong></div>
-        <div><span>精确冠军</span><strong>${formatInt(exactCount)}</strong></div>
-        <div><span>已选方案</span><strong id="review-selected-count">${formatInt(selected.length)}</strong></div>
+    <div class="stack">
+      <div id="review-comparison-region">
+        ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
+          "暂无方案池",
+          "先运行混合优化，或点击上方启发式规则加载参照方案。",
+          '<button class="btn btn-primary" type="button" data-nav-jump="optimize">去启动优化</button>',
+        )}
       </div>
-    </article>
-    <article class="surface-card">
-      <div class="card-head"><h3>方案池工具</h3><p>汇总当前方案池，并可加载经典调度规则作为对照锚点，一并纳入比较与 AI 评审。</p></div>
-      <div class="two-column">
-        <div>
-          ${renderPrimaryObjectiveBadges()}
-          ${renderKeyValueGrid([
-            { label: "总方案数", value: formatInt(candidates.length) },
-            { label: "已选方案", value: formatInt(selected.length) },
-            { label: "主目标", value: objectiveShortList(app.optimizeResult?.objective_keys || app.optimizeForm.objectiveKeys) },
-            { label: "最近优化", value: app.optimizeResult ? "已完成" : "未运行" },
-          ])}
-        </div>
-        <div>
-          <div class="field-inline"><span>添加启发式参照</span></div>
-          <p class="pool-hint">教科书基准锚点：衡量优化器相对经典派工规则的提升。已就绪的规则即刻纳入比较与 AI 评审；「未计算」规则首次点击约需 1~2 分钟仿真。</p>
-          <div class="chip-row">
-            ${CONFIG.HEURISTIC_RULES.map((rule) => {
-              const isBaseline = rule === app.optimizeResult?.baseline?.rule_name;
-              const computing = app.referenceSolutionsState.computing.includes(rule);
-              const cached = !isBaseline && ruleIsCached(rule);
-              const cls = isBaseline ? "is-baseline" : computing ? "is-computing" : cached ? "is-ready" : "is-uncached";
-              const badge = isBaseline ? "基线" : computing ? "计算中…" : cached ? "" : "未计算";
-              const title = isBaseline
-                ? "该规则已作为基线方案纳入对比"
-                : computing ? "正在仿真计算…"
-                : cached ? `${HEURISTIC_RULE_BLURB[rule] || "规则参考方案"}（已纳入对比）`
-                : `${HEURISTIC_RULE_BLURB[rule] || "规则参考方案"}（首次计算约需 1~2 分钟）`;
-              return `<button type="button" class="chip ${cls}" data-action="load-heuristic-rule" data-rule="${escapeHtml(rule)}" title="${escapeHtml(title)}" ${isBaseline || computing ? "disabled" : ""}>${escapeHtml(rule)}${badge ? `<span class="chip-badge">${escapeHtml(badge)}</span>` : ""}</button>`;
-            }).join("")}
-          </div>
-        </div>
-      </div>
-    </article>
-    <div id="review-comparison-region">
-      ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
-        "暂无方案池",
-        "先运行混合优化，或点击上方启发式规则加载参照方案。",
-        '<button class="btn btn-primary" type="button" data-nav-jump="optimize-launch">去启动优化</button>',
-      )}
+      <div id="review-utilization-region">${candidates.length ? renderReviewTypeUtilization() : ""}</div>
+      <div id="review-gantt-region">${candidates.length ? renderReviewGantt() : ""}</div>
     </div>
-    <div id="review-utilization-region">${candidates.length ? renderReviewTypeUtilization() : ""}</div>
-    <div id="review-gantt-region">${candidates.length ? renderReviewGantt() : ""}</div>
   `;
 }
 
-function renderExactObjectiveOptions() {
-  return asArray(app.exactObjectiveCatalog)
-    .map((item) => `<option value="${escapeHtml(item.key)}" ${item.key === app.exactForm.objectiveKey ? "selected" : ""}>${escapeHtml(item.label || item.key)}</option>`)
-    .join("");
+// 启发式参照 chips（Tab 条右侧）：基线/计算中/未计算/已纳入 四种状态
+function renderReviewRefChips() {
+  return `
+    <div class="review-ref-chips">
+      <span class="subtle">启发式参照：</span>
+      ${CONFIG.HEURISTIC_RULES.map((rule) => {
+        const isBaseline = rule === app.optimizeResult?.baseline?.rule_name;
+        const computing = app.referenceSolutionsState.computing.includes(rule);
+        const cached = !isBaseline && ruleIsCached(rule);
+        const cls = isBaseline || cached ? "ok" : computing ? "warn" : "neutral";
+        const stateText = isBaseline ? "基线" : computing ? "计算中…" : cached ? "已纳入" : "";
+        const title = isBaseline
+          ? "该规则已作为基线方案纳入对比"
+          : computing ? "正在仿真计算…"
+          : cached ? `${HEURISTIC_RULE_BLURB[rule] || "规则参考方案"}（已纳入对比）`
+          : `${HEURISTIC_RULE_BLURB[rule] || "规则参考方案"}（首次计算约需 1~2 分钟）`;
+        return `<button type="button" class="chip ${cls}" data-action="load-heuristic-rule" data-rule="${escapeHtml(rule)}" title="${escapeHtml(title)}" ${isBaseline || computing ? "disabled" : ""}>${escapeHtml(rule)}${stateText ? ` · ${stateText}` : ""}</button>`;
+      }).join("")}
+    </div>
+  `;
 }
 
 function renderReviewExactTab() {
   const objectiveOptions = asArray(app.optimizeObjectiveCatalog).map((item) => `
-    <label class="objective-pill">
-      <span>${escapeHtml(item.label || item.key)}</span>
-      <input type="number" min="0" step="0.1" data-weight-key="${escapeHtml(item.key)}" value="${app.exactForm.weights[item.key] ?? (app.optimizeForm.objectiveKeys.includes(item.key) ? 1 : 0)}">
+    <label class="obj-chip ${Number(app.exactForm.weights[item.key] ?? (app.optimizeForm.objectiveKeys.includes(item.key) ? 1 : 0)) > 0 ? "on" : ""}" style="cursor:default">
+      <input type="number" min="0" step="0.1" data-weight-key="${escapeHtml(item.key)}" value="${app.exactForm.weights[item.key] ?? (app.optimizeForm.objectiveKeys.includes(item.key) ? 1 : 0)}" style="width:56px;min-height:24px;padding:2px 6px">
+      ${escapeHtml(item.label || item.key)}
     </label>
   `).join("");
+  const exactName = app.exactReference
+    ? (getReviewCandidates().find((item) => item.id === app.exactReference.solution_id)?.name || "精确冠军参考")
+    : "";
   return `
-    <div class="two-column">
+    <div class="grid-2">
       <article class="surface-card">
-        <div class="card-head"><h3>单目标精确冠军</h3><p>用于在某一个业务指标上给出高置信冠军方案。</p></div>
+        <div class="card-head"><div><h3>单目标精确冠军</h3><p>在某一个业务指标上给出高置信冠军方案。</p></div></div>
         <div class="form-grid">
-          <label class="span-2"><span>目标</span><select id="exact-single-objective">${renderExactObjectiveOptions()}</select></label>
-          <label><span>时间预算</span><input id="exact-time-limit" type="number" min="5" value="${app.exactForm.timeLimitS}"></label>
+          <label style="grid-column:span 2"><span>目标</span><select id="exact-single-objective">${renderExactObjectiveOptions()}</select></label>
+          <label><span>时间预算（秒）</span><input id="exact-time-limit" type="number" min="5" value="${app.exactForm.timeLimitS}"></label>
         </div>
-        <div class="form-actions"><button class="btn btn-primary" type="button" data-action="generate-exact-single">生成单目标冠军</button></div>
+        <div class="mt-16"><button class="btn btn-primary" type="button" data-action="generate-exact-single">生成单目标冠军</button></div>
       </article>
       <article class="surface-card">
-        <div class="card-head"><h3>加权单目标精确冠军</h3><p>用于把业务偏好转成一个加权目标，再生成一个冠军方案。</p></div>
-        <div class="objective-grid">${objectiveOptions || renderEmptyState("暂无目标目录", "请先等待目标目录加载完成。")}</div>
-        <div class="form-actions"><button class="btn btn-primary" type="button" data-action="generate-exact-weighted">生成加权冠军</button></div>
+        <div class="card-head"><div><h3>加权单目标精确冠军</h3><p>把业务偏好转成加权目标，生成一个冠军方案。</p></div></div>
+        <div class="obj-chip-grid">${objectiveOptions || renderEmptyState("暂无目标目录", "请先等待目标目录加载完成。")}</div>
+        <div class="mt-16"><button class="btn btn-primary" type="button" data-action="generate-exact-weighted">生成加权冠军</button></div>
       </article>
     </div>
     ${app.exactReference ? `
       <article class="surface-card">
-        <div class="card-head"><h3>最新精确冠军参考</h3><p>该方案会自动纳入方案库、AI 评审和导出流程。</p></div>
-        ${renderKeyValueGrid([
-          { label: "方案", value: escapeHtml(app.exactReference.exact_info?.label || app.exactReference.solution_id || "精确冠军参考") },
-          { label: "模式", value: escapeHtml(app.exactReference.exact_info?.mode || app.exactReference.source || "-") },
-          { label: "总延误", value: metricDisplay(app.exactReference, "total_tardiness") },
-          { label: "总周期", value: metricDisplay(app.exactReference, "makespan") },
-          { label: "净可用利用率", value: metricDisplay(app.exactReference, "avg_net_available_utilization") },
-          { label: "求解信息", value: escapeHtml(app.exactReference.exact_info?.solver_status || app.exactReference.evaluationMode || "-") },
-        ])}
+        <div class="card-head"><div><h3>最新精确冠军参考</h3><p>自动纳入方案库、AI 评审和导出流程。</p></div><span class="chip ok">已纳入方案库</span></div>
+        <div class="kv-grid" style="grid-template-columns:repeat(3,1fr)">
+          <div><span>方案</span><strong>${escapeHtml(exactName)}</strong></div>
+          <div><span>模式</span><strong>${escapeHtml(app.exactReference.exact_info?.mode || app.exactReference.source || "-")}</strong></div>
+          <div><span>求解状态</span><strong>${escapeHtml(app.exactReference.exact_info?.solver_status || app.exactReference.evaluationMode || "-")}</strong></div>
+          <div><span>总延误</span><strong>${metricDisplay(app.exactReference, "total_tardiness")}</strong></div>
+          <div><span>总周期</span><strong>${metricDisplay(app.exactReference, "makespan")}</strong></div>
+          <div><span>净可用利用率</span><strong>${metricDisplay(app.exactReference, "avg_net_available_utilization")}</strong></div>
+        </div>
       </article>
       ${renderTimeline(app.exactReference.schedule, {
         title: "精确冠军参考甘特图",
@@ -3432,21 +3638,15 @@ function renderReviewExactTab() {
 function renderAiConversation() {
   if (!app.aiConversation.length) {
     return `
-      <div class="chat-stream">
-        <div class="chat-bubble assistant">
-          <strong>AI 方案助手</strong>
-          <p>请选择 1-4 个方案后，可以让我比较、推荐，或者追问某个方案为什么这样排。</p>
-        </div>
+      <div class="chat-stream" id="chat-stream">
+        <div class="bubble ai"><strong>AI 方案助手</strong>请选择 1-4 个方案后，可以让我比较、按诉求推荐，或者追问某个方案为什么这样排。</div>
       </div>
     `;
   }
   return `
-    <div class="chat-stream">
+    <div class="chat-stream" id="chat-stream">
       ${app.aiConversation.map((item) => `
-        <div class="chat-bubble ${item.role === "user" ? "user" : "assistant"}">
-          <strong>${item.role === "user" ? "你" : "AI 方案助手"}</strong>
-          <p>${escapeHtml(item.content)}</p>
-        </div>
+        <div class="bubble ${item.role === "user" ? "me" : "ai"}"><strong>${item.role === "user" ? "你" : "AI 方案助手"}</strong>${escapeHtml(item.content)}</div>
       `).join("")}
     </div>
   `;
@@ -3459,45 +3659,38 @@ function renderReviewAiTab() {
     <option value="${escapeHtml(item.id)}" ${item.id === (app.reviewDetailId || app.aiLastRecommendedId) ? "selected" : ""}>${escapeHtml(item.name)}</option>
   `).join("");
   return `
-    <article class="surface-card decision-band">
-      <div>
-        <span class="eyebrow">AI Decision Copilot</span>
-        <h3>让 AI 在主目标、全量 KPI 和风险解释三层口径下给出建议</h3>
-        <p>这里不是单纯聊天，而是面向业务评审会的方案协同区。建议先勾选候选，再输入真实业务诉求。</p>
-      </div>
-      <div class="decision-band-stats">
-        <div><span>已纳入 AI</span><strong>${formatInt(selected.length)}</strong></div>
-        <div><span>最近推荐</span><strong>${escapeHtml(app.aiLastRecommendedId || "-")}</strong></div>
-      </div>
-    </article>
-    <div class="two-column">
+    <div class="grid-2">
       <article class="surface-card">
-        <div class="card-head"><h3>当前纳入 AI 评审的方案</h3><p>AI 默认从主目标 + 全量 KPI + 风险解释三层给出意见。</p></div>
-        ${renderPrimaryObjectiveBadges()}
+        <div class="card-head"><div><h3>当前纳入 AI 评审的方案</h3><p>AI 从主目标 + 全量 KPI + 风险解释三层给出意见。</p></div><span class="chip blue">${formatInt(selected.length)} 个方案</span></div>
         ${selected.length ? renderSimpleTable(
           ["方案", "来源", "总延误", "总周期", "净可用利用率"],
           selected.map((item) => [
             escapeHtml(item.name),
-            escapeHtml(item.source),
+            escapeHtml(candidateSourceTag(item).label),
             metricDisplay(item, "total_tardiness"),
             metricDisplay(item, "makespan"),
             metricDisplay(item, "avg_net_available_utilization"),
           ]),
         ) : renderEmptyState("暂无已选方案", "先在方案库里勾选 1-4 个方案，再来让 AI 分析。")}
         ${selected.length ? renderCandidateMetricMatrix(selected, "AI 评审输入方案全量指标") : ""}
+        <p class="subtle mt-16">在「方案库」勾选/取消勾选后这里同步更新；也可用操作列「✦ AI 评审」把单个方案直接送入。</p>
       </article>
       <article class="surface-card">
-        <div class="card-head"><h3>对话式评审</h3><p>输入后会直接在聊天流中回复，并显示“正在分析”反馈。</p></div>
+        <div class="card-head"><div><h3>对话式评审</h3><p>输入真实业务诉求，AI 在聊天流中直接回复。</p></div></div>
         ${renderAiConversation()}
-        <div class="form-grid">
-          <label class="span-2"><span>当前追问方案</span><select id="ai-solution-select">${options}</select></label>
-          <label class="span-2"><span>问题 / 诉求</span><textarea id="ai-input" rows="4" placeholder="例如：我们更看重主订单准交，其次看净可用利用率，哪个方案更适合？"></textarea></label>
+        <div class="quick-acts">
+          <button class="btn btn-ghost btn-xs" type="button" data-action="ai-compare" ${app.aiBusy ? "disabled" : ""}>比较已勾选方案</button>
+          <button class="btn btn-ghost btn-xs" type="button" data-action="ai-recommend" ${app.aiBusy ? "disabled" : ""}>按诉求推荐方案</button>
+          <button class="btn btn-ghost btn-xs" type="button" data-action="ai-ask" ${app.aiBusy ? "disabled" : ""}>追问当前方案</button>
         </div>
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-action="ai-compare" ${app.aiBusy ? "disabled" : ""}>比较已勾选方案</button>
-          <button class="btn btn-primary" type="button" data-action="ai-recommend" ${app.aiBusy ? "disabled" : ""}>按诉求推荐方案</button>
-          <button class="btn btn-ghost" type="button" data-action="ai-ask" ${app.aiBusy ? "disabled" : ""}>追问当前方案</button>
+        <div class="form-grid mt-16">
+          <label style="grid-column:span 2"><span>当前追问方案</span><select id="ai-solution-select">${options}</select></label>
         </div>
+        <div class="chat-input">
+          <textarea rows="2" id="ai-input" placeholder="例如：我们更看重主订单准交，其次看净可用利用率，哪个方案更适合？"></textarea>
+          <button class="btn btn-primary" type="button" data-action="ai-recommend" ${app.aiBusy ? "disabled" : ""}>发送</button>
+        </div>
+        ${app.aiBusy ? `<p class="subtle" style="margin-top:6px">AI 正在分析…</p>` : ""}
       </article>
     </div>
   `;
@@ -3537,61 +3730,142 @@ function refreshReviewDynamicRegions() {
 
 function renderReview() {
   const container = el("review-content");
-  syncTabButtons("data-review-tab", app.reviewTab);
+  ensureReviewSelection();
+  const candidates = getReviewCandidates();
+  const selected = getSelectedReviewCandidates();
+  const exactCount = candidates.filter((item) => String(item.source || "").includes("exact")).length;
+  const heuristicCount = candidates.filter((item) => String(item.source || "").includes("heuristic") || String(item.source || "").includes("reference") || item.heuristicRuleName).length;
+  const paretoCount = Math.max(0, candidates.length - exactCount - heuristicCount - (candidates.some((item) => item.source === "baseline") ? 1 : 0));
+  // 前置检查条
+  if (optimizeIsRunning()) {
+    renderPrecheck("review-precheck", "warn", `⚠ 优化仍在运行（${optimizeProgress(app.optimizeStatus)}%），当前方案池为中间结果，完成后建议复核<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="optimize">查看优化进度 →</button>`);
+  } else if (app.optimizeResult) {
+    renderPrecheck("review-precheck", "ok", `✓ 优化已完成，可勾选方案对比、送入 AI 评审或导出交付<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="export">下一步：导出与交付 →</button>`);
+  } else {
+    renderPrecheck("review-precheck", "warn", `⚠ 尚无优化结果：可先加载启发式参照方案，或先运行混合优化<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="optimize">去启动优化 →</button>`);
+  }
+  const statChips = `
+    <div class="review-stat-chips" title="勾选 1–4 个方案驱动利用率、甘特与 AI 评审；「◎ 详情」联动下方分析区。">
+      <span><i>Pareto</i><b>${formatInt(paretoCount)}</b></span>
+      <span><i>启发式</i><b>${formatInt(heuristicCount)}</b></span>
+      <span><i>精确冠军</i><b>${formatInt(exactCount)}</b></span>
+      <span><i>已选</i><b id="review-selected-count">${formatInt(selected.length)}</b></span>
+    </div>
+  `;
+  const tabRow = `
+    <div class="review-tab-row">
+      <div class="tabs">
+        <button class="tab ${app.reviewTab === "library" ? "active" : ""}" type="button" data-review-tab="library">方案库</button>
+        <button class="tab ${app.reviewTab === "exact" ? "active" : ""}" type="button" data-review-tab="exact">精确冠军参考</button>
+        <button class="tab ${app.reviewTab === "ai" ? "active" : ""}" type="button" data-review-tab="ai">AI 评审助手</button>
+      </div>
+      <div class="review-tab-aside">
+        ${statChips}
+        ${renderReviewRefChips()}
+      </div>
+    </div>
+  `;
+  let pane = "";
+  if (app.reviewTab === "library") pane = renderReviewLibraryTab();
+  if (app.reviewTab === "exact") pane = `<div class="stack">${renderReviewExactTab()}</div>`;
+  if (app.reviewTab === "ai") pane = renderReviewAiTab();
+  container.innerHTML = `
+    <div class="stack">
+      ${tabRow}
+      <div class="rtab-scroll" id="review-tab-scroll">${pane}</div>
+    </div>
+  `;
   if (app.reviewTab === "library") {
-    container.innerHTML = renderReviewLibraryTab();
     refreshReviewDynamicRegions();
     ensureReviewData(getSelectedReviewCandidates());
   }
-  if (app.reviewTab === "exact") container.innerHTML = renderReviewExactTab();
-  if (app.reviewTab === "ai") container.innerHTML = renderReviewAiTab();
   requestAnimationFrame(() => mountGantts());
 }
 
-function renderSystem() {
-  const container = el("system-content");
-  syncTabButtons("data-system-tab", app.systemTab);
-  if (app.systemTab === "llm") {
-    container.innerHTML = `
-      <article class="surface-card">
-        <div class="card-head"><h3>大模型连接</h3><p>用于 Pareto 方案比较、推荐和问答解释。</p></div>
-        <div class="form-grid">
-          <label class="span-2"><span>Base URL</span><input id="llm-base-url" type="text" value="${escapeHtml(app.llmConfig?.base_url || "")}"></label>
-          <label class="span-2"><span>模型名称</span><input id="llm-model" type="text" value="${escapeHtml(app.llmConfig?.model || "")}"></label>
-          <label class="span-2"><span>API Key</span><input id="llm-api-key" type="password" placeholder="${app.llmConfig?.has_key ? "已配置，如需更新请重新输入" : "请输入新的 API Key"}"></label>
-        </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" data-action="save-llm-config">保存配置</button>
-          <button class="btn btn-ghost" type="button" data-action="test-llm-config">测试连接</button>
-        </div>
-      </article>
-    `;
-    return;
-  }
-  if (app.systemTab === "export") {
-    const focused = getSelectedReviewCandidate();
-    container.innerHTML = `
-      <article class="surface-card">
-        <div class="card-head"><h3>导出与交付</h3><p>支持导出模板、CSV 和当前已选方案 Excel。</p></div>
-        <div class="form-actions">
-          <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
-          <button class="btn btn-ghost" type="button" data-action="export-csv">导出当前实例 CSV</button>
-          <button class="btn btn-primary" type="button" data-action="export-selected-solution" ${focused ? `data-id="${escapeHtml(focused.id)}"` : ""}>导出当前方案</button>
-        </div>
-      </article>
-    `;
-    return;
+function renderExactObjectiveOptions() {
+  return asArray(app.exactObjectiveCatalog)
+    .map((item) => `<option value="${escapeHtml(item.key)}" ${item.key === app.exactForm.objectiveKey ? "selected" : ""}>${escapeHtml(item.label || item.key)}</option>`)
+    .join("");
+}
+
+function renderExportPage() {
+  const container = el("export-content");
+  if (!container) return;
+  const focused = getSelectedReviewCandidate();
+  const focusedMetric = focused ? metricDisplay(focused, "total_tardiness") : "";
+  container.innerHTML = `
+    <div class="stack">
+      <div class="export-card">
+        <div class="eicon"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg></div>
+        <div><h4>下载导入模板</h4><p>包含 9 类 Sheet 的标准模板与字段说明。</p></div>
+        <button class="btn btn-ghost" type="button" data-action="download-template">下载模板</button>
+      </div>
+      <div class="export-card">
+        <div class="eicon green"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4h16v16H4zM4 9h16M9 4v16"/></svg></div>
+        <div><h4>导出当前实例 CSV</h4><p>订单、工序、资源等全量数据打包，用于存档或外部分析。</p></div>
+        <button class="btn btn-ghost" type="button" data-action="export-csv">导出 CSV</button>
+      </div>
+      <div class="export-card highlight">
+        <div class="eicon orange"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m12 2 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 17l9 5 9-5"/></svg></div>
+        <div><h4>导出当前方案 Excel</h4><p>当前聚焦：<strong>${escapeHtml(focused?.name || "未选择")}</strong>${focused && focusedMetric !== "-" ? `（总延误 ${focusedMetric}）` : ""}。含甘特排产明细、资源分配与 KPI 摘要。</p></div>
+        <button class="btn btn-primary" type="button" data-action="export-selected-solution" ${focused ? `data-id="${escapeHtml(focused.id)}"` : "disabled"}>${focused ? `导出${escapeHtml(focused.name)}` : "暂无可导出方案"}</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderLlmPage() {
+  const container = el("llm-content");
+  if (!container) return;
+  const configured = !!app.llmConfig?.has_key;
+  const tested = app.llmTestResult?.status === "ok";
+  const testMsg = app.llmTestResult?.msg || "";
+  if (tested) {
+    renderPrecheck("llm-precheck", "ok", `● 连接测试成功${testMsg ? ` · ${escapeHtml(testMsg)}` : ""}<span class="grow"></span><button class="link-btn" type="button" data-action="test-llm-config">重新测试</button>`);
+  } else if (configured) {
+    renderPrecheck("llm-precheck", "warn", `已配置 API Key，尚未验证连通性<span class="grow"></span><button class="link-btn" type="button" data-action="test-llm-config">测试连接</button>`);
+  } else {
+    renderPrecheck("llm-precheck", "warn", `未配置大模型：AI 评审助手将使用内置启发式回退。<span class="grow"></span><button class="link-btn" type="button" data-action="test-llm-config">测试连接</button>`);
   }
   container.innerHTML = `
-    <article class="surface-card">
-      <div class="card-head"><h3>系统状态</h3><p>查看接口连通性与当前工作上下文。</p></div>
-      ${renderKeyValueGrid([
-        { label: "健康状态", value: escapeHtml(app.health?.status || "未知") },
-        { label: "当前页面", value: escapeHtml(app.currentPage) },
-        { label: "当前导航", value: escapeHtml(app.currentNav) },
-        { label: "当前任务", value: escapeHtml(app.optimizeTaskId || "-") },
-      ])}
-    </article>
+    <div class="card card-pad">
+      <div class="card-head"><div><h3>连接配置</h3><p>支持 OpenAI 兼容接口；未配置时 AI 评审助手使用启发式回退。</p></div></div>
+      <div class="form-grid" style="grid-template-columns:1fr">
+        <label><span>Base URL</span><input id="llm-base-url" type="text" value="${escapeHtml(app.llmConfig?.base_url || "")}"></label>
+        <label><span>模型名称</span><input id="llm-model" type="text" value="${escapeHtml(app.llmConfig?.model || "")}"></label>
+        <label><span>API Key</span><input id="llm-api-key" type="password" placeholder="${app.llmConfig?.has_key ? "已配置，如需更新请重新输入" : "请输入新的 API Key"}"></label>
+      </div>
+      <div class="mt-16" style="display:flex;gap:10px">
+        <button class="btn btn-primary" type="button" data-action="save-llm-config">保存配置</button>
+        <button class="btn btn-ghost" type="button" data-action="test-llm-config">测试连接</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSystemPage() {
+  const container = el("system-content");
+  if (!container) return;
+  const healthy = String(app.health?.status || "").toLowerCase() === "ok";
+  const pageLabel = { import: "数据导入", graph: "图谱构建", simulate: "规则仿真", optimize: "优化求解", review: "方案评审", dashboard: "工作概览", export: "导出与交付", llm: "大模型连接", system: "系统状态" }[app.currentPage] || app.currentPage;
+  container.innerHTML = `
+    <div class="stack">
+      <div class="grid-4">
+        <div class="kpi-card"><span>后端健康</span><strong style="color:${healthy ? "var(--success)" : "var(--danger)"}">${healthy ? "healthy" : escapeHtml(app.health?.status || "未知")}</strong><small>/api/health · ${app.health ? "200 OK" : "未连通"}</small></div>
+        <div class="kpi-card"><span>数据库实例</span><strong>${app.health?.has_instance ? "已加载" : "空"}</strong><small>llm4drd.db</small></div>
+        <div class="kpi-card"><span>当前任务</span><strong class="mono" style="font-size:13px">${escapeHtml(app.optimizeTaskId || "-")}</strong><small>混合优化 · ${escapeHtml(app.optimizeStatus?.status || (app.optimizeResult ? "done" : "未运行"))}</small></div>
+        <div class="kpi-card"><span>前端版本</span><strong>v3.0</strong><small>app_v2.js 20260720-7</small></div>
+      </div>
+      <div class="card card-pad">
+        <div class="card-head"><div><h3>工作上下文</h3></div></div>
+        <div class="kv-grid" style="grid-template-columns:repeat(4,1fr)">
+          <div><span>当前实例</span><strong style="font-size:11px">${escapeHtml(app.currentScene?.name || "未加载")}</strong></div>
+          <div><span>当前页面</span><strong>${escapeHtml(pageLabel)}</strong></div>
+          <div><span>已选方案</span><strong>${formatInt(app.reviewSelection.length)} / 4</strong></div>
+          <div><span>LLM 状态</span><strong style="color:${app.llmConfig?.has_key ? "var(--success)" : "var(--warning)"}">${app.llmConfig?.has_key ? "已配置" : "未配置"}</strong></div>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -4128,81 +4402,20 @@ function renderInteractiveGraph() {
     const label = order.label && order.label !== entity ? `${entity} · ${order.label}` : entity;
     return `<option value="${escapeHtml(entity)}" ${entity === orderEntityId ? "selected" : ""}>${escapeHtml(label)}</option>`;
   }).join("");
-  const orderFilterBar = `
-    <label class="graph-search graph-order-select">
-      <span>按订单过滤</span>
-      <select data-graph-order-select>
-        ${orderOptionsHtml || `<option value="">${orderEntityId ? escapeHtml(orderEntityId) : "暂无订单"}</option>`}
-      </select>
-    </label>
-    <label class="graph-search graph-order-jump">
-      <span>其他订单</span>
-      <span class="graph-order-jump-row">
-        <input type="search" list="graph-order-options" data-graph-order-input placeholder="输入订单号，回车跳转" autocomplete="off">
-        <button class="btn btn-ghost" type="button" data-action="graph-order-search">跳转</button>
-      </span>
-    </label>
-    <datalist id="graph-order-options">
-      ${asArray(app.graphOrderOptions).map((raw) => {
-        const order = normalizeGraphNode(raw);
-        return `<option value="${escapeHtml(order.entity_id || "")}">${escapeHtml(order.label || order.entity_id || "")}</option>`;
-      }).join("")}
-    </datalist>
-  `;
 
   const breadcrumb = `
     <div class="graph-breadcrumb" aria-label="订单簇统计">
-      <span class="crumb crumb-order"><i style="background:${orderColor}"></i>订单 ${escapeHtml(orderEntityId || "未选择")}</span>
-      <span class="crumb-sep" aria-hidden="true">▸</span>
-      <span class="crumb">任务 ${formatInt(loadedCounts.task || 0)}</span>
-      <span class="crumb-sep" aria-hidden="true">▸</span>
-      <span class="crumb">工序 ${formatInt(loadedCounts.operation || 0)}</span>
-      <span class="crumb-sep" aria-hidden="true">▸</span>
-      <span class="crumb">机器/工装/人员 ${formatInt(loadedCounts.machine || 0)} / ${formatInt(loadedCounts.tooling || 0)} / ${formatInt(loadedCounts.personnel || 0)}</span>
-      <span class="crumb-sep" aria-hidden="true">▸</span>
-      <span class="crumb">关系 ${formatInt(loadedEdgeCount)}</span>
-    </div>
-  `;
-
-  const stageNarrative = graph.orderScoped
-    ? `当前图中展示 ${formatInt(graph.selectedStats.displayedOrderCount)} / ${formatInt(graph.selectedStats.orderCount || graph.visibleOrderCount)} 个相关订单，右侧统计已按全部相关关系计算`
-    : "当前视图支持滚轮缩放、拖拽平移和节点微调布局";
-  const culled = graph.culledNodeCount > 0 || graph.culledEdgeCount > 0;
-  const canvasStats = `
-    <div class="graph-canvas-stats">
-      <span>展示节点 <b>${formatInt(graph.visibleNodes.length)}</b> / ${formatInt(graph.totalNodeCount)}</span>
-      <span>展示边 <b>${formatInt(graph.visibleEdges.length)}</b> / ${formatInt(graph.totalEdgeCount)}</span>
-      <span>类型 <b>${formatInt(Object.keys(graph.typeCounts || {}).length)}</b> 种</span>
-      <span>当前订单 <b>${escapeHtml(orderEntityId || "-")}</b></span>
-      ${culled
-        ? `<span class="graph-canvas-stats-warn">已按焦点/上限收敛，省略 ${formatInt(graph.culledNodeCount)} 节点 · ${formatInt(graph.culledEdgeCount)} 边</span>`
-        : `<span class="graph-canvas-stats-note">${stageNarrative}</span>`}
-    </div>
-  `;
-
-  const legendTypes = GRAPH_NODE_ORDER.map((type) => `
-      <span class="legend-item"><svg class="legend-shape" viewBox="-12 -12 24 24" aria-hidden="true">${graphNodeShapeSVG(type, 8, `fill="${graphTypeColor(type)}"`)}</svg>${escapeHtml(graphTypeLabel(type))}</span>
-    `).join("");
-  const legendDock = `
-    <div class="graph-legend-dock">
-      <div class="legend-block">
-        <span class="legend-title">节点 · 颜色/形状/层级</span>
-        <div class="legend">${legendTypes}</div>
-      </div>
-      <div class="legend-block">
-        <span class="legend-title">关系 · 线型</span>
-        <div class="legend">
-          <span class="legend-item"><span class="legend-line legend-line-structure"></span>结构链路（实线）</span>
-          <span class="legend-item"><span class="legend-line legend-line-resource"></span>资源可行（虚线）</span>
-          <span class="legend-item"><span class="legend-line legend-line-other"></span>其他关系（点线）</span>
-        </div>
-      </div>
-      <div class="legend-block">
-        <span class="legend-title">跨视图联动</span>
-        <div class="legend">
-          <span class="legend-item"><span class="legend-order-ring" style="border-color:${orderColor}"></span>订单标识色与甘特条块同色</span>
-        </div>
-      </div>
+      <span class="crumb-order"><i class="odot" style="background:${orderColor}"></i>订单 ${escapeHtml(orderEntityId || "未选择")}</span>
+      <span class="sep2" aria-hidden="true">▸</span>
+      <span>任务 <b>${formatInt(loadedCounts.task || 0)}</b></span>
+      <span class="sep2" aria-hidden="true">▸</span>
+      <span>工序 <b>${formatInt(loadedCounts.operation || 0)}</b></span>
+      <span class="sep2" aria-hidden="true">▸</span>
+      <span>机器/工装/人员 <b>${formatInt(loadedCounts.machine || 0)} / ${formatInt(loadedCounts.tooling || 0)} / ${formatInt(loadedCounts.personnel || 0)}</b></span>
+      <span class="sep2" aria-hidden="true">▸</span>
+      <span>关系 <b>${formatInt(loadedEdgeCount)}</b></span>
+      <span class="spacer"></span>
+      <span class="cstat">展示节点 <b>${formatInt(graph.visibleNodes.length)}</b>/${formatInt(graph.totalNodeCount)} · 边 <b>${formatInt(graph.visibleEdges.length)}</b>/${formatInt(graph.totalEdgeCount)}${graph.culledNodeCount > 0 || graph.culledEdgeCount > 0 ? ` · 已按焦点收敛，省略 ${formatInt(graph.culledNodeCount)} 节点 ${formatInt(graph.culledEdgeCount)} 边` : ""}</span>
     </div>
   `;
 
@@ -4290,85 +4503,86 @@ function renderInteractiveGraph() {
   ` : "";
 
   return `
-    <div class="surface-card graph-workbench">
-      <div class="card-head">
-        <h3>可交互有向异构图</h3>
-        <p>扁平布局的异构图：节点按类型以颜色+形状+尺寸三重编码，可滚轮缩放、拖拽平移、微调节点位置；订单标识色与甘特条块跨视图联动。</p>
-      </div>
+    <div class="surface-card graph-workbench graph-v3">
       <div class="graph-toolbar">
-        <div class="inline-actions">
-          <button class="btn ${app.graphView.mode === "focus" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
-          <button class="btn ${app.graphView.mode === "all" ? "btn-primary" : "btn-ghost"}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
-          <button class="btn btn-ghost" type="button" data-action="fit-graph-view">适配视图</button>
-          <button class="btn btn-ghost" type="button" data-action="reset-graph-view">重置视图</button>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-out">-</button>
-          <button class="btn btn-ghost" type="button" data-action="toggle-graph-fullscreen">全屏查看</button>
-          <span class="graph-zoom-pill" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
-          <button class="btn btn-ghost" type="button" data-action="zoom-graph-in">+</button>
+        <div class="graph-mode">
+          <button class="${app.graphView.mode === "focus" ? "on" : ""}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
+          <button class="${app.graphView.mode === "all" ? "on" : ""}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
         </div>
-        ${orderFilterBar}
-        <label class="graph-search">
-          <span>搜索节点</span>
-          <input type="search" value="${escapeHtml(app.graphView.search || "")}" data-graph-search placeholder="搜索订单、任务、工序或资源">
+        <span class="sep"></span>
+        <label class="graph-order-filter">按订单过滤
+          <select data-graph-order-select>
+            ${orderOptionsHtml || `<option value="">${orderEntityId ? escapeHtml(orderEntityId) : "暂无订单"}</option>`}
+          </select>
         </label>
       </div>
       ${breadcrumb}
-      <div class="graph-filter-grid">
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">节点层级</div>
-          <div class="filter-chip-row">${nodeTypeFilters}</div>
-        </section>
-        <section class="graph-filter-group">
-          <div class="graph-filter-title">关系层级</div>
-          <div class="filter-chip-row">${edgeGroupFilters}</div>
-        </section>
+      <div class="graph-filters">
+        <span class="ft">节点层级</span>
+        ${Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
+          <button class="fchip ${enabled ? "on" : "off"}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
+            <span class="fdot" style="background:${graphTypeColor(type)}"></span>${escapeHtml(graphTypeLabel(type))}<span class="fc">${formatInt(graph.typeCounts[type] || 0)}</span>
+          </button>
+        `).join("")}
+        <span class="ft" style="margin-left:14px">关系层级</span>
+        ${Object.entries(app.graphView.edgeGroups || {}).map(([group, enabled]) => `
+          <button class="fchip ${enabled ? "on" : "off"}" type="button" data-action="toggle-graph-edge-group" data-key="${escapeHtml(group)}">
+            ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}<span class="fc">${formatInt(graph.edgeGroupCounts[group] || 0)}</span>
+          </button>
+        `).join("")}
       </div>
-      <div class="split-panel graph-split">
-        <article class="surface-card graph-stage-card">
-          <button class="btn btn-ghost graph-fs-exit" type="button" data-action="toggle-graph-fullscreen">退出全屏</button>
-          ${canvasStats}
-          <div class="graph-hover-preview" data-graph-hover-preview>
-            ${selectedNode ? `当前选中：${escapeHtml(graphTypeLabel(selectedNode.type))} / ${escapeHtml(selectedNode.label || selectedNode.id)} / 关联关系 ${formatInt(nodeDegree.get(selectedNode.id) || 0)}` : "将鼠标悬浮到节点上，可快速预览该节点名称、类型与关联关系强度。"}
+      <div class="graph-main">
+        <div class="graph-canvas-wrap">
+          <div class="graph-cytoscape-canvas" data-graph-canvas></div>
+          <div class="graph-canvas-overlay">
+            ${GRAPH_NODE_ORDER.map((type) => `<span><i style="display:inline-block;width:9px;height:9px;border-radius:${type === "machine" ? "3px" : "50%"};background:${graphTypeColor(type)};margin-right:4px"></i>${escapeHtml(graphTypeLabel(type))}</span>`).join("")}
+            <span style="color:var(--text-faint)">实线=结构 · 虚线=资源可行</span>
           </div>
-          <div class="graph-shell">${svg}</div>
-          ${legendDock}
-        </article>
-        <article class="surface-card graph-detail-card">
-          <div class="card-head">
-            <h3>节点详情与关系解释</h3>
-            <p>右侧所有统计都基于“选中节点的完整相关作用域”计算，而不是只基于左侧可见局部图。</p>
+          <div class="graph-zoom-ctl">
+            <button class="btn btn-ghost btn-xs" type="button" data-action="fit-graph-view">适配</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="reset-graph-view">重置</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="zoom-graph-out">−</button>
+            <span class="zval" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="zoom-graph-in">＋</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="toggle-graph-fullscreen">全屏</button>
           </div>
-          ${selectedSummary}
-          ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : renderEmptyState("未选中节点", "请先在左侧图中点击一个节点。")}
-          ${updownBlock}
-          ${relationBlock}
-          ${scopeOverview}
-          ${selectionHighlights.length ? renderKeyValueGrid(selectionHighlights) : ""}
-          ${Object.keys(graph.relatedByType).length ? `
-            <div class="graph-neighbor-groups">
-              ${Object.entries(graph.relatedByType).map(([type, items]) => `
-                <section class="graph-neighbor-group">
-                  <header>
-                    <strong><i class="graph-order-dot" style="background:${graphTypeColor(type)}"></i>${escapeHtml(graphTypeLabel(type))}</strong>
-                    <span>${formatInt(items.length)} 个</span>
-                  </header>
-                  <div class="graph-neighbor-pills">
-                    ${items.slice(0, 10).map((item) => `<button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(item.id)}">${escapeHtml(item.label || item.id)}</button>`).join("")}
-                  </div>
-                </section>
-              `).join("")}
-            </div>
-          ` : ""}
-          ${graph.relatedEdges.length ? renderSimpleTable(
-            ["关系", "来源", "目标"],
-            graph.relatedEdges.slice(0, 16).map((edge) => [
-              escapeHtml(graphEdgeTypeLabel(edge.edgeType || edge.group || "-")),
-              escapeHtml(graph.nodeMap.get(edge.source)?.label || edge.source),
-              escapeHtml(graph.nodeMap.get(edge.target)?.label || edge.target),
-            ]),
-            { footer: graph.relatedEdges.length > 16 ? `当前只展示前 16 条关联边，共 ${graph.relatedEdges.length} 条。` : "" },
-          ) : renderEmptyState("暂无关联边", "当前节点在全相关作用域中没有可展示的关系边。")}
-        </article>
+        </div>
+        <aside class="graph-detail-v3">
+          <div class="dh">节点详情与关系解释</div>
+          <div class="dbody">
+            ${selectedSummary}
+            ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : ""}
+            ${updownBlock}
+            ${relationBlock}
+            ${scopeOverview}
+            ${selectionHighlights.length ? renderKeyValueGrid(selectionHighlights) : ""}
+            ${Object.keys(graph.relatedByType).length ? `
+              <div class="graph-neighbor-groups">
+                ${Object.entries(graph.relatedByType).map(([type, items]) => `
+                  <section class="graph-neighbor-group">
+                    <header>
+                      <strong><i class="graph-order-dot" style="background:${graphTypeColor(type)}"></i>${escapeHtml(graphTypeLabel(type))}</strong>
+                      <span>${formatInt(items.length)} 个</span>
+                    </header>
+                    <div class="graph-neighbor-pills">
+                      ${items.slice(0, 10).map((item) => `<button class="pill" type="button" data-action="focus-graph-node" data-id="${escapeHtml(item.id)}">${escapeHtml(item.label || item.id)}</button>`).join("")}
+                    </div>
+                  </section>
+                `).join("")}
+              </div>
+            ` : ""}
+            ${graph.relatedEdges.length ? renderSimpleTable(
+              ["关系", "来源", "目标"],
+              graph.relatedEdges.slice(0, 16).map((edge) => [
+                escapeHtml(graphEdgeTypeLabel(edge.edgeType || edge.group || "-")),
+                escapeHtml(graph.nodeMap.get(edge.source)?.label || edge.source),
+                escapeHtml(graph.nodeMap.get(edge.target)?.label || edge.target),
+              ]),
+              { footer: graph.relatedEdges.length > 16 ? `当前只展示前 16 条关联边，共 ${graph.relatedEdges.length} 条。` : "" },
+            ) : ""}
+            <p class="subtle">统计基于选中节点的完整相关作用域，而非左侧可见局部图。点击 pill 可将对应节点居中聚焦。</p>
+          </div>
+        </aside>
       </div>
     </div>
   `;
@@ -4588,14 +4802,18 @@ function mountGantts() {
 async function renderCurrentPage() {
   ensureReviewSelection();
   updateShell();
-  if (app.currentPage === "new-scene") {
-    renderNewScene();
+  if (app.currentPage === "import") {
+    renderImportPage();
     if (!app.validation && !app.validationBusy && app.currentScene) handleRunValidation(true);
   }
+  if (app.currentPage === "graph") renderGraphPage();
+  if (app.currentPage === "simulate") renderSimulatePage();
+  if (app.currentPage === "optimize") renderOptimizePage();
   if (app.currentPage === "dashboard") renderDashboard();
-  if (app.currentPage === "workflow") renderWorkflow();
   if (app.currentPage === "review") renderReview();
-  if (app.currentPage === "system") renderSystem();
+  if (app.currentPage === "export") renderExportPage();
+  if (app.currentPage === "llm") renderLlmPage();
+  if (app.currentPage === "system") renderSystemPage();
   syncGraphBuildControls();
 }
 
@@ -4741,7 +4959,7 @@ async function pollOptimizeStatus() {
     };
     app.optimizePollFailures = 0;
     updateShell();
-    if (["workflow", "dashboard", "review", "system"].includes(app.currentPage)) await renderCurrentPage();
+    if (["optimize", "review", "dashboard", "system"].includes(app.currentPage)) await renderCurrentPage();
     const lowered = String(app.optimizeStatus?.status || "").toLowerCase();
     if (["failed", "error"].includes(lowered)) {
       window.clearInterval(app.pollTimer);
@@ -4765,6 +4983,7 @@ async function pollOptimizeStatus() {
       persistReviewProgress();
       updateShell();
       await renderCurrentPage();
+      refreshWorkflowOverview({ force: true });
       toast("混合优化已完成。", "success");
     }
   } catch (error) {
@@ -4860,13 +5079,14 @@ async function handleRunValidation(silent = false) {
   } finally {
     app.validationBusy = false;
   }
-  // 校验通过后自动折叠面板，只有存在错误时才保持展开
-  app.validationCollapsed = app.validation ? app.validation.status !== "failed" : false;
-  // Re-render validation panel on new-scene page after validation completes
-  if (app.currentPage === "new-scene") {
+  // 校验面板默认展开（三档大色块摘要是设计稿的主视觉）；用户可手动折叠
+  app.validationCollapsed = false;
+  // Re-render validation panel on import page after validation completes
+  if (app.currentPage === "import") {
     const box = el("new-scene-validation");
     if (box) box.innerHTML = app.currentScene ? renderValidationPanel() : "";
   }
+  refreshWorkflowOverview({ force: true });
 }
 
 async function handleImportFile(file) {
@@ -4892,7 +5112,7 @@ async function handleImportFile(file) {
     resetInstanceDerivedState();
     const validation = app.validation;
     const failed = validation?.status === "failed";
-    app.validationCollapsed = !!validation && !failed;
+    app.validationCollapsed = false;
     setImportProgress({
       busy: false,
       percent: 100,
@@ -4909,9 +5129,10 @@ async function handleImportFile(file) {
     } else {
       toast("Excel 导入成功，数据校验通过。", "success");
     }
-    if (app.currentPage !== "new-scene") await navigate("new-scene");
+    if (app.currentPage !== "import") await navigate("import");
     else await renderCurrentPage();
-    // 强校验通过后自动构建图谱，构建进度显示在本页“图谱构建”卡片中
+    refreshWorkflowOverview({ force: true });
+    // 强校验通过后自动构建图谱，构建进度显示在「图谱构建」页
     if (!failed) await handleBuildGraph();
   } catch (error) {
     setImportProgress({ busy: false, percent: 100, tone: "error", label: "导入失败", note: error.message });
@@ -5112,7 +5333,7 @@ async function restoreWorkflowProgress() {
 
   if (progress.validation) {
     app.validation = progress.validation;
-    app.validationCollapsed = progress.validation.status !== "failed";
+    app.validationCollapsed = false;
   }
 
   if (progress.simulation) {
@@ -5173,7 +5394,7 @@ function stopGraphBuildPolling() {
 async function refreshGraphBuildFeedback() {
   const panel = el("graph-build-status-panel");
   if (panel) panel.outerHTML = renderGraphBuildStatus();
-  else if (app.currentPage === "new-scene") await renderCurrentPage();
+  else if (app.currentPage === "graph") await renderCurrentPage();
   syncGraphBuildControls();
 }
 
@@ -5198,6 +5419,7 @@ async function finishGraphBuild(status) {
   app.graphBuildStatus = { ...status, status: "done", stage: "done", progress: 100, message: "图谱构建并加载成功" };
   toast(`图谱构建完成：${formatInt(meta.total_nodes)} 个节点、${formatInt(meta.total_edges)} 条边。`, "success");
   await renderCurrentPage();
+  refreshWorkflowOverview({ force: true });
 }
 
 async function pollGraphBuildStatus() {
@@ -5335,7 +5557,6 @@ async function handleSimulate() {
   }, 300);
   app.simElapsedTimer = stageTimer;
   try {
-    app.simRule = el("workflow-sim-rule")?.value || app.simRule;
     app.simStatus.message = `规则引擎计算中（${app.simRule}）…`;
     const note = el("sim-status-note");
     if (note) note.textContent = app.simStatus.message;
@@ -5360,6 +5581,7 @@ async function handleSimulate() {
     if (diagnosis) toast(`仿真完成，但结果不完整：${diagnosis}`, "error");
     else toast(`规则仿真已完成：${app.simRule}`, "success");
     await renderCurrentPage();
+    refreshWorkflowOverview({ force: true });
   } catch (error) {
     app.simStatus = {
       phase: "error",
@@ -5409,6 +5631,7 @@ async function handleStartOptimize() {
     app.exactReference = null;
     startOptimizePolling();
     await renderCurrentPage();
+    refreshWorkflowOverview({ force: true });
     toast(`优化任务 ${result.task_id} 已启动，页面将持续更新运行状态。`, "success");
     await pollOptimizeStatus();
   } catch (error) {
@@ -5573,7 +5796,7 @@ async function handleSaveLlmConfig() {
     });
     app.llmConfig = await api.getLlmConfig();
     toast("大模型配置已保存。", "success");
-    renderSystem();
+    await renderCurrentPage();
   } catch (error) {
     toast(`保存配置失败：${error.message}`, "warning");
   }
@@ -5582,17 +5805,35 @@ async function handleSaveLlmConfig() {
 async function handleTestLlmConfig() {
   try {
     const result = await api.testLlmConfig();
+    app.llmTestResult = { status: "ok", msg: result?.msg || result?.message || "" };
     toast(result?.message || "大模型连接测试通过。", "success");
   } catch (error) {
+    app.llmTestResult = { status: "error", msg: error.message || "" };
     toast(`连接测试失败：${error.message}`, "warning");
   }
+  await renderCurrentPage();
 }
 
 async function handleAction(action, target) {
+  if (action === "toggle-sidebar") {
+    const collapsed = document.querySelector(".app")?.classList.toggle("is-sidebar-collapsed");
+    try { localStorage.setItem(CONFIG.SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0"); } catch { /* 隐私模式忽略 */ }
+    return;
+  }
   if (action === "retry-plan-gantt") return loadPlanGantt(app.planGantt.taskId, app.planGantt.solutionId, app.planGantt.orderId);
-  if (action === "goto-new-scene") return navigate("new-scene");
+  if (action === "goto-new-scene") return navigate("import");
   if (action === "goto-dashboard") return navigate("dashboard");
-  if (action === "goto-review") return navigate("solution-review");
+  if (action === "goto-review") return navigate("review");
+  if (action === "select-sim-rule") {
+    app.simRule = target.dataset.rule || app.simRule;
+    return renderCurrentPage();
+  }
+  if (action === "reset-compare-cols") {
+    try { localStorage.removeItem(REVIEW_COMPARE_HIDDEN_LS); } catch { /* 忽略 */ }
+    app.reviewColConfigOpen = true;
+    refreshReviewDynamicRegions();
+    return;
+  }
   if (action === "graph-order-search") {
     const root = target.closest(".graph-workbench");
     const input = root?.querySelector("[data-graph-order-input]");
@@ -5739,11 +5980,10 @@ async function handleAction(action, target) {
   if (action === "generate-exact-weighted") return handleGenerateExact("weighted");
   if (action === "export-selected-solution") return handleExportSolution(target?.dataset.id || getSelectedReviewCandidate()?.id);
   if (action === "focus-candidate") {
-    // 查看详情 = 打开该方案「每日机器分类利用率趋势」，并让甘特/利用率表跟随该方案
+    // ◎ 详情：联动下方利用率对比与排程甘特切换到该方案
     const id = target.dataset.id;
     app.reviewDetailId = id;
     app.reviewGanttSchemeId = id;
-    app.reviewUtilTrendId = app.reviewUtilTrendId === id ? null : id;
     persistReviewProgress();
     updateShell();
     return renderCurrentPage();
@@ -5777,15 +6017,13 @@ async function handleAction(action, target) {
   if (action === "test-llm-config") return handleTestLlmConfig();
   if (action === "goto-workflow-step") {
     const step = Number(target.dataset.step || 1);
-    const stepNavKey = { 3: "simulate", 4: "optimize-launch" }[step];
-    if (stepNavKey) return navigate(stepNavKey);
-    app.workflowStep = step;
-    return navigate("workflow");
+    const stepNavKey = { 1: "import", 2: "graph", 3: "simulate", 4: "optimize", 5: "review" }[step] || "import";
+    return navigate(stepNavKey);
   }
   if (action === "toggle-graph-fullscreen") {
-    // 只全屏图谱舞台（画布 + 统计条 + 图例），不含 toolbar/筛选/右侧节点信息栏
+    // 只全屏图谱画布区（含图例悬浮层与缩放控制），不含工具栏/筛选/右侧详情栏
     const workbench = target.closest(".graph-workbench") || document.querySelector(".graph-workbench");
-    const shell = workbench?.querySelector(".graph-stage-card");
+    const shell = workbench?.querySelector(".graph-canvas-wrap");
     if (!shell || !shell.requestFullscreen) {
       toast("当前浏览器不支持图谱全屏显示。", "warning");
       return;
@@ -5802,12 +6040,12 @@ async function handleAction(action, target) {
 
 function bindGlobalEvents() {
   document.addEventListener("fullscreenchange", () => {
-    const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-stage-card")
+    const fullscreenGraph = document.fullscreenElement?.classList.contains("graph-canvas-wrap")
       ? document.fullscreenElement
       : null;
     document.querySelectorAll('[data-action="toggle-graph-fullscreen"]').forEach((button) => {
-      const active = !!fullscreenGraph && button.closest(".graph-workbench")?.querySelector(".graph-stage-card") === fullscreenGraph;
-      button.textContent = active ? "退出全屏" : "全屏查看";
+      const active = !!fullscreenGraph && button.closest(".graph-canvas-wrap") === fullscreenGraph;
+      button.textContent = active ? "退出全屏" : "全屏";
       button.setAttribute("aria-pressed", active ? "true" : "false");
     });
     // 全屏进出会改变 cytoscape 容器尺寸，需要 resize + 重新适配视图
@@ -5840,28 +6078,6 @@ function bindGlobalEvents() {
       event.preventDefault();
       app.reviewTab = reviewTabTarget.dataset.reviewTab;
       renderReview();
-      return;
-    }
-    const systemTabTarget = event.target.closest("[data-system-tab]");
-    if (systemTabTarget) {
-      event.preventDefault();
-      app.systemTab = systemTabTarget.dataset.systemTab;
-      renderSystem();
-      return;
-    }
-    const navParentTarget = event.target.closest(".nav-parent");
-    if (navParentTarget) {
-      event.preventDefault();
-      const navKey = navParentTarget.dataset.nav;
-      const groupKey = "optimize";
-      if (app.currentNav === navKey) {
-        const nextExpanded = !app.sidebarExpanded[groupKey];
-        expandSidebarGroup(groupKey, nextExpanded);
-        syncSidebarHierarchy();
-      } else {
-        expandSidebarGroup(groupKey, true);
-        await navigate(navKey);
-      }
       return;
     }
     const actionTarget = event.target.closest("[data-action]");
@@ -5900,6 +6116,12 @@ function bindGlobalEvents() {
         return;
       }
       app.optimizeForm.objectiveKeys = selected;
+      // chip 网格：同步高亮态与计数文案，不整页重渲
+      document.querySelectorAll("[data-objective-key]").forEach((node) => {
+        node.closest(".obj-chip")?.classList.toggle("on", node.checked);
+      });
+      const countEl = el("opt-obj-count");
+      if (countEl) countEl.textContent = `已选 ${selected.length} / ${app.optimizeObjectiveCatalog.length} 个目标，参与 Pareto 前沿求解。`;
       updateOptimizeBudgetHint();
       return;
     }
@@ -5960,7 +6182,6 @@ function bindGlobalEvents() {
       if (value) await searchGraphOrderAndRender(value);
       return;
     }
-    if (target.matches("#workflow-sim-rule")) app.simRule = target.value;
     if (target.matches("#ai-solution-select")) {
       app.reviewDetailId = target.value;
       persistReviewProgress();
@@ -6005,12 +6226,34 @@ function bindGlobalEvents() {
   });
 
   window.addEventListener("hashchange", async () => {
-    const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
+    const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "import");
     await navigate(navKey, false);
   });
+
+  // 拖拽导入：Excel 文件可直接拖到上传 Hero 区
+  const dropHero = document.getElementById("drop-hero");
+  if (dropHero) {
+    ["dragenter", "dragover"].forEach((type) => dropHero.addEventListener(type, (event) => {
+      event.preventDefault();
+      dropHero.classList.add("dragging");
+    }));
+    ["dragleave", "drop"].forEach((type) => dropHero.addEventListener(type, (event) => {
+      event.preventDefault();
+      dropHero.classList.remove("dragging");
+    }));
+    dropHero.addEventListener("drop", async (event) => {
+      const file = event.dataTransfer?.files?.[0];
+      if (file) await handleImportFile(file);
+    });
+  }
 }
 
 async function init() {
+  try {
+    if (localStorage.getItem(CONFIG.SIDEBAR_COLLAPSED_KEY) === "1") {
+      document.querySelector(".app")?.classList.add("is-sidebar-collapsed");
+    }
+  } catch { /* 隐私模式忽略 */ }
   loadSceneHistory();
   bindGlobalEvents();
   await loadCatalogs();
@@ -6021,12 +6264,13 @@ async function init() {
   // 先恢复进度再导航：仿真/优化结果决定了首屏该停在流程的哪一步。
   if (app.currentScene) await restoreWorkflowProgress();
   // 先落到目标页面再加载图谱：图谱加载较慢，放在导航之前会推迟首屏。
-  const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "new-scene");
+  const navKey = window.location.hash.replace("#", "") || (app.currentScene ? "dashboard" : "import");
   await navigate(navKey, false);
   if (!app.currentScene || app.importBusy) return;
   // 库里没有可用的校验结论（如实例刚被改过）时才补算一次。
   if (!app.validation) await handleRunValidation(true);
   if (await loadExistingGraph() && !app.importBusy) await renderCurrentPage();
+  refreshWorkflowOverview({ force: true });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
