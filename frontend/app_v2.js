@@ -205,6 +205,8 @@ const app = {
   ganttOrderMulti: {},
   // Excel 风格多选订单筛选组件的已注册数据源：id -> config
   multiSelectSources: new Map(),
+  // 通用单选可搜索下拉筛选组件的已注册数据源：id -> config
+  singleSelectSources: new Map(),
   // 评审甘特：当前选中的单个方案 id（与勾选集 reviewSelection 解耦）
   reviewGanttSchemeId: null,
   // 方案对比「列配置」面板展开态（跨区域重渲染保持）
@@ -607,7 +609,7 @@ function renderMultiSelectFilter(config) {
           `).join("")}
         </div>
         <div class="multi-order-foot">
-          ${config.options.length > MULTI_SELECT_RENDER_CAP ? `<span class="multi-order-more">仅显示前 ${MULTI_SELECT_RENDER_CAP} 条，请输入搜索</span>` : ""}
+          ${config.options.length > MULTI_SELECT_RENDER_CAP ? `<span class="multi-order-more">共 ${formatInt(config.options.length)} 项，输入关键字可搜索全部</span>` : ""}
         </div>
       </div>
     </div>
@@ -660,13 +662,16 @@ function mountMultiSelectFilters() {
       if (panel.hidden) open(); else close();
     });
 
+    // 从全量 source.options 重渲染选项（勾选态取自本地 working 集合），供搜索时使用
+    const renderOptions = (opts) => {
+      list.innerHTML = opts.map((opt) => `<label class="multi-order-option"><input type="checkbox" data-multi-select-id="${escapeHtml(opt.id)}" ${working.has(opt.id) ? "checked" : ""}> ${escapeHtml(opt.label)}</label>`).join("");
+    };
     if (search) {
       search.addEventListener("input", () => {
         const q = search.value.trim().toLowerCase();
-        list.querySelectorAll(".multi-order-option").forEach((opt) => {
-          const label = String(opt.textContent || "").trim().toLowerCase();
-          opt.hidden = q ? !label.includes(q) : false;
-        });
+        // 在全量 source.options 上搜索（而非仅已渲染的前 N 条），大实例下第 N 名之后的项也能搜到并勾选
+        const matched = q ? source.options.filter((o) => String(o.label).toLowerCase().includes(q)) : source.options;
+        renderOptions(matched.slice(0, MULTI_SELECT_RENDER_CAP));
       });
     }
 
@@ -688,6 +693,107 @@ function mountMultiSelectFilters() {
     });
 
     // 点击组件外部：关闭并提交
+    const onDocClick = (event) => {
+      if (!container.isConnected) { document.removeEventListener("click", onDocClick, true); return; }
+      if (!container.contains(event.target)) close();
+    };
+    document.addEventListener("click", onDocClick, true);
+  });
+}
+
+// —— 通用「可搜索 + 单选」下拉筛选框（客户端）——
+// 复用甘特图 multi-order-* 的视觉样式，行为改单选：按钮显示当前选中项 →
+// 点击展开面板 → 搜索框模糊过滤 → 点选项即选中并关闭面板。
+// config: { id, options:[{id, label}], selectedId:string|null, onChange:(id)=>void, noun }
+// 语义：always 有且仅有一个选中项（无选中时按钮显示"全部{noun}"占位）。
+const SINGLE_SELECT_RENDER_CAP = 300;
+
+function singleSelectSummary(options, selectedId, noun) {
+  if (!selectedId) return `选择${noun}…`;
+  const found = options.find((o) => o.id === selectedId);
+  return found ? found.label : String(selectedId);
+}
+
+function renderSingleSelectFilter(config) {
+  const noun = config.noun || "项";
+  app.singleSelectSources.set(config.id, { ...config, noun });
+  return `
+    <div class="multi-order-filter single-select-filter" data-single-select-filter="${escapeHtml(config.id)}">
+      <button type="button" class="multi-order-summary" data-single-select-toggle aria-expanded="false">
+        <span class="multi-order-summary-text">${escapeHtml(singleSelectSummary(config.options, config.selectedId, noun))}</span>
+        <span class="multi-order-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="multi-order-panel" hidden>
+        <input type="search" class="multi-order-search" placeholder="输入${escapeHtml(noun)}模糊搜索" aria-label="搜索${escapeHtml(noun)}">
+        <div class="multi-order-list" role="listbox" aria-label="${escapeHtml(noun)}列表">
+          ${config.options.slice(0, SINGLE_SELECT_RENDER_CAP).map((opt) => `
+            <label class="multi-order-option${opt.id === config.selectedId ? " is-checked" : ""}" data-single-select-id="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</label>
+          `).join("")}
+        </div>
+        <div class="multi-order-foot">
+          ${config.options.length > SINGLE_SELECT_RENDER_CAP ? `<span class="multi-order-more">共 ${formatInt(config.options.length)} 项，输入关键字可搜索全部</span>` : ""}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function mountSingleSelectFilters() {
+  document.querySelectorAll(".page.active [data-single-select-filter]:not([data-single-select-bound='1'])").forEach((container) => {
+    const source = app.singleSelectSources.get(container.dataset.singleSelectFilter);
+    if (!source) return;
+    container.dataset.singleSelectBound = "1";
+    const toggle = container.querySelector("[data-single-select-toggle]");
+    const panel = container.querySelector(".multi-order-panel");
+    const search = container.querySelector(".multi-order-search");
+    const list = container.querySelector(".multi-order-list");
+    const summaryText = container.querySelector(".multi-order-summary-text");
+    if (!toggle || !panel || !list) return;
+
+    const updateSummary = () => {
+      summaryText.textContent = singleSelectSummary(source.options, source.selectedId, source.noun);
+    };
+
+    const renderOptions = (opts) => {
+      list.innerHTML = opts.map((opt) => `
+        <label class="multi-order-option${opt.id === source.selectedId ? " is-checked" : ""}" data-single-select-id="${escapeHtml(opt.id)}">${escapeHtml(opt.label)}</label>
+      `).join("");
+    };
+
+    const open = () => {
+      panel.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
+      if (search) { search.value = ""; renderOptions(source.options.slice(0, SINGLE_SELECT_RENDER_CAP)); }
+      search?.focus();
+    };
+    const close = () => {
+      if (panel.hidden) return;
+      panel.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+    };
+
+    toggle.addEventListener("click", () => {
+      if (panel.hidden) open(); else close();
+    });
+
+    if (search) {
+      search.addEventListener("input", () => {
+        const q = search.value.trim().toLowerCase();
+        const matched = q ? source.options.filter((o) => String(o.label).toLowerCase().includes(q)) : source.options;
+        renderOptions(matched.slice(0, SINGLE_SELECT_RENDER_CAP));
+      });
+    }
+
+    list.addEventListener("click", (event) => {
+      const opt = event.target.closest("[data-single-select-id]");
+      if (!opt) return;
+      const id = opt.dataset.singleSelectId;
+      source.selectedId = id;
+      updateSummary();
+      source.onChange(id);
+      close();
+    });
+
     const onDocClick = (event) => {
       if (!container.isConnected) { document.removeEventListener("click", onDocClick, true); return; }
       if (!container.contains(event.target)) close();
@@ -4396,12 +4502,6 @@ function renderInteractiveGraph() {
   }), { minX: Infinity, maxX: 0, minY: Infinity, maxY: 0, canvasWidth: graph.layout.width, canvasHeight: graph.layout.height });
   app.graphView.bounds = bounds;
 
-  const orderOptionsHtml = asArray(app.graphOrderOptions).map((raw) => {
-    const order = normalizeGraphNode(raw);
-    const entity = order.entity_id || "";
-    const label = order.label && order.label !== entity ? `${entity} · ${order.label}` : entity;
-    return `<option value="${escapeHtml(entity)}" ${entity === orderEntityId ? "selected" : ""}>${escapeHtml(label)}</option>`;
-  }).join("");
 
   const breadcrumb = `
     <div class="graph-breadcrumb" aria-label="订单簇统计">
@@ -4511,9 +4611,20 @@ function renderInteractiveGraph() {
         </div>
         <span class="sep"></span>
         <label class="graph-order-filter">按订单过滤
-          <select data-graph-order-select>
-            ${orderOptionsHtml || `<option value="">${orderEntityId ? escapeHtml(orderEntityId) : "暂无订单"}</option>`}
-          </select>
+          ${renderSingleSelectFilter({
+            id: "graph-order",
+            noun: "订单",
+            options: asArray(app.graphOrderOptions).map(normalizeGraphNode).map((o) => ({
+              id: o.entity_id || o.id,
+              label: (() => {
+                const e = o.entity_id || "";
+                const n = o.label && o.label !== e ? o.label : "";
+                return n ? `${e} · ${n}` : e;
+              })(),
+            })),
+            selectedId: orderEntityId || null,
+            onChange: async (id) => { await loadGraphOrder(id); return renderCurrentPage(); },
+          })}
         </label>
       </div>
       ${breadcrumb}
@@ -4589,6 +4700,7 @@ function renderInteractiveGraph() {
 }
 
 function mountInteractiveGraph() {
+  mountSingleSelectFilters();
   const container = document.querySelector(".page.active [data-graph-canvas]") || document.querySelector("[data-graph-canvas]");
   if (!container || container.dataset.bound === "1") return;
   container.dataset.bound = "1";
@@ -4727,6 +4839,7 @@ function selectedGraphOrderOption() {
 function mountGantts() {
   mountOrderComboboxes();
   mountMultiSelectFilters();
+  mountSingleSelectFilters();
   if (typeof window.vis === "undefined" || typeof window.vis.Timeline !== "function") return;
   const liveCanvasIds = new Set(Array.from(document.querySelectorAll(".page.active .gantt-canvas")).map((el) => el.id));
   // Destroy orphaned instances: canvas id no longer in the active DOM, or the id exists but
@@ -6171,10 +6284,6 @@ function bindGlobalEvents() {
       if (target.hasAttribute("data-gantt-time-from")) filter.from = target.value;
       else filter.to = target.value;
       app.ganttEntryFilter[canvasId] = filter;
-      return renderCurrentPage();
-    }
-    if (target.matches("[data-graph-order-select]")) {
-      await loadGraphOrder(target.value);
       return renderCurrentPage();
     }
     if (target.matches("[data-graph-order-input]")) {

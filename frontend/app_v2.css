@@ -2524,6 +2524,8 @@ a {
   overflow: visible;
 }
 .gantt-canvas .vis-labelset .vis-label.vis-nested-group .vis-inner { padding-left: 22px; }
+/* 嵌套分组（订单/任务令）标签：展开三角为块级会把文字挤到下一行带、被遮挡；改 flex 使三角与文字同行且垂直居中 */
+.gantt-canvas .vis-labelset .vis-label.vis-nesting-group { display: flex; align-items: center; }
 /* 左侧标签面板：整体不裁切，首行留白避开顶部时间轴 */
 .gantt-canvas .vis-panel.vis-left,
 .gantt-canvas .vis-labelset { overflow: visible; }
@@ -2872,7 +2874,9 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
 .graph-mode button { padding: 5px 13px; border-radius: 6px; font-size: 12px; color: var(--text-soft); border: none; background: none; cursor: pointer; font-family: inherit; }
 .graph-mode button.on { background: var(--surface); color: var(--primary); font-weight: 550; box-shadow: var(--shadow-sm); }
 .graph-order-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-faint); }
-.graph-order-filter select { min-width: 220px; min-height: 30px; font-size: 12px; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); }
+.graph-order-filter .single-select-filter { flex: 0 0 280px; width: 280px; }
+.single-select-filter .multi-order-option { cursor: pointer; }
+.single-select-filter .multi-order-option.is-checked { background: var(--primary-soft); color: var(--primary); font-weight: 550; }
 .graph-v3 .graph-breadcrumb {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 9px 16px; font-size: 11.5px; color: var(--text-soft);
@@ -2942,7 +2946,8 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface);
 }
-.gantt-filter-row.nowrap { flex-wrap: nowrap; overflow-x: auto; }
+/* 允许换行、不裁切：overflow 会连带裁掉绝对定位的筛选下拉面板，故让筛选控件在窄屏换行而非横向滚动 */
+.gantt-filter-row.nowrap { flex-wrap: wrap; }
 .gantt-filter-row .flabel { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; }
 .gantt-filter-row select { min-height: 30px; font-size: 12px; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); }
 .gantt-filter-row .sep3 { width: 1px; height: 20px; background: var(--line); margin: 0 2px; flex-shrink: 0; }
