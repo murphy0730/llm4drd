@@ -593,11 +593,15 @@ function renderMultiSelectFilter(config) {
   const noun = config.noun || "项";
   const unit = config.unit || "";
   app.multiSelectSources.set(config.id, { ...config, noun, unit });
-  const selected = new Set(config.selectedIds || []);
+  // selectedIds 为空表示「全部」：初始即按全选渲染，使「全选」勾选态与下方选项勾选态一致
+  // （否则打开面板时全选框已勾、但各选项未勾，用户第一下点全选反而取消、需点两下才能选中）。
+  const isAll = !config.selectedIds || config.selectedIds.length === 0;
+  const effectiveSelectedIds = isAll ? config.options.map((o) => o.id) : config.selectedIds;
+  const selected = new Set(effectiveSelectedIds);
   return `
     <div class="multi-order-filter" data-multi-select-filter="${escapeHtml(config.id)}">
       <button type="button" class="multi-order-summary" data-multi-select-toggle aria-expanded="false">
-        <span class="multi-order-summary-text">${escapeHtml(multiSelectSummary(config.options, config.selectedIds || [], noun, unit))}</span>
+        <span class="multi-order-summary-text">${escapeHtml(multiSelectSummary(config.options, effectiveSelectedIds, noun, unit))}</span>
         <span class="multi-order-caret" aria-hidden="true">▾</span>
       </button>
       <div class="multi-order-panel" hidden>
@@ -629,7 +633,9 @@ function mountMultiSelectFilters() {
     const summaryText = container.querySelector(".multi-order-summary-text");
     if (!toggle || !panel || !list || !allBox) return;
 
-    const working = new Set(source.selectedIds || []);
+    // selectedIds 为空 = 全部：working 初始化为全量选项，与渲染态（选项均勾选）一致，
+    // 保证「全选」勾选态与下方选项一致，一次点击即可全选 / 取消全选。
+    const working = new Set(source.selectedIds && source.selectedIds.length ? source.selectedIds : source.options.map((o) => o.id));
     const total = source.options.length;
 
     const syncAllBox = () => {
@@ -638,8 +644,8 @@ function mountMultiSelectFilters() {
       const allSelected = total > 0 && working.size >= total;
       if (allBox.checked !== allSelected) allBox.checked = allSelected;
     };
-    // 初始：空集 = 全部，全选框默认勾上
-    allBox.checked = working.size === 0 || working.size >= total;
+    // 初始：working 已含全量选项（全部）或指定子集，全选框按是否满选同步
+    allBox.checked = working.size >= total;
     const updateSummary = () => {
       summaryText.textContent = multiSelectSummary(source.options, Array.from(working), source.noun, source.unit);
     };
@@ -4902,7 +4908,11 @@ function mountGantts() {
       }
     );
     if (data.nowISO) {
-      try { timeline.addCustomTime(data.nowISO, "sched-now"); } catch (_) { /* 忽略现在线注入失败 */ }
+      try {
+        timeline.addCustomTime(data.nowISO, "sched-now");
+        // 内置 moment 全局 locale 被 uk 覆盖，"现在"线默认悬停 title 会显示乌克兰语日期，显式改为中文
+        timeline.setCustomTimeTitle(`现在：${formatDateTime(data.nowISO)}`, "sched-now");
+      } catch (_) { /* 忽略现在线注入失败 */ }
     }
     const entry = { canvasId: el.id, el, timeline, items, groups, data };
     timeline.on("rangechanged", (props) => {
@@ -5670,6 +5680,8 @@ async function handleSimulate() {
   };
   syncSimulateControls();
   paintSimStatus();
+  // 立即重渲染：让「仿真计算中…」占位出现，旧的甘特图/空卡片随之消失（解决运行中无联动）
+  await renderCurrentPage();
   const stageTimer = window.setInterval(() => {
     if (app.simStatus && app.simStatus.phase === "running") {
       app.simStatus.elapsedMs = Date.now() - startedAt;
@@ -5702,8 +5714,6 @@ async function handleSimulate() {
       : { phase: "done", message: `规则仿真已完成（${app.simRule}），耗时 ${formatDurationMs(elapsedMs)}。`, elapsedMs };
     if (diagnosis) toast(`仿真完成，但结果不完整：${diagnosis}`, "error");
     else toast(`规则仿真已完成：${app.simRule}`, "success");
-    await renderCurrentPage();
-    refreshWorkflowOverview({ force: true });
   } catch (error) {
     app.simStatus = {
       phase: "error",
@@ -5711,12 +5721,15 @@ async function handleSimulate() {
       elapsedMs: Date.now() - startedAt,
     };
     toast(`运行仿真失败：${error.message}`, "error");
-    await renderCurrentPage();
   } finally {
     window.clearInterval(stageTimer);
     app.simElapsedTimer = null;
+    // 先复位 busy 再重渲染：此时 renderCurrentPage 才会走「simResult ? 甘特 : 空卡片」分支，
+    // 否则若 simBusy 仍为 true，页面会卡在「仿真计算中…」不切到甘特图（解决完成后无联动）。
     app.simBusy = false;
     syncSimulateControls();
+    await renderCurrentPage();
+    refreshWorkflowOverview({ force: true });
   }
 }
 
