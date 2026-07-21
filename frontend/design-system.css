@@ -24,11 +24,20 @@
   --info: #0e8e7f;
   --shadow-sm: 0 1px 2px rgba(9, 10, 14, 0.05);
   --shadow-md: 0 8px 24px rgba(9, 10, 14, 0.08);
+  --shadow-lg: 0 16px 44px rgba(9, 10, 14, 0.12);
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
   --topbar-h: 56px;
+  --flowbar-h: 58px;
   --sidebar-w: 224px;
+  /* 浅底色阶（由各语义色派生，重构 v3 组件使用；--accent-soft 已被甘特实色渐变占用，浅底用 --accent-tint） */
+  --primary-soft: rgba(47, 111, 235, 0.09);
+  --accent-tint: rgba(194, 98, 10, 0.1);
+  --success-soft: rgba(18, 161, 80, 0.1);
+  --warning-soft: rgba(180, 83, 9, 0.1);
+  --danger-soft: rgba(220, 38, 38, 0.08);
+  --info-soft: rgba(14, 142, 127, 0.1);
   --font: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
   --font-display: "Geist", "PingFang SC", "HarmonyOS Sans SC", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -59,6 +68,13 @@
     --info: #2dd4bf;
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 16px 44px rgba(0, 0, 0, 0.5);
+    --primary-soft: rgba(76, 141, 255, 0.14);
+    --accent-tint: rgba(194, 98, 10, 0.22);
+    --success-soft: rgba(61, 214, 140, 0.12);
+    --warning-soft: rgba(255, 197, 61, 0.12);
+    --danger-soft: rgba(255, 99, 105, 0.12);
+    --info-soft: rgba(45, 212, 191, 0.12);
   }
 }
 

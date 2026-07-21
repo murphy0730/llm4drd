@@ -3035,6 +3035,26 @@ def _optimization_activity_payload(task: dict, now: float | None = None) -> dict
     }
 
 
+# status 端点 message 之外的短标签，专门给运行日志面板的事件文案用。
+_HYBRID_PHASE_LABELS = {
+    "coarse": "近似广搜",
+    "exact_promotion": "精确评估",
+    "elite_refine": "精确精修",
+    "finalize": "Pareto 前沿重算",
+}
+
+
+def _log_hybrid_event(task: dict, text: str, phase: str | None = None) -> None:
+    """给优化页「运行日志」面板追加一条结构化事件；只保留最近 120 条。
+
+    _progress 回调是高频路径，调用方必须先自行判断值确实变化了再记，
+    这里不做去重。
+    """
+    events = task.setdefault("events", [])
+    events.append({"ts": time.time(), "phase": phase or task.get("phase"), "text": text})
+    task["events"] = events[-120:]
+
+
 @app.post("/api/optimize/hybrid")
 async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
     global _hybrid_tasks, _latest_hybrid_task_id
@@ -3075,6 +3095,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
         "exact_evaluations": 0,
         "bottleneck_machine_ids": [],
         "history": [],
+        "events": [],
         "result": None,
         "reference_solutions": [],
         "graph_context_mode": graph_context_mode.value,
@@ -3103,6 +3124,13 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
         )
         heartbeat_thread.start()
         try:
+            task = _hybrid_tasks[task_id]
+            config = task.get("config") or {}
+            _log_hybrid_event(
+                task,
+                f"初始化完成 · 种群 {config.get('population_size', '-')}"
+                f" · 基线 {config.get('baseline_rule_name', '-')} 注入",
+            )
             graph_context = None
             graph_context_diagnostics = None
             if graph_context_mode != GraphContextMode.LEGACY:
@@ -3176,6 +3204,9 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 task = _hybrid_tasks[task_id]
                 now = time.time()
                 phase = snapshot.get("phase", "coarse")
+                # 事件判定要在字段被快照覆盖前取旧值，只有变化才记日志。
+                previous_phase = task.get("phase")
+                previous_archive_size = int(task.get("archive_size", 0))
                 phase_messages = {
                     "coarse": "正在进行近似评估与候选广搜",
                     "exact_promotion": "正在对优质候选进行精确评估",
@@ -3220,6 +3251,14 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 if current_signal != previous_signal:
                     task["last_real_progress_at"] = now
                 task.update(_optimization_activity_payload(task, now))
+                if phase != previous_phase:
+                    _log_hybrid_event(
+                        task, f"阶段切换 · {_HYBRID_PHASE_LABELS.get(phase, phase)}"
+                    )
+                if int(task["archive_size"]) > previous_archive_size:
+                    _log_hybrid_event(
+                        task, f"发现新非支配解 · 前沿规模 {task['archive_size']}"
+                    )
                 task["history"].append(snapshot)
                 task["history"] = task["history"][-50:]
 
@@ -3258,6 +3297,11 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             _hybrid_tasks[task_id]["total_evaluations"] = payload["total_evaluations"]
             _hybrid_tasks[task_id]["preview"] = payload["solutions"][:3]
             _latest_hybrid_task_id = task_id
+            _log_hybrid_event(
+                _hybrid_tasks[task_id],
+                f"优化完成 · 候选方案 {len(payload['solutions'])} 个"
+                f" · 总评估 {payload['total_evaluations']} 次",
+            )
             _save_workflow_progress(
                 "optimization", {"task_id": task_id, "task": _hybrid_tasks[task_id]},
             )
@@ -3274,6 +3318,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 "technical_detail": error_trace[-4000:],
                 "updated_at": time.time(),
             })
+            _log_hybrid_event(_hybrid_tasks[task_id], f"优化失败 · {error_message}")
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(
@@ -3316,6 +3361,7 @@ async def optimize_hybrid_status(task_id: str):
         "exact_evaluations": task.get("exact_evaluations", 0),
         "bottleneck_machine_ids": task.get("bottleneck_machine_ids", []),
         "history": task.get("history", []),
+        "events": task.get("events", [])[-60:],
         "preview": task.get("preview", []),
         "error": task.get("error"),
         "error_type": task.get("error_type"),
@@ -3757,6 +3803,168 @@ async def workflow_progress():
         ),
         "review": snapshot.get("review"),
     }
+
+
+_OVERVIEW_STEP_LABELS = {
+    "import": "数据导入",
+    "graph": "图谱构建",
+    "simulate": "规则仿真",
+    "optimize": "优化求解",
+    "review": "方案评审",
+}
+
+
+def _overview_step(key: str, state: str, tone: str, detail: str) -> dict:
+    return {
+        "key": key,
+        "state": state,
+        "tone": tone,
+        "label": _OVERVIEW_STEP_LABELS[key],
+        "detail": detail,
+    }
+
+
+def _latest_done_hybrid_result(optimization: dict) -> Optional[dict]:
+    """最近完成的 hybrid 结果：先看内存任务，再退回落库快照（重启恢复的场景）。"""
+    task = _hybrid_tasks.get(_latest_hybrid_task_id) if _latest_hybrid_task_id else None
+    if task and task.get("status") == "done" and task.get("result"):
+        return task["result"]
+    snapshot_task = (optimization or {}).get("task") or {}
+    if snapshot_task.get("status") == "done" and snapshot_task.get("result"):
+        return snapshot_task["result"]
+    return None
+
+
+def _overview_import_step(validation: dict) -> dict:
+    if not inst_store.has_data():
+        return _overview_step("import", "current", "none", "未导入实例")
+    status = validation.get("status")
+    if status == "failed":
+        return _overview_step("import", "done", "err", f"校验失败 · {validation.get('error_count', 0)} 错误")
+    if status == "warning":
+        return _overview_step("import", "done", "warn", f"校验通过 · {validation.get('warning_count', 0)} 警告")
+    if status == "passed":
+        return _overview_step("import", "done", "ok", "校验通过")
+    return _overview_step("import", "done", "warn", "已导入 · 未校验")
+
+
+def _overview_graph_step(import_done: bool) -> dict:
+    if not import_done:
+        return _overview_step("graph", "todo", "none", "未构建")
+    try:
+        meta = _graph_meta_payload()
+    except HTTPException:
+        meta = None  # 图未构建时 _graph_meta_payload 抛 400，按“未构建”展示
+    if not meta:
+        return _overview_step("graph", "todo", "none", "未构建")
+    if meta.get("cache_ready"):
+        detail = f"{int(meta.get('total_nodes', 0)):,} 节点 · {int(meta.get('total_edges', 0)):,} 边"
+        return _overview_step("graph", "done", "ok", detail)
+    if meta.get("invalid_reason"):
+        return _overview_step("graph", "blocked", "err", "图谱失效 · 需重建")
+    return _overview_step("graph", "todo", "none", "未构建")
+
+
+def _overview_simulate_step(previous_done: bool, simulation: dict) -> dict:
+    if not previous_done or not simulation:
+        return _overview_step("simulate", "todo", "none", "未运行")
+    metrics = simulation.get("metrics") or {}
+    rule = simulation.get("rule") or "-"
+    if metrics.get("feasible"):
+        return _overview_step("simulate", "done", "ok", f"{rule} · 可行")
+    return _overview_step("simulate", "done", "warn", f"{rule} · 不完整")
+
+
+def _overview_optimize_step(optimization: dict) -> dict:
+    task = _hybrid_tasks.get(_latest_hybrid_task_id) if _latest_hybrid_task_id else None
+    status = (task or {}).get("status")
+    if status == "running":
+        percent = int(round(float(task.get("real_progress", 0.0)) * 100))
+        return _overview_step("optimize", "current", "run", f"运行中 · {percent}%")
+    if status == "error":
+        return _overview_step("optimize", "blocked", "err", "优化失败")
+    result = _latest_done_hybrid_result(optimization)
+    if result:
+        solutions = result.get("solutions") or []
+        return _overview_step("optimize", "done", "ok", f"{len(solutions)} 候选方案")
+    return _overview_step("optimize", "todo", "none", "未运行")
+
+
+def _overview_review_step(optimize_done: bool, candidate_count: int, review: dict) -> dict:
+    selection = (review or {}).get("selection") or []
+    if not optimize_done:
+        step = _overview_step("review", "todo", "none", f"已有 {candidate_count} 候选")
+    elif selection:
+        step = _overview_step("review", "done", "ok", f"已选 {len(selection)} 个方案")
+    else:
+        step = _overview_step("review", "current", "none", f"已有 {candidate_count} 候选")
+    step["badge"] = f"{len(selection)}/4"
+    return step
+
+
+def _safe_overview_step(key: str, build, *args) -> dict:
+    """单步推导失败只影响该步：进度条永远要能画出来。"""
+    try:
+        return build(*args)
+    except Exception:  # noqa: BLE001
+        logging.exception("workflow overview: 推导 %s 状态失败", key)
+        return _overview_step(key, "todo", "none", "")
+
+
+@app.get("/api/workflow/overview")
+async def workflow_overview():
+    """5 步流程进度条的聚合状态，驱动侧栏状态灯与当前步高亮。
+
+    state ∈ done/current/todo/blocked，tone ∈ ok/warn/err/run/none；
+    badge 仅 review 步有（已选/上限 4）。任何一步推导失败都降级为 todo，
+    接口永远返回 200。
+    """
+    try:
+        snapshot = workflow_store.load_all()
+    except Exception:  # noqa: BLE001
+        logging.exception("workflow overview: 读取流程进度失败")
+        snapshot = {}
+    validation = snapshot.get("validation") or {}
+    simulation = snapshot.get("simulation") or {}
+    optimization = snapshot.get("optimization") or {}
+    review = snapshot.get("review") or {}
+
+    steps = []
+    import_step = _safe_overview_step("import", _overview_import_step, validation)
+    steps.append(import_step)
+    graph_step = _safe_overview_step(
+        "graph", _overview_graph_step, import_step["state"] == "done",
+    )
+    steps.append(graph_step)
+    previous_done = all(step["state"] == "done" for step in steps)
+    steps.append(_safe_overview_step(
+        "simulate", _overview_simulate_step, previous_done, simulation,
+    ))
+    optimize_step = _safe_overview_step("optimize", _overview_optimize_step, optimization)
+    steps.append(optimize_step)
+    try:
+        done_result = _latest_done_hybrid_result(optimization)
+    except Exception:  # noqa: BLE001
+        logging.exception("workflow overview: 读取候选方案数失败")
+        done_result = None
+    candidate_count = len((done_result or {}).get("solutions") or [])
+    steps.append(_safe_overview_step(
+        "review", _overview_review_step,
+        optimize_step["state"] == "done", candidate_count, review,
+    ))
+
+    # current 唯一：按流程顺序，第一个非 done 非 blocked 的步为当前步；
+    # 后续步若也被推导成 current（如有候选未选的 review）降级为 todo。
+    current_assigned = False
+    for step in steps:
+        if step["state"] in ("done", "blocked"):
+            continue
+        if not current_assigned:
+            step["state"] = "current"
+            current_assigned = True
+        elif step["state"] == "current":
+            step["state"] = "todo"
+    return {"steps": steps}
 
 
 @app.put("/api/workflow/review")
