@@ -5247,13 +5247,13 @@ async function handleImportFile(file) {
     }
     if (app.currentPage !== "import") await navigate("import");
     else await renderCurrentPage();
-    syncTopbarAndNav();
+    renderFlowbar();
     refreshWorkflowOverview({ force: true });
     // 强校验通过后自动构建图谱，构建进度显示在「图谱构建」页
     if (!failed) {
       await handleBuildGraph();
       // 图谱构建完成后再次刷新侧栏状态灯
-      syncTopbarAndNav();
+      renderFlowbar();
       refreshWorkflowOverview({ force: true });
     }
   } catch (error) {
