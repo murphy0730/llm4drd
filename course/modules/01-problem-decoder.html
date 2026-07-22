@@ -1,0 +1,181 @@
+    <section class="module" id="module-1" style="background: var(--color-bg-warm)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">01</span>
+          <h1 class="module-title">排产问题，与那台"仿真解码器"</h1>
+          <p class="module-subtitle">在讲任何优化算法之前，先搞懂：一个"排产方案"到底是什么，又是怎么被算出分数的。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">先看清战场</h2>
+            <p>想象一个车间：约 <strong>1000 张订单</strong>、<strong>2 万多道工序</strong>。每张订单要先加工一堆<strong>子件</strong>，再<strong>总装、检测</strong>；工序之间有先后约束；机器按工艺分组、会停机、会突然故障；每张订单还有<strong>交期</strong>。</p>
+            <p>这类问题有个学名：<span class="term" data-definition="Dynamic Flexible Assembly Flow Shop Scheduling，动态柔性装配流水车间调度。柔性=一道工序可选多台机器；装配=有子件汇入总装的层次结构；动态=运行中会有故障等扰动。">动态柔性装配流水车间调度（DFAFSP）</span>。它难，是因为决策点多到爆炸。</p>
+
+            <div class="icon-rows stagger-children">
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-1)">🧩</div>
+                <div><strong>柔性</strong><p>一道工序可以在多台同工艺机器上加工——到底派给哪台？</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-2)">🏗️</div>
+                <div><strong>装配层次</strong><p>子件没做完，总装就不能开工——先后顺序不能乱。</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-3)">⏱️</div>
+                <div><strong>多目标</strong><p>要完工快、又要少延期、还要机器别闲着——这些常常互相打架。</p></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">关键一招：不直接排时刻表，而是"定规则"</h2>
+            <p>最直觉的想法是：直接给出一张巨大的时刻表——每道工序几点在哪台机器开工。但 2 万道工序的时刻表，可能组合数比宇宙原子还多，而且绝大多数还<strong>违反约束</strong>（前驱没做完就开工）。</p>
+            <p>这个系统换了个思路：一个"方案"不是时刻表，而是一套 <span class="term" data-definition="Priority Dispatching Rule，优先级派工规则。当一台机器空闲、面前有多个待加工工序时，用一个打分公式给每个工序打分，谁分高先做谁。">派工规则</span>。规则决定"每台机器空闲时下一步做哪道工序"，再由一台"解码器"把规则<strong>演绎</strong>成完整、合法的排程。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">💡</div>
+              <div class="callout-content">
+                <strong class="callout-title">乐谱与乐团</strong>
+                <p>把"规则/参数"想成<strong>乐谱</strong>：它不写死每个音符的物理声波，只写下演奏法则。<strong>仿真引擎</strong>就是乐团，照着乐谱一路演奏，最终奏出真实的声音——也就是那张合法的排程。优化算法要做的，是不断改写乐谱。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">解码器：离散事件仿真</h2>
+            <p>这台解码器是一个 <span class="term" data-definition="Discrete-Event Simulation，离散事件仿真。不逐秒推进时钟，而是把时间直接跳到下一件事发生的时刻（某工序完工、某机器空闲），因此几万道工序也能在毫秒级跑完。">离散事件仿真</span>引擎。它不逐秒空转，而是用一个<span class="term" data-definition="一种始终把最小元素排在顶端的数据结构。这里用它存放未来事件，每次弹出时间最早的那个，从而实现时间跳跃。">最小堆</span>存放未来事件，每次跳到最近的事件时刻。整个车间的演化，被压缩成三类事件的循环：</p>
+
+            <div class="flow-animation" data-steps='[
+              {"highlight":"flow-actor-1","label":"release_check：检查某工序的前驱是否都完工。若就绪，把它放进机器的就绪队列。"},
+              {"highlight":"flow-actor-2","label":"dispatch：一台机器空闲了。它对就绪队列里所有候选工序打分，挑分最高的开工。","packet":true,"from":"actor-1","to":"actor-2"},
+              {"highlight":"flow-actor-3","label":"op_done：工序完工。释放机器/工装/人员，并通知它的后继工序去做 release_check。","packet":true,"from":"actor-2","to":"actor-3"},
+              {"highlight":"flow-actor-1","label":"后继就绪 → 又回到 release_check。三类事件首尾相扣，直到所有工序完工。","packet":true,"from":"actor-3","to":"actor-1"}
+            ]'>
+              <div class="flow-actors">
+                <div class="flow-actor" id="flow-actor-1"><div class="flow-actor-icon">🔎</div><span>release_check<br>就绪检查</span></div>
+                <div class="flow-actor" id="flow-actor-2"><div class="flow-actor-icon">⚙️</div><span>dispatch<br>派工</span></div>
+                <div class="flow-actor" id="flow-actor-3"><div class="flow-actor-icon">✅</div><span>op_done<br>完工</span></div>
+              </div>
+              <div class="flow-packet" id="flow-packet"></div>
+              <div class="flow-step-label" id="flow-label">点击"下一步"，看一道工序如何在事件循环里流转</div>
+              <div class="flow-controls">
+                <button class="btn flow-next-btn">下一步</button>
+                <button class="btn flow-reset-btn">重来</button>
+                <span class="flow-progress"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">派工，就发生在这一段</h2>
+            <p>下面是仿真主循环里 <code>dispatch</code> 事件的心脏：机器对每个候选工序算出特征、交给规则打分，用一个带<strong>平局判据</strong>的元组挑出最优。这就是"规则被演绎成决策"的确切瞬间。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · core/simulator.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">for</span> op_id <span class="code-keyword">in</span> candidate_ids:</span>
+<span class="code-line">    features = self.<span class="code-function">_features</span>(op, task, order, machine, shop, now)</span>
+<span class="code-line">    score = self.<span class="code-function">pdr</span>(op, machine, features, shop)</span>
+<span class="code-line">    tie_break = op.work_remaining</span>
+<span class="code-line">    candidate = (score, -tie_break, op.id, op, toolings, people)</span>
+<span class="code-line">    <span class="code-keyword">if</span> best <span class="code-keyword">is</span> <span class="code-keyword">None</span> <span class="code-keyword">or</span> candidate[:<span class="code-number">3</span>] &gt; best[:<span class="code-number">3</span>]:</span>
+<span class="code-line">        best = candidate</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话</span>
+                <div class="translation-lines">
+                  <p class="tl">遍历这台机器就绪队列里的每一道候选工序。</p>
+                  <p class="tl">先算出这道工序此刻的一组"特征"（有多急、剩多少活……下个模块细讲）。</p>
+                  <p class="tl"><code>pdr</code> 就是当前那条派工规则——把特征喂进去，得到一个优先级分数。</p>
+                  <p class="tl">平局判据：分数一样时，剩余工时更少的优先（这里用负号让"小"排到"前"）。</p>
+                  <p class="tl">把分数、平局判据、工序打包成一个元组。</p>
+                  <p class="tl">按元组前三项比大小，谁大谁当"目前最优候选"。</p>
+                  <p class="tl">循环结束，<code>best</code> 就是这台机器这一刻该开工的工序。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🧭</div>
+              <div class="callout-content">
+                <strong class="callout-title">为什么这台解码器如此关键</strong>
+                <p>后面每一个优化算法——规则枚举、NSGA-III、ALNS——本质都在做同一件事：<strong>造出不同的规则/参数，丢给这台解码器跑一遍，看目标向量好不好</strong>。解码器是所有算法共用的"评分裁判"。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">跑完一次，得到什么？</h2>
+            <p>解码器吐出的不是一个数字，而是一个 <span class="term" data-definition="把多个优化目标的数值排成一列，例如 [总延迟, Makespan]。多目标优化比较的是整个向量，而不是单一数字。">目标向量</span>——一整排 KPI。正是这排数字，让不同方案能被比较、被优化。</p>
+
+            <div class="pattern-cards stagger-children">
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-1)">
+                <div class="pattern-icon" style="background: var(--color-actor-1)">🏁</div>
+                <h4 class="pattern-title">Makespan</h4>
+                <p class="pattern-desc">从开工到最后一道工序完成的总跨度。越小越好。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-2)">
+                <div class="pattern-icon" style="background: var(--color-actor-2)">⏰</div>
+                <h4 class="pattern-title">总延迟</h4>
+                <p class="pattern-desc">所有任务超过交期的时间之和。越小越好。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-4)">
+                <div class="pattern-icon" style="background: var(--color-actor-4)">⭐</div>
+                <h4 class="pattern-title">主订单延误率</h4>
+                <p class="pattern-desc">重点订单里踩线的比例。越小越好。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-5)">
+                <div class="pattern-icon" style="background: var(--color-actor-5)">📈</div>
+                <h4 class="pattern-title">机器利用率</h4>
+                <p class="pattern-desc">机器有多少时间在真正干活。越大越好。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module1">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="正是如此。直接搜索时刻表，绝大多数组合都违反前驱/资源约束，且空间是天文数字；用规则→仿真解码，任何一组参数都能生成一张必然合法的排程，把搜索空间从『所有时刻表』缩到『所有规则参数』。"
+                   data-explanation-wrong="再想想搜索空间与可行性：难点不在于仿真慢，而在于『直接枚举时刻表』既天文数字又大多不合法。规则解码的价值是保证合法 + 大幅压缩搜索空间。">
+                <h3 class="quiz-question">系统为什么不直接优化"每道工序几点在哪台机器"的时刻表，而要绕一圈用"规则 + 仿真解码"？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为仿真比数学求解更快</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为直接搜时刻表空间是天文数字、且大多不合法；规则解码既压缩空间又保证排程合法</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为规则不需要考虑机器故障</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-c"
+                   data-explanation-right="对。离散事件仿真只在『有事发生』的时刻跳跃，事件数量与工序数同阶，而不是与时间长度相关，所以两万工序也能毫秒级解码。"
+                   data-explanation-wrong="关键在『时间怎么推进』。逐秒模拟会随排程时长线性变慢；离散事件仿真直接跳到下一个事件时刻，代价只和事件数量有关。">
+                <h3 class="quiz-question">为什么这台解码器能在毫秒级跑完两万道工序，而不是卡死？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它跳过了机器故障等复杂情况</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它用逐秒推进但每秒计算很快</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它只在事件发生的时刻跳跃，代价与事件数量成正比而非与时长成正比</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module1')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module1')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>解码器已经就位。那条被反复改写的"规则"到底长什么样、怎么把它变成一堆可以被优化算法调的旋钮？下一个模块拆开它。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>

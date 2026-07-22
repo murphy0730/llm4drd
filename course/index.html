@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM4DRD 排产优化算法拆解</title>
+
+  <!-- Google Fonts: Bricolage Grotesque · DM Sans · JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700;12..96,800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400;1,9..40,500&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="styles.css">
+
+  <style>
+    :root {
+      --color-accent:       #2A7B9B;
+      --color-accent-hover: #1F6280;
+      --color-accent-light: #E4F2F7;
+      --color-accent-muted: #5A9DB8;
+    }
+  </style>
+
+  <script src="main.js" defer></script>
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="progress-bar" id="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+    <div class="nav-inner">
+      <span class="nav-title">LLM4DRD 排产优化算法拆解</span>
+      <div class="nav-dots" id="nav-dots" role="tablist">
+        <button class="nav-dot" data-target="module-1" data-tooltip="排产问题与仿真解码器" role="tab" aria-label="模块 1：排产问题与仿真解码器"></button>
+        <button class="nav-dot" data-target="module-2" data-tooltip="规则固定派工" role="tab" aria-label="模块 2：规则固定派工"></button>
+        <button class="nav-dot" data-target="module-3" data-tooltip="Pareto 前沿" role="tab" aria-label="模块 3：Pareto 前沿"></button>
+        <button class="nav-dot" data-target="module-4" data-tooltip="NSGA-III" role="tab" aria-label="模块 4：NSGA-III"></button>
+        <button class="nav-dot" data-target="module-5" data-tooltip="ALNS 局部精修" role="tab" aria-label="模块 5：ALNS 局部精修"></button>
+        <button class="nav-dot" data-target="module-6" data-tooltip="混合框架与精确求解" role="tab" aria-label="模块 6：混合框架与精确求解"></button>
+      </div>
+    </div>
+  </nav>
+
+  <main id="main">
+    <!-- modules/*.html content is assembled here by build.sh -->
+    <section class="module" id="module-1" style="background: var(--color-bg-warm)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">01</span>
+          <h1 class="module-title">排产问题，与那台"仿真解码器"</h1>
+          <p class="module-subtitle">在讲任何优化算法之前，先搞懂：一个"排产方案"到底是什么，又是怎么被算出分数的。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">先看清战场</h2>
+            <p>想象一个车间：约 <strong>1000 张订单</strong>、<strong>2 万多道工序</strong>。每张订单要先加工一堆<strong>子件</strong>，再<strong>总装、检测</strong>；工序之间有先后约束；机器按工艺分组、会停机、会突然故障；每张订单还有<strong>交期</strong>。</p>
+            <p>这类问题有个学名：<span class="term" data-definition="Dynamic Flexible Assembly Flow Shop Scheduling，动态柔性装配流水车间调度。柔性=一道工序可选多台机器；装配=有子件汇入总装的层次结构；动态=运行中会有故障等扰动。">动态柔性装配流水车间调度（DFAFSP）</span>。它难，是因为决策点多到爆炸。</p>
+
+            <div class="icon-rows stagger-children">
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-1)">🧩</div>
+                <div><strong>柔性</strong><p>一道工序可以在多台同工艺机器上加工——到底派给哪台？</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-2)">🏗️</div>
+                <div><strong>装配层次</strong><p>子件没做完，总装就不能开工——先后顺序不能乱。</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-3)">⏱️</div>
+                <div><strong>多目标</strong><p>要完工快、又要少延期、还要机器别闲着——这些常常互相打架。</p></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">关键一招：不直接排时刻表，而是"定规则"</h2>
+            <p>最直觉的想法是：直接给出一张巨大的时刻表——每道工序几点在哪台机器开工。但 2 万道工序的时刻表，可能组合数比宇宙原子还多，而且绝大多数还<strong>违反约束</strong>（前驱没做完就开工）。</p>
+            <p>这个系统换了个思路：一个"方案"不是时刻表，而是一套 <span class="term" data-definition="Priority Dispatching Rule，优先级派工规则。当一台机器空闲、面前有多个待加工工序时，用一个打分公式给每个工序打分，谁分高先做谁。">派工规则</span>。规则决定"每台机器空闲时下一步做哪道工序"，再由一台"解码器"把规则<strong>演绎</strong>成完整、合法的排程。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">💡</div>
+              <div class="callout-content">
+                <strong class="callout-title">乐谱与乐团</strong>
+                <p>把"规则/参数"想成<strong>乐谱</strong>：它不写死每个音符的物理声波，只写下演奏法则。<strong>仿真引擎</strong>就是乐团，照着乐谱一路演奏，最终奏出真实的声音——也就是那张合法的排程。优化算法要做的，是不断改写乐谱。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">解码器：离散事件仿真</h2>
+            <p>这台解码器是一个 <span class="term" data-definition="Discrete-Event Simulation，离散事件仿真。不逐秒推进时钟，而是把时间直接跳到下一件事发生的时刻（某工序完工、某机器空闲），因此几万道工序也能在毫秒级跑完。">离散事件仿真</span>引擎。它不逐秒空转，而是用一个<span class="term" data-definition="一种始终把最小元素排在顶端的数据结构。这里用它存放未来事件，每次弹出时间最早的那个，从而实现时间跳跃。">最小堆</span>存放未来事件，每次跳到最近的事件时刻。整个车间的演化，被压缩成三类事件的循环：</p>
+
+            <div class="flow-animation" data-steps='[
+              {"highlight":"flow-actor-1","label":"release_check：检查某工序的前驱是否都完工。若就绪，把它放进机器的就绪队列。"},
+              {"highlight":"flow-actor-2","label":"dispatch：一台机器空闲了。它对就绪队列里所有候选工序打分，挑分最高的开工。","packet":true,"from":"actor-1","to":"actor-2"},
+              {"highlight":"flow-actor-3","label":"op_done：工序完工。释放机器/工装/人员，并通知它的后继工序去做 release_check。","packet":true,"from":"actor-2","to":"actor-3"},
+              {"highlight":"flow-actor-1","label":"后继就绪 → 又回到 release_check。三类事件首尾相扣，直到所有工序完工。","packet":true,"from":"actor-3","to":"actor-1"}
+            ]'>
+              <div class="flow-actors">
+                <div class="flow-actor" id="flow-actor-1"><div class="flow-actor-icon">🔎</div><span>release_check<br>就绪检查</span></div>
+                <div class="flow-actor" id="flow-actor-2"><div class="flow-actor-icon">⚙️</div><span>dispatch<br>派工</span></div>
+                <div class="flow-actor" id="flow-actor-3"><div class="flow-actor-icon">✅</div><span>op_done<br>完工</span></div>
+              </div>
+              <div class="flow-packet" id="flow-packet"></div>
+              <div class="flow-step-label" id="flow-label">点击"下一步"，看一道工序如何在事件循环里流转</div>
+              <div class="flow-controls">
+                <button class="btn flow-next-btn">下一步</button>
+                <button class="btn flow-reset-btn">重来</button>
+                <span class="flow-progress"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">派工，就发生在这一段</h2>
+            <p>下面是仿真主循环里 <code>dispatch</code> 事件的心脏：机器对每个候选工序算出特征、交给规则打分，用一个带<strong>平局判据</strong>的元组挑出最优。这就是"规则被演绎成决策"的确切瞬间。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · core/simulator.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">for</span> op_id <span class="code-keyword">in</span> candidate_ids:</span>
+<span class="code-line">    features = self.<span class="code-function">_features</span>(op, task, order, machine, shop, now)</span>
+<span class="code-line">    score = self.<span class="code-function">pdr</span>(op, machine, features, shop)</span>
+<span class="code-line">    tie_break = op.work_remaining</span>
+<span class="code-line">    candidate = (score, -tie_break, op.id, op, toolings, people)</span>
+<span class="code-line">    <span class="code-keyword">if</span> best <span class="code-keyword">is</span> <span class="code-keyword">None</span> <span class="code-keyword">or</span> candidate[:<span class="code-number">3</span>] &gt; best[:<span class="code-number">3</span>]:</span>
+<span class="code-line">        best = candidate</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话</span>
+                <div class="translation-lines">
+                  <p class="tl">遍历这台机器就绪队列里的每一道候选工序。</p>
+                  <p class="tl">先算出这道工序此刻的一组"特征"（有多急、剩多少活……下个模块细讲）。</p>
+                  <p class="tl"><code>pdr</code> 就是当前那条派工规则——把特征喂进去，得到一个优先级分数。</p>
+                  <p class="tl">平局判据：分数一样时，剩余工时更少的优先（这里用负号让"小"排到"前"）。</p>
+                  <p class="tl">把分数、平局判据、工序打包成一个元组。</p>
+                  <p class="tl">按元组前三项比大小，谁大谁当"目前最优候选"。</p>
+                  <p class="tl">循环结束，<code>best</code> 就是这台机器这一刻该开工的工序。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🧭</div>
+              <div class="callout-content">
+                <strong class="callout-title">为什么这台解码器如此关键</strong>
+                <p>后面每一个优化算法——规则枚举、NSGA-III、ALNS——本质都在做同一件事：<strong>造出不同的规则/参数，丢给这台解码器跑一遍，看目标向量好不好</strong>。解码器是所有算法共用的"评分裁判"。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">跑完一次，得到什么？</h2>
+            <p>解码器吐出的不是一个数字，而是一个 <span class="term" data-definition="把多个优化目标的数值排成一列，例如 [总延迟, Makespan]。多目标优化比较的是整个向量，而不是单一数字。">目标向量</span>——一整排 KPI。正是这排数字，让不同方案能被比较、被优化。</p>
+
+            <div class="pattern-cards stagger-children">
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-1)">
+                <div class="pattern-icon" style="background: var(--color-actor-1)">🏁</div>
+                <h4 class="pattern-title">Makespan</h4>
+                <p class="pattern-desc">从开工到最后一道工序完成的总跨度。越小越好。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-2)">
+                <div class="pattern-icon" style="background: var(--color-actor-2)">⏰</div>
+                <h4 class="pattern-title">总延迟</h4>
+                <p class="pattern-desc">所有任务超过交期的时间之和。越小越好。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-4)">
+                <div class="pattern-icon" style="background: var(--color-actor-4)">⭐</div>
+                <h4 class="pattern-title">主订单延误率</h4>
+                <p class="pattern-desc">重点订单里踩线的比例。越小越好。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-5)">
+                <div class="pattern-icon" style="background: var(--color-actor-5)">📈</div>
+                <h4 class="pattern-title">机器利用率</h4>
+                <p class="pattern-desc">机器有多少时间在真正干活。越大越好。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module1">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="正是如此。直接搜索时刻表，绝大多数组合都违反前驱/资源约束，且空间是天文数字；用规则→仿真解码，任何一组参数都能生成一张必然合法的排程，把搜索空间从『所有时刻表』缩到『所有规则参数』。"
+                   data-explanation-wrong="再想想搜索空间与可行性：难点不在于仿真慢，而在于『直接枚举时刻表』既天文数字又大多不合法。规则解码的价值是保证合法 + 大幅压缩搜索空间。">
+                <h3 class="quiz-question">系统为什么不直接优化"每道工序几点在哪台机器"的时刻表，而要绕一圈用"规则 + 仿真解码"？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为仿真比数学求解更快</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为直接搜时刻表空间是天文数字、且大多不合法；规则解码既压缩空间又保证排程合法</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为规则不需要考虑机器故障</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-c"
+                   data-explanation-right="对。离散事件仿真只在『有事发生』的时刻跳跃，事件数量与工序数同阶，而不是与时间长度相关，所以两万工序也能毫秒级解码。"
+                   data-explanation-wrong="关键在『时间怎么推进』。逐秒模拟会随排程时长线性变慢；离散事件仿真直接跳到下一个事件时刻，代价只和事件数量有关。">
+                <h3 class="quiz-question">为什么这台解码器能在毫秒级跑完两万道工序，而不是卡死？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它跳过了机器故障等复杂情况</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它用逐秒推进但每秒计算很快</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它只在事件发生的时刻跳跃，代价与事件数量成正比而非与时长成正比</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module1')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module1')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>解码器已经就位。那条被反复改写的"规则"到底长什么样、怎么把它变成一堆可以被优化算法调的旋钮？下一个模块拆开它。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+    <section class="module" id="module-2" style="background: var(--color-bg)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">02</span>
+          <h1 class="module-title">规则固定派工：把"决策"变成"旋钮"</h1>
+          <p class="module-subtitle">优化算法搜的不是排程，而是这套派工规则的参数。先看懂规则本身。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">一台机器的分诊台</h2>
+            <p>机器空闲的那一刻，面前排着一堆已就绪的工序。谁先上？这和<strong>急诊分诊</strong>一模一样：护士不是先到先看，而是给每个病人打一个"危急分"，分高的先进抢救室。派工规则就是那张打分表。</p>
+            <p>系统内置 <strong>11 条</strong>这样的规则。每条都是一个纯函数：输入工序的<span class="term" data-definition="Feature，特征。用几个数字刻画一道工序当前的处境，例如还有多急、剩多少活、加工要多久。规则就靠这些数字打分。">特征</span>，输出一个分数，越大越优先。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · core/rules.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">atc_rule</span>(op, machine, f, shop):</span>
+<span class="code-line">    processing = f[<span class="code-string">"processing_time"</span>]</span>
+<span class="code-line">    <span class="code-keyword">if</span> processing &lt;= <span class="code-number">0</span>:</span>
+<span class="code-line">        <span class="code-keyword">return</span> <span class="code-number">1000.0</span></span>
+<span class="code-line">    slack = <span class="code-function">max</span>(f[<span class="code-string">"slack"</span>], <span class="code-number">0.0</span>)</span>
+<span class="code-line">    <span class="code-keyword">return</span> (<span class="code-number">1.0</span> / processing) * math.<span class="code-function">exp</span>(-slack / (<span class="code-number">2.0</span> * processing + <span class="code-number">0.01</span>))</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · ATC 规则</span>
+                <div class="translation-lines">
+                  <p class="tl">ATC = 表观延迟成本。它同时看两件事：这活多快能干完、还有多少余量。</p>
+                  <p class="tl">加工时间为 0 的异常工序直接给个极大分，让它立刻走人。</p>
+                  <p class="tl"><span class="term" data-definition="Slack，松弛/余量 = 交期 − 当前时间 − 剩余加工时间。为负说明已经来不及了，越负越紧急。">松弛</span>取非负部分：真正紧急（松弛为负）的会被下一行的指数放大。</p>
+                  <p class="tl">分数 = (1÷加工时间) × e 的 (−松弛/加工时间) 次方。</p>
+                  <p class="tl">翻译：<strong>活越短、越紧急，分越高</strong>——短活先清、快烧眉毛的插队。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🩺</div>
+              <div class="callout-content">
+                <strong class="callout-title">11 条规则 = 11 种分诊哲学</strong>
+                <p>EDD 只看交期（谁快到期谁先），SPT 只看谁活最短，KIT_AWARE 偏爱配套齐全的，BOTTLENECK 让瓶颈工序优先……每条都是一种"该在乎什么"的立场。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">从"选一条规则"到"调一台调音台"</h2>
+            <p>只有 11 条固定规则太死板。真正的杀招是：把打分公式<strong>参数化</strong>成 16 个特征的加权和。每个特征配一个权重，就像调音台上的 16 个推子——推子的组合，定义出无穷多种派工风格。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🎚️</div>
+              <div class="callout-content">
+                <strong class="callout-title">这一步是全局关键</strong>
+                <p>一旦规则变成"16 个权重"，"设计一条好规则"就变成了"找一组好权重"——而找一组好数字，正是优化算法最擅长的事。<strong>模块 4、5、6 优化的，全是这组权重。</strong></p>
+              </div>
+            </div>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/approx_eval.py</span>
+<pre><code><span class="code-line">score_components = {</span>
+<span class="code-line">    <span class="code-string">"urgency"</span>: features[<span class="code-string">"urgency"</span>] / self.time_scale,</span>
+<span class="code-line">    <span class="code-string">"slack"</span>: -features[<span class="code-string">"slack"</span>] / self.time_scale,</span>
+<span class="code-line">    <span class="code-string">"processing_time"</span>: -features[<span class="code-string">"processing_time"</span>] / self.time_scale,</span>
+<span class="code-line">    <span class="code-comment"># ... 共 16 个特征分量</span></span>
+<span class="code-line">}</span>
+<span class="code-line">score = <span class="code-function">sum</span>(candidate.feature_weights.<span class="code-function">get</span>(name, <span class="code-number">0.0</span>)</span>
+<span class="code-line">            * score_components.<span class="code-function">get</span>(name, <span class="code-number">0.0</span>) <span class="code-keyword">for</span> name <span class="code-keyword">in</span> FEATURE_NAMES)</span>
+<span class="code-line">score += candidate.op_bias.<span class="code-function">get</span>(op.id, <span class="code-number">0.0</span>)</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 权重 × 特征 = 分数</span>
+                <div class="translation-lines">
+                  <p class="tl">先把每个特征归一化成一个"分量"（除以尺度，让不同量纲可比）。</p>
+                  <p class="tl">紧急度正向加分；松弛越小越加分（前面带负号）。</p>
+                  <p class="tl">加工时间前带负号 → 活越短越加分。</p>
+                  <p class="tl">总共 16 个这样的分量，覆盖交期、装配关键度、瓶颈邻接等。</p>
+                  <p class="tl"><strong>核心一行</strong>：分数 = 候选的 16 个权重 与 16 个特征分量的<span class="term" data-definition="两组数字对应相乘再相加，得到一个数。这里是把 16 个权重和 16 个特征分量配对相乘求和。">点积</span>。</p>
+                  <p class="tl">再叠加 op_bias：针对个别关键工序的微调偏置。</p>
+                  <p class="tl">一句话：<strong>一组权重（candidate）= 一条派工规则</strong>。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">"候选解"到底是什么</h2>
+            <p>于是优化算法眼里的一个"解"，就是下面这个 <span class="term" data-definition="候选参数。优化算法搜索的基本单位：一组特征权重 + 一组 ALNS 算子偏好，代表一种派工策略。它经过仿真解码后才变成一张排程。">CandidateParameters</span>：一小包数字，而不是一张排程。排程要等它被解码器跑过才生成。</p>
+
+            <div class="badge-list stagger-children">
+              <div class="badge-item animate-in"><code class="badge-code">feature_weights</code><span class="badge-desc">16 维特征权重——决定派工打分的"性格"，是被优化的主战场</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">destroy_weights</code><span class="badge-desc">对各"破坏算子"的偏好（模块 5 的 ALNS 会用到）</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">repair_weights</code><span class="badge-desc">对各"修复算子"的偏好</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">op_bias</code><span class="badge-desc">对个别关键工序的定点微调偏置</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">seed_rule_name</code><span class="badge-desc">混入一条内置规则作"底色"，稳住搜索起点</span></div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module2">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="对。processing_time 分量前带负号（活越短分越高），想让长活先上，就得把这个权重调成负的，抵消并反转默认偏好。这正是『调旋钮』的思维。"
+                   data-explanation-wrong="回到那行点积：分数 = 权重 × 特征分量。processing_time 分量本身对短活有利（带负号），要改变行为必须动它对应的权重，而不是别的特征。">
+                <h3 class="quiz-question">现在你想让"加工时间长的工序"反而优先（比如先啃硬骨头）。基于参数化打分，你会怎么调？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把 urgency（紧急度）权重调大</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把 processing_time 的权重调成负值，反转它默认"偏爱短活"的方向</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>换一台机器</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-a"
+                   data-explanation-right="正是关键。把规则写成『16 个权重的点积』后，寻找好规则 = 在 16 维实数空间里找一个好点，而搜索连续数值空间正是遗传算法、邻域搜索这类优化器的主场。"
+                   data-explanation-wrong="再想想为什么要费劲参数化。不是为了跑更快，也不是为了绕过约束——是为了把『设计规则』这个创造性难题，转化成『搜一组数字』这个优化器能自动干的活。">
+                <h3 class="quiz-question">把派工规则参数化成"16 维权重"，对后续优化最根本的意义是什么？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把"设计一条好规则"变成"在数值空间里搜一组好权重"，交给优化算法自动完成</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>让仿真解码器跑得更快</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>避免机器故障带来的重排</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module2')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module2')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>现在每个"解"都能跑出一排 KPI。但完工快的方案往往延期多，反之亦然——到底哪个才算"最优"？下一个模块引入多目标世界里的核心概念：<strong>Pareto 前沿</strong>。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+    <section class="module" id="module-3" style="background: var(--color-bg-warm)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">03</span>
+          <h1 class="module-title">Pareto 前沿：没有唯一最优，只有权衡边界</h1>
+          <p class="module-subtitle">当"快"和"准时"互相打架时，"最优解"这个词本身需要重新定义。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">两个目标，一场拉锯</h2>
+            <p>你想要 Makespan 最小（尽快清完），又想要总延迟最小（别让谁超期）。问题是：为了压低总延迟，你会插队赶那些快到期的活，结果机器切换频繁、Makespan 反而变长。<strong>它们常常此消彼长。</strong></p>
+            <p>这时"哪个方案最好"没有唯一答案。数学上用一个精确概念来判断优劣：<span class="term" data-definition="Domination，支配。方案 A 支配 B，当且仅当 A 在每个目标上都不比 B 差，且至少在一个目标上严格更好。被支配的方案是『纯粹的输』，可以直接淘汰。">支配</span>。</p>
+
+            <div class="icon-rows stagger-children">
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-success)">✅</div>
+                <div><strong>A 支配 B</strong><p>A 每个目标都 ≥ B，且至少一个严格更好 → B 是纯粹的输，淘汰。</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-4)">⚖️</div>
+                <div><strong>A、B 互不支配</strong><p>A 完工更快但延期更多，B 反过来 → 各有千秋，都得留着。</p></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">支配，写成代码就六行</h2>
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/solution_model.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">dominates</span>(self, other, specs):</span>
+<span class="code-line">    any_better = <span class="code-keyword">False</span></span>
+<span class="code-line">    <span class="code-keyword">for</span> spec <span class="code-keyword">in</span> specs:</span>
+<span class="code-line">        left  = self.objectives[spec.key]</span>
+<span class="code-line">        right = other.objectives[spec.key]</span>
+<span class="code-line">        <span class="code-keyword">if</span> spec.direction == <span class="code-string">"min"</span>:</span>
+<span class="code-line">            <span class="code-keyword">if</span> left &gt; right: <span class="code-keyword">return</span> <span class="code-keyword">False</span></span>
+<span class="code-line">            <span class="code-keyword">if</span> left &lt; right: any_better = <span class="code-keyword">True</span></span>
+<span class="code-line">    <span class="code-keyword">return</span> any_better</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话</span>
+                <div class="translation-lines">
+                  <p class="tl">逐个目标比较 self（我）和 other（对方）。</p>
+                  <p class="tl">读出双方在这个目标上的数值。</p>
+                  <p class="tl">对"越小越好"的目标：只要我在任何一项上更差（更大），立刻判负——我没资格支配它。</p>
+                  <p class="tl">只要我在某一项上严格更好（更小），就记下"至少赢了一项"。</p>
+                  <p class="tl">全程没输、且至少赢一项 → 我支配它。这就是支配的全部定义。</p>
+                  <p class="tl">注意 <code>spec.direction</code>：利用率这类目标是"越大越好"，方向相反。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">前沿：山脊线，不是山顶</h2>
+            <p>把所有"没被任何方案支配"的解收集起来，就得到 <span class="term" data-definition="Pareto Front，帕累托前沿。所有互不支配的非支配解构成的边界。站在前沿上，想让任一目标更好，就必然让另一目标变差。">Pareto 前沿</span>。它不是一个点，而是一条<strong>边界</strong>。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🏔️</div>
+              <div class="callout-content">
+                <strong class="callout-title">登山者的山脊线</strong>
+                <p>前沿像一条山脊线：线上每一点，往任何方向再走都得下坡（牺牲某个目标）。优化的目标不是"登顶单一最高峰"，而是<strong>把这条脊线找全、找准</strong>——让决策者能在"快"和"准时"之间自由挑一个平衡点。</p>
+              </div>
+            </div>
+
+            <p>系统用一个 <span class="term" data-definition="Pareto 存档。一个动态维护的容器，只保留当前所有互不支配的解；新解进来时，淘汰被它支配的旧解，若它自己被支配则拒之门外。">ParetoArchive</span> 实时维护这条脊线。每来一个新解，就做一次"擂台裁决"：</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/archive.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">consider</span>(self, solution):</span>
+<span class="code-line">    <span class="code-keyword">if</span> <span class="code-keyword">any</span>(e.<span class="code-function">dominates</span>(solution, self.specs) <span class="code-keyword">for</span> e <span class="code-keyword">in</span> self._solutions):</span>
+<span class="code-line">        <span class="code-keyword">return</span> <span class="code-keyword">False</span></span>
+<span class="code-line">    survivors = [e <span class="code-keyword">for</span> e <span class="code-keyword">in</span> self._solutions</span>
+<span class="code-line">                 <span class="code-keyword">if</span> <span class="code-keyword">not</span> solution.<span class="code-function">dominates</span>(e, self.specs)]</span>
+<span class="code-line">    survivors.<span class="code-function">append</span>(solution)</span>
+<span class="code-line">    self._solutions = survivors</span>
+<span class="code-line">    <span class="code-keyword">return</span> <span class="code-keyword">True</span></span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 擂台裁决</span>
+                <div class="translation-lines">
+                  <p class="tl">新解上擂台。如果存档里已有任何一个解支配它——它是纯输，直接拒收。</p>
+                  <p class="tl">否则，反过来把存档里被这个新解支配的旧解全部踢下擂台。</p>
+                  <p class="tl">把幸存的旧解 + 这个新解，组成新的前沿。</p>
+                  <p class="tl">返回 True 表示"入选前沿"。（真实代码还会先按排程/目标去重。）</p>
+                  <p class="tl">这样存档永远只装着互不支配的解——一条随搜索不断被刷新的脊线。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">前沿好不好，怎么量？超体积</h2>
+            <p>两条前沿摆在一起，哪条更优？看谁"罩住"的目标空间更大。这个指标叫 <span class="term" data-definition="Hypervolume，超体积。前沿与一个参考点之间围出的空间体积。前沿越靠近理想区、铺得越广，超体积越大，是衡量多目标解集质量的黄金指标。">超体积</span>。系统用蒙特卡洛采样来近似它：</p>
+
+            <div class="step-cards stagger-children">
+              <div class="step-card animate-in"><div class="step-num">1</div><div class="step-body"><strong>归一化</strong><p>把所有目标缩放到 [0,1]，消除量纲差异。</p></div></div>
+              <div class="step-card animate-in"><div class="step-num">2</div><div class="step-body"><strong>随机撒点</strong><p>在参考立方体里撒 1500 个随机探针。</p></div></div>
+              <div class="step-card animate-in"><div class="step-num">3</div><div class="step-body"><strong>数比例</strong><p>统计有多少探针被前沿"罩住"，比例 × 立方体体积 ≈ 超体积。</p></div></div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🎯</div>
+              <div class="callout-content">
+                <strong class="callout-title">为什么用采样近似</strong>
+                <p>精确算超体积在高维目标下代价指数级。撒点估比例——用可控的随机误差换来近乎线性的速度，是工程里典型的"够用就好"取舍。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module3">
+              <div class="quiz-question-block"
+                   data-correct="opt-c"
+                   data-explanation-right="正确。两个目标都是越小越好：A(Makespan=100, 延迟=50)，B(120, 40)。A 的 Makespan 更好但延迟更差，B 反之——谁都没在两项上全面胜出，互不支配，两个都得留在前沿。"
+                   data-explanation-wrong="逐项比：Makespan 越小越好时 A(100)<B(120)，A 赢一项；延迟 A(50)>B(40)，B 赢一项。两边各赢一项、各输一项，按支配定义谁也不支配谁。">
+                <h3 class="quiz-question">两目标都"越小越好"。方案 A =(Makespan 100, 总延迟 50)，方案 B =(Makespan 120, 总延迟 40)。谁支配谁？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>A 支配 B（因为 Makespan 更小）</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>B 支配 A（因为总延迟更小）</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>互不支配，两者都留在前沿上</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="对。前沿是一组权衡方案而非单点。系统的产物是整条前沿，让决策者按当下业务优先级（这批要抢交期？还是要压产能成本？）现场挑一个平衡点。"
+                   data-explanation-wrong="多目标优化的价值恰恰在于不替人做最终取舍。硬压成单一目标会丢掉权衡信息；前沿把选择权交还给决策者。">
+                <h3 class="quiz-question">既然前沿上的解互不支配，系统最终交给排产决策者的应该是什么？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把多目标加权成一个数，输出那个"总分最高"的唯一方案</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>整条前沿——一组权衡方案，让人按当下业务优先级现场挑</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>随机挑一个前沿上的解</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module3')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module3')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>知道了要找"整条前沿"，问题来了：怎么让一群候选解<strong>均匀地铺满</strong>这条脊线，而不是全挤在一小段？这正是 <strong>NSGA-III</strong> 用"参考点"解决的核心难题。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+    <section class="module" id="module-4" style="background: var(--color-bg)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">04</span>
+          <h1 class="module-title">NSGA-III：用"参考点"驾驭多目标进化</h1>
+          <p class="module-subtitle">遗传算法负责进化候选权重，参考点负责让前沿铺得又满又匀。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">进化论，用在一堆权重上</h2>
+            <p><span class="term" data-definition="NSGA = Non-dominated Sorting Genetic Algorithm，非支配排序遗传算法。一类模仿自然选择的多目标优化器：维护一个『种群』（一批候选解），每代交叉变异出后代，再择优存活，逐代逼近 Pareto 前沿。">NSGA</span> 是一类<span class="term" data-definition="Genetic Algorithm，遗传算法。把候选解当成『个体』，通过交叉（混合两个父代）、变异（随机扰动）产生后代，用『适者生存』筛选，一代代逼近好解。">遗传算法</span>。这里的"个体"就是模块 2 那包权重（CandidateParameters）。每一代：交叉变异产生后代 → 仿真解码打分 → 择优存活。难点全在最后一步——<strong>怎么择优</strong>。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🖼️</div>
+              <div class="callout-content">
+                <strong class="callout-title">策展人的难题</strong>
+                <p>你是画展策展人，展厅（目标空间）很大，展位（种群名额）有限，投稿（候选解）成百上千。若只挑"最惊艳"的，它们可能全是同一风格、挤在展厅一角。高明的策展人会<strong>把作品均匀铺满每个区域</strong>——这正是 NSGA-III 相比老版 NSGA-II 的升级点。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">第一刀：非支配排序，分层</h2>
+            <p>先把整个种群按支配关系剥洋葱：谁也不被支配的是第 0 层（当前最强前沿），剥掉后剩下里谁也不被支配的是第 1 层……存活名额从第 0 层往下按层填。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/nsga3_core.py</span>
+<pre><code><span class="code-line">selected_indices, last_front = [], []</span>
+<span class="code-line"><span class="code-keyword">for</span> front <span class="code-keyword">in</span> fronts:</span>
+<span class="code-line">    <span class="code-keyword">if</span> <span class="code-function">len</span>(selected_indices) + <span class="code-function">len</span>(front) &lt;= population_size:</span>
+<span class="code-line">        selected_indices.<span class="code-function">extend</span>(front)</span>
+<span class="code-line">    <span class="code-keyword">else</span>:</span>
+<span class="code-line">        last_front = front  <span class="code-comment"># 装不下的临界层</span></span>
+<span class="code-line">        <span class="code-keyword">break</span></span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话</span>
+                <div class="translation-lines">
+                  <p class="tl">从最强的第 0 层开始，一层层往存活名单里塞。</p>
+                  <p class="tl">只要整层都塞得下，就整层收编——它们都是当前的非支配精英。</p>
+                  <p class="tl">直到遇到一层"塞一半就满了"——这层叫临界层（last_front）。</p>
+                  <p class="tl">临界层里该留谁、该舍谁？<strong>这才是 NSGA-III 真正的用武之地。</strong></p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">第二刀：参考点 + niche，保多样性</h2>
+            <p>面对临界层，老版 NSGA-II 用"拥挤度距离"（谁周围空谁留）。但目标一多，拥挤度就失灵。NSGA-III 改用 <span class="term" data-definition="Reference Points，参考点。在目标空间里按结构化方式（Das-Dennis 单纯形格点）均匀撒下的一组方向标。每个候选解会被关联到最近的那条参考方向上。">参考点</span>——像在展厅地面预先划好均匀的网格，每个候选解归属到最近的一个格子。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · nsga3_core.py · _niche_select</span>
+<pre><code><span class="code-line"><span class="code-keyword">while</span> <span class="code-function">len</span>(selected) &lt; population_size <span class="code-keyword">and</span> remaining:</span>
+<span class="code-line">    niche_min = <span class="code-function">min</span>(selected_by_ref[i] <span class="code-keyword">for</span> i <span class="code-keyword">in</span> ...)</span>
+<span class="code-line">    niche_indices = [i <span class="code-keyword">for</span> i <span class="code-keyword">in</span> ... <span class="code-keyword">if</span> selected_by_ref[i] == niche_min]</span>
+<span class="code-line">    <span class="code-comment"># 从『最空』的参考点里，挑一个离它最近的候选补进来</span></span>
+<span class="code-line">    selected.<span class="code-function">append</span>(chosen_candidate)</span>
+<span class="code-line">    selected_by_ref[chosen_reference] += <span class="code-number">1</span></span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · niche 保育</span>
+                <div class="translation-lines">
+                  <p class="tl">还没填满就继续：先找出目前<strong>关联解最少</strong>的那些参考点（最空的格子）。</p>
+                  <p class="tl"><span class="term" data-definition="Niche，生态位。这里指一个参考点方向。niche 保育 = 优先照顾解最稀疏的方向，防止种群全部收敛到前沿的某一小段。">niche</span> 保育：优先照顾这些冷清方向，而不是继续往热闹的地方堆。</p>
+                  <p class="tl">从最空的格子里，挑一个离该参考方向最近的候选，补进存活名单。</p>
+                  <p class="tl">这个格子计数 +1，下一轮它就没那么"空"了，注意力转向别处。</p>
+                  <p class="tl">结果：存活者被<strong>均匀地摊在整条前沿上</strong>，而不是挤成一坨。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🆚</div>
+              <div class="callout-content">
+                <strong class="callout-title">为什么是 NSGA-III 而不是 II</strong>
+                <p>目标数 ≥ 3 时，几乎所有解都互不支配、"拥挤度"区分不开谁疏谁密，NSGA-II 的多样性机制会崩。参考点用<strong>固定的几何骨架</strong>强行撑开前沿，正好对症这个车间的多目标场景。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">一代进化的全流程</h2>
+            <div class="flow-animation" data-steps='[
+              {"highlight":"flow-actor-1","label":"父代种群：一批候选权重。两两竞标 + 交叉变异，生出一批后代。"},
+              {"highlight":"flow-actor-2","label":"每个后代交给仿真解码器跑一遍，得到目标向量。","packet":true,"from":"actor-1","to":"actor-2"},
+              {"highlight":"flow-actor-3","label":"父代 + 后代合并，做非支配排序分层。","packet":true,"from":"actor-2","to":"actor-3"},
+              {"highlight":"flow-actor-4","label":"整层收编精英；临界层用参考点 niche 挑选，保证前沿铺匀。","packet":true,"from":"actor-3","to":"actor-4"},
+              {"highlight":"flow-actor-1","label":"存活者成为下一代父代。循环往复，前沿越推越好。","packet":true,"from":"actor-4","to":"actor-1"}
+            ]'>
+              <div class="flow-actors">
+                <div class="flow-actor" id="flow-actor-1"><div class="flow-actor-icon">🧬</div><span>交叉变异</span></div>
+                <div class="flow-actor" id="flow-actor-2"><div class="flow-actor-icon">⚙️</div><span>仿真评估</span></div>
+                <div class="flow-actor" id="flow-actor-3"><div class="flow-actor-icon">🧅</div><span>非支配分层</span></div>
+                <div class="flow-actor" id="flow-actor-4"><div class="flow-actor-icon">📐</div><span>参考点择优</span></div>
+              </div>
+              <div class="flow-packet" id="flow-packet"></div>
+              <div class="flow-step-label" id="flow-label">点击"下一步"，走完 NSGA-III 的一代</div>
+              <div class="flow-controls">
+                <button class="btn flow-next-btn">下一步</button>
+                <button class="btn flow-reset-btn">重来</button>
+                <span class="flow-progress"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module4">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="正是核心。临界层里的解几乎都互不支配，光比目标值好坏无法拉开——若只挑某一段最好的，种群会收敛到前沿一小块。参考点强制往『最空的方向』补人，才能把整条前沿撑开、铺匀。"
+                   data-explanation-wrong="临界层的解通常已经互不支配了，『谁目标值更好』根本分不出高下，还会让种群扎堆。NSGA-III 在这里追求的是多样性/覆盖，不是单纯的收敛。">
+                <h3 class="quiz-question">临界层装不下时，NSGA-III 为什么不直接挑"目标值最好"的那些解，而要绕道用参考点？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为算目标值太慢</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>临界层里解大多互不支配、目标值分不出高下，只挑"最好"会让种群扎堆前沿一小段；参考点强制补充稀疏方向，保证前沿铺匀</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>参考点能让算法更快收敛到单个最优解</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-a"
+                   data-explanation-right="对。这个车间要同时权衡总延迟、Makespan、主订单延误率、利用率等多个目标。目标一多，NSGA-II 赖以保多样性的拥挤度距离就失效，所以换成基于参考点的 NSGA-III。"
+                   data-explanation-wrong="选型理由不是种群大小或速度，而是目标维度。三个及以上目标时拥挤度距离会退化，这正是 NSGA-III 用参考点替代拥挤度的动机。">
+                <h3 class="quiz-question">项目选 NSGA-III 而非更常见的 NSGA-II，最主要是因为这个排产问题的什么特点？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>目标多（≥3 个），拥挤度距离在高维目标下失效，需要参考点来保持前沿多样性</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>种群规模特别大</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>NSGA-III 每代计算更省时间</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module4')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module4')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>NSGA-III 擅长"广度"——把前沿铺满整个空间。但它对单个好解的"深度打磨"较弱。这份精雕细琢的活，交给 <strong>ALNS</strong>：破坏、修复、再破坏。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+    <section class="module" id="module-5" style="background: var(--color-bg-warm)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">05</span>
+          <h1 class="module-title">ALNS：破坏、修复、再破坏</h1>
+          <p class="module-subtitle">拿一个好解反复"拆一块、重拼一块"，专治遗传算法磨不动的局部最优。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">卡在半山腰怎么办</h2>
+            <p>遗传算法能找到一个不错的解，但常常卡在<span class="term" data-definition="Local Optimum，局部最优。周围随便动一动都变差、但并非全局最好的解。就像爬到一座小山顶，四周都是下坡，却看不到远处更高的山。">局部最优</span>——周围小改都变差，可它并不是最好的。<span class="term" data-definition="Adaptive Large Neighborhood Search，自适应大邻域搜索。反复把当前解『破坏』掉一大块再『修复』重建，从而跳到远处的新解；并根据历史战绩自动调整各算子的使用频率。">ALNS</span> 的破局思路很暴力：<strong>不小改，而是拆掉一大片重来</strong>。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🧩</div>
+              <div class="callout-content">
+                <strong class="callout-title">拼图返工</strong>
+                <p>一幅快拼好的拼图，某个区域别扭。你不会一块块微调，而是<strong>整片拆下来重拼</strong>——这就是"大邻域"。而哪种拆法、哪种拼法屡屡奏效，你会记住、下次更常用它——这就是"自适应"。</p>
+              </div>
+            </div>
+
+            <div class="pattern-cards stagger-children">
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-error)">
+                <div class="pattern-icon" style="background: var(--color-error)">💥</div>
+                <h4 class="pattern-title">破坏算子</h4>
+                <p class="pattern-desc">拆掉一片派工决策，比如"延误订单相关的"、"瓶颈机器上的"、"共享工装冲突的"。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-success)">
+                <div class="pattern-icon" style="background: var(--color-success)">🔧</div>
+                <h4 class="pattern-title">修复算子</h4>
+                <p class="pattern-desc">把拆掉的部分重排，比如"按交期"、"优先主订单"、"给瓶颈削峰"。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">"自适应"：让好算子出头</h2>
+            <p>系统有 6 种破坏 + 5 种修复算子。每次用<span class="term" data-definition="Roulette Wheel Selection，轮盘赌选择。按权重占比分配被选中的概率——权重大的算子被选中的机会大，但小权重也仍有机会，兼顾开发与探索。">轮盘赌</span>按权重挑一对。用完后，根据战绩即时调整它的权重：</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/alns_core.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">_update_operator</span>(self, state, accepted, improved):</span>
+<span class="code-line">    state.uses += <span class="code-number">1</span></span>
+<span class="code-line">    <span class="code-keyword">if</span> improved:</span>
+<span class="code-line">        state.weight = <span class="code-function">min</span>(<span class="code-number">6.0</span>, state.weight * <span class="code-number">1.12</span> + <span class="code-number">0.08</span>)</span>
+<span class="code-line">    <span class="code-keyword">elif</span> accepted:</span>
+<span class="code-line">        state.weight = <span class="code-function">min</span>(<span class="code-number">6.0</span>, state.weight * <span class="code-number">1.04</span> + <span class="code-number">0.03</span>)</span>
+<span class="code-line">    <span class="code-keyword">else</span>:</span>
+<span class="code-line">        state.weight = <span class="code-function">max</span>(<span class="code-number">0.2</span>, state.weight * <span class="code-number">0.94</span>)</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 战功考核</span>
+                <div class="translation-lines">
+                  <p class="tl">每个算子记一笔"出场次数"。</p>
+                  <p class="tl">若这次带来了改进 → 权重大涨（×1.12），下次更可能被选中。</p>
+                  <p class="tl">若没改进但结果被接受了 → 权重小涨（×1.04），有功劳也有苦劳。</p>
+                  <p class="tl">若被拒 → 权重打折（×0.94），但保底 0.2，永不彻底出局。</p>
+                  <p class="tl">于是好用的算子自然浮上来，废柴沉下去——却都保留一线生机去探索。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">关键一步：故意接受"更差"的解</h2>
+            <p>ALNS 借用了<span class="term" data-definition="Simulated Annealing，模拟退火。一种优化策略：早期以较高概率接受『暂时更差』的解来跳出局部最优，随着『温度』下降逐渐只接受更好的解，最终稳定收敛。灵感来自金属退火。">模拟退火</span>的接受准则——有时明知变差也接受，为的是翻过山头去够更高的山。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · alns_core.py · refine</span>
+<pre><code><span class="code-line">delta = candidate_score - current_score</span>
+<span class="code-line"><span class="code-keyword">if</span> delta &lt;= <span class="code-number">0</span> <span class="code-keyword">or</span> self.rng.<span class="code-function">random</span>() &lt; math.<span class="code-function">exp</span>(-delta / <span class="code-function">max</span>(<span class="code-number">0.05</span>, temperature)):</span>
+<span class="code-line">    accepted = <span class="code-keyword">True</span></span>
+<span class="code-line">    improved = delta &lt; <span class="code-number">0</span></span>
+<span class="code-line"><span class="code-comment"># ... 每轮末尾</span></span>
+<span class="code-line">temperature *= <span class="code-number">0.92</span></span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 退火接受</span>
+                <div class="translation-lines">
+                  <p class="tl">delta = 新解得分 − 当前得分（这里越小越好，负的 delta 表示变好）。</p>
+                  <p class="tl">变好（delta≤0）就无条件接受。</p>
+                  <p class="tl">变差也别急着拒：按 e^(−delta/温度) 的概率接受它。温度越高，越敢接受烂解。</p>
+                  <p class="tl">delta 只有严格变好时才算 improved（影响算子考核）。</p>
+                  <p class="tl">每轮结束温度 ×0.92 慢慢降——<strong>前期大胆探索，后期收敛精修</strong>。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">一轮 ALNS，演成一场对话</h2>
+            <p>把 refine 里一轮迭代的四个角色搬到群聊里，你就能看清它们怎么配合：</p>
+
+            <div class="chat-window" id="chat-alns">
+              <div class="chat-messages">
+                <div class="chat-message" data-msg="0" data-sender="a" style="display:none">
+                  <div class="chat-avatar" style="background: var(--color-actor-3)">🎯</div>
+                  <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-3)">调度器</span><p>当前解卡住了。轮盘赌抽签——破坏算子选中"延误订单破坏"，修复算子选中"按交期修复"。开工！</p></div>
+                </div>
+                <div class="chat-message" data-msg="1" data-sender="b" style="display:none">
+                  <div class="chat-avatar" style="background: var(--color-error)">💥</div>
+                  <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-error)">破坏算子</span><p>我把所有延误订单相关的派工偏置全拆了，留出一片空白。给你，修复算子。</p></div>
+                </div>
+                <div class="chat-message" data-msg="2" data-sender="c" style="display:none">
+                  <div class="chat-avatar" style="background: var(--color-success)">🔧</div>
+                  <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-success)">修复算子</span><p>重排完毕，全部朝交期靠拢。丢给仿真解码器打分。</p></div>
+                </div>
+                <div class="chat-message" data-msg="3" data-sender="d" style="display:none">
+                  <div class="chat-avatar" style="background: var(--color-actor-2)">🌡️</div>
+                  <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-2)">退火裁判</span><p>新解总延迟略微变差了。但现在温度还高——我按概率<strong>接受</strong>它，赌一把翻过山头。</p></div>
+                </div>
+                <div class="chat-message" data-msg="4" data-sender="a" style="display:none">
+                  <div class="chat-avatar" style="background: var(--color-actor-3)">🎯</div>
+                  <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-3)">调度器</span><p>虽被接受但没改进 → 这对算子权重 ×1.04 小涨。温度 ×0.92 下降。进入下一轮，下次会更挑剔。</p></div>
+                </div>
+              </div>
+              <div class="chat-typing" id="chat-alns-typing" style="display:none">
+                <div class="chat-avatar" id="chat-alns-typing-avatar">?</div>
+                <div class="chat-typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
+              </div>
+              <div class="chat-controls">
+                <button class="btn chat-next-btn">下一条</button>
+                <button class="btn chat-all-btn">全部播放</button>
+                <button class="btn chat-reset-btn">重播</button>
+                <span class="chat-progress"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module5">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="对。如果只接受更好的解，算法一旦进小山顶就永远出不来。按温度概率接受暂时更差的解，等于允许『先下坡再翻过山头』，这正是跳出局部最优的机制；温度逐渐降低则保证最终收敛。"
+                   data-explanation-wrong="接受更差的解不是 bug 也不是为了省算力，而是刻意设计：只上不下的搜索会永久困在局部最优。退火用『高温敢冒险、低温才保守』来平衡探索与收敛。">
+                <h3 class="quiz-question">ALNS 为什么要按概率接受"评分更差"的解？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>为了节省仿真评估的算力</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>只接受更好的解会永久困在局部最优；偶尔接受更差的解才能"翻过山头"，温度下降再保证收敛</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为仿真评分本身不准，需要容错</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-c"
+                   data-explanation-right="正是自适应的精髓。权重按战绩动态涨跌（改进×1.12、接受×1.04、拒绝×0.94），有效的算子被越用越多，无效的降到 0.2 保底仍留探索机会——算法在运行中自己学会该用哪把工具。"
+                   data-explanation-wrong="ALNS 不预先固定算子顺序，也不是随机均匀选。它靠 _update_operator 让每个算子的权重随历史表现浮动，好用的自然出头——这就是名字里『Adaptive（自适应）』的含义。">
+                <h3 class="quiz-question">ALNS 名字里的"自适应（Adaptive）"具体体现在哪？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>算子按预先写死的固定顺序轮流使用</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>每次完全随机、均匀地挑算子</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>每个算子的选中权重随它的历史战绩动态涨跌，好用的越用越多</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module5')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module5')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>NSGA-III 管广度、ALNS 管深度——最后一个模块把它们拼成一套<strong>两阶段混合框架</strong>，并请出精确求解 CP-SAT 当"质量标尺"。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+    <section class="module" id="module-6" style="background: var(--color-bg)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">06</span>
+          <h1 class="module-title">混合框架与精确求解：广搜、精修、标尺</h1>
+          <p class="module-subtitle">NSGA-III 铺广度、ALNS 挖深度、CP-SAT 定标准——三者如何在一条流水线上分工。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">找矿队的分工</h2>
+            <p>把整套优化想成一支找矿队。矿区（参数空间）辽阔，精细勘探（完整仿真）昂贵。聪明的做法是分三层力度：</p>
+
+            <div class="icon-rows stagger-children">
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-2)">🛰️</div>
+                <div><strong>卫星遥感（广搜）</strong><p>NSGA-III + 近似评估，快速扫过整片矿区，圈出富矿带。</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-1)">⛏️</div>
+                <div><strong>钻探队（精修）</strong><p>对晋级的富矿带用完整仿真 + ALNS 精细勘探。</p></div>
+              </div>
+              <div class="icon-row animate-in">
+                <div class="icon-circle" style="background: var(--color-actor-3)">🔬</div>
+                <div><strong>实验室化验（标尺）</strong><p>CP-SAT 精确求解，为质量定一个可信基准。</p></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">两个"评分裁判"：近似 vs 精确</h2>
+            <p>混合框架的省钱关键，是备了两台评分器——广搜阶段用便宜的<span class="term" data-definition="近似评估器。不跑完整的离散事件仿真，而用简化的贪心排程快速估出目标向量。速度快一个量级，用于海量候选的初筛。">近似评估器</span>初筛海量候选，只有晋级的少数精英才享受昂贵的完整仿真。</p>
+
+            <div class="pattern-cards stagger-children">
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-2)">
+                <div class="pattern-icon" style="background: var(--color-actor-2)">⚡</div>
+                <h4 class="pattern-title">近似评估</h4>
+                <p class="pattern-desc">简化排程，快一个量级。广搜阶段成百上千次调用都靠它。</p>
+              </div>
+              <div class="pattern-card animate-in" style="border-top: 3px solid var(--color-actor-1)">
+                <div class="pattern-icon" style="background: var(--color-actor-1)">🎯</div>
+                <h4 class="pattern-title">精确仿真</h4>
+                <p class="pattern-desc">模块 1 那台完整解码器，含资源日历、故障。只给晋级精英用。</p>
+              </div>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">💰</div>
+              <div class="callout-content">
+                <strong class="callout-title">计算预算的艺术</strong>
+                <p>这就是"广撒网用便宜工具、收网时才上贵工具"。把有限的仿真算力,精准砸在最可能是好解的候选上——工程里典型的<strong>预算分配</strong>思维。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">两阶段流水线</h2>
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/hybrid_nsga3_alns.py · run()</span>
+<pre><code><span class="code-line"><span class="code-comment"># 阶段一：近似广搜（NSGA-III 驱动）</span></span>
+<span class="code-line"><span class="code-keyword">for</span> generation <span class="code-keyword">in</span> <span class="code-function">range</span>(<span class="code-number">1</span>, self.config.generations + <span class="code-number">1</span>):</span>
+<span class="code-line">    candidate_batch = self.<span class="code-function">_build_offspring_batch</span>(population, ...)</span>
+<span class="code-line">    offspring = self.<span class="code-function">_parallel_evaluate_candidates_approx</span>(candidate_batch, ...)</span>
+<span class="code-line">    combined = population + offspring</span>
+<span class="code-line">    population = <span class="code-function">select_survivors</span>(combined, self.specs, ...)  <span class="code-comment"># NSGA-III</span></span>
+<span class="code-line"></span>
+<span class="code-line"><span class="code-comment"># 阶段二：晋级精英 → 精确仿真 + ALNS 精修</span></span>
+<span class="code-line">promotions = self.<span class="code-function">_select_promotions</span>(coarse_pool)</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 广搜 → 晋级</span>
+                <div class="translation-lines">
+                  <p class="tl"><strong>阶段一（广搜）</strong>：一代代进化候选权重。</p>
+                  <p class="tl">每代交叉变异出一批后代候选。</p>
+                  <p class="tl">用<strong>近似评估器并行</strong>快速给它们打分（便宜、能海量跑）。</p>
+                  <p class="tl">父代 + 后代合并。</p>
+                  <p class="tl">用 <strong>NSGA-III 的 select_survivors</strong>（模块 4）择优——参考点保持前沿多样。</p>
+                  <p class="tl"><strong>阶段二（晋级）</strong>：从广搜积累的候选池里，挑出最值得深挖的精英。</p>
+                  <p class="tl">这些精英随后进入精确仿真 + ALNS（模块 5）局部精修，产出最终前沿。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">标尺：CP-SAT 精确求解</h2>
+            <p>启发式算法再聪明也不保证"最优"。所以系统请出 <span class="term" data-definition="Constraint Programming - Satisfiability，约束规划求解器。Google OR-Tools 提供的 CP-SAT 把排产写成一组整数变量和约束，用分支定界等精确方法求数学最优或给出可信下界。慢，但结果可信。">CP-SAT</span> 精确求解器：把排产问题原原本本翻译成数学模型，求真正的最优（或给出可信的边界），当作衡量启发式解好坏的<strong>标尺</strong>。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/exact.py · solve()</span>
+<pre><code><span class="code-line"><span class="code-keyword">for</span> op <span class="code-keyword">in</span> decision_ops:</span>
+<span class="code-line">    duration = <span class="code-function">max</span>(<span class="code-number">1</span>, <span class="code-function">int</span>(<span class="code-function">round</span>(op.work_remaining * scale)))</span>
+<span class="code-line">    start = model.<span class="code-function">NewIntVar</span>(<span class="code-number">0</span>, horizon, <span class="code-string">f"s_{op.id}"</span>)</span>
+<span class="code-line">    end   = model.<span class="code-function">NewIntVar</span>(<span class="code-number">0</span>, horizon, <span class="code-string">f"e_{op.id}"</span>)</span>
+<span class="code-line">    interval = model.<span class="code-function">NewIntervalVar</span>(start, duration, end, <span class="code-string">f"i_{op.id}"</span>)</span>
+<span class="code-line"><span class="code-comment"># 同一台机器上的所有工序区间，两两不许重叠</span></span>
+<span class="code-line">model.<span class="code-function">AddNoOverlap</span>(machine_intervals[resource_id])</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 建模</span>
+                <div class="translation-lines">
+                  <p class="tl">为每道待决策工序建三个变量：开工时刻、完工时刻。</p>
+                  <p class="tl">加工时长用 scale（×60）把小时换成整数，CP-SAT 只吃整数。</p>
+                  <p class="tl">start / end 被限制在 [0, horizon] 这个时间范围内。</p>
+                  <p class="tl"><span class="term" data-definition="区间变量。把一段占用时间（开工、时长、完工）打包成一个对象，方便直接对它施加『不重叠』这类调度约束。">区间变量</span>把开工-时长-完工绑成一个对象。</p>
+                  <p class="tl"><strong>核心约束</strong>：同一台机器上所有区间 <code>AddNoOverlap</code>——一台机同一时刻只能干一道工序。</p>
+                  <p class="tl">（多台可选机器时还会用布尔选择器 + AddExactlyOne 选一台。）</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-warning">
+              <div class="callout-icon">🐢</div>
+              <div class="callout-content">
+                <strong class="callout-title">精确 = 慢，所以只当标尺</strong>
+                <p>CP-SAT 在两万工序上会爆炸，通常只在小规模实例上求最优，用来验证"启发式解离最优有多近"。日常大实例排产，还是靠混合框架的启发式产出。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">全景：五种算法一条流水线</h2>
+            <div class="flow-steps">
+              <div class="flow-step"><div class="flow-step-num">1</div><p>候选权重<br>(规则固定派工)</p></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-step"><div class="flow-step-num">2</div><p>近似广搜<br>(NSGA-III)</p></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-step"><div class="flow-step-num">3</div><p>晋级精修<br>(精确仿真+ALNS)</p></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-step"><div class="flow-step-num">4</div><p>Pareto 前沿<br>(存档+超体积)</p></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-step"><div class="flow-step-num">5</div><p>CP-SAT<br>(标尺校验)</p></div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🧠</div>
+              <div class="callout-content">
+                <strong class="callout-title">一句话串起全课</strong>
+                <p>把派工<strong>参数化</strong>（模块 2）→ 用<strong>支配/前沿</strong>定义优劣（模块 3）→ <strong>NSGA-III</strong> 广搜铺满前沿（模块 4）→ <strong>ALNS</strong> 深挖精修（模块 5）→ 全靠模块 1 那台<strong>仿真解码器</strong>打分，最后 <strong>CP-SAT</strong> 定标尺。这就是 LLM4DRD 的优化内核。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module6">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="正解。广搜阶段要评估成百上千个候选，每个都跑完整仿真会拖垮预算；用便宜的近似评估器初筛，只把宝贵的完整仿真算力留给晋级的少数精英——这是典型的计算预算分配。"
+                   data-explanation-wrong="不是因为近似评估更准（它其实更粗），也不是精确仿真不能用于早期。关键是数量级：广搜候选太多，用精确仿真评估每一个成本承受不起。">
+                <h3 class="quiz-question">为什么广搜阶段用近似评估、只在晋级后才用精确仿真？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为近似评估比精确仿真更准确</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>广搜候选数量巨大，全用精确仿真成本承受不起；便宜工具初筛、贵工具精修，是计算预算分配</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>精确仿真无法处理多目标</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-c"
+                   data-explanation-right="对。CP-SAT 慢到无法用于大实例日常排产，但它能在小实例上给出『真正的最优』。有了这个可信基准，才能回答『我们的启发式解到底离最优有多远』——它的价值是校准，不是生产。"
+                   data-explanation-wrong="既然 CP-SAT 在大实例上会爆炸，它显然不是用来替代启发式做日常排产的。保留它是因为启发式本身不保证最优，需要一把可信的尺子来量质量。">
+                <h3 class="quiz-question">既然 CP-SAT 在大实例上慢到不可用，为什么系统还保留它？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>用它替代启发式做所有日常排产</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为它比 NSGA-III 更快</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>在小实例上求出真正最优，当作衡量启发式解质量的可信标尺</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module6')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module6')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🎓</div>
+              <div class="callout-content">
+                <strong class="callout-title">课程结束</strong>
+                <p>你已经拆完了 LLM4DRD 的优化内核：从规则固定派工，到 Pareto 前沿，到 NSGA-III、ALNS 与精确求解。现在再回头看 <code>optimization/</code> 目录里的每个文件，它们该各归其位了。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>
+  </main>
+
+</body>
+</html>

@@ -1,0 +1,144 @@
+    <section class="module" id="module-2" style="background: var(--color-bg)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">02</span>
+          <h1 class="module-title">规则固定派工：把"决策"变成"旋钮"</h1>
+          <p class="module-subtitle">优化算法搜的不是排程，而是这套派工规则的参数。先看懂规则本身。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">一台机器的分诊台</h2>
+            <p>机器空闲的那一刻，面前排着一堆已就绪的工序。谁先上？这和<strong>急诊分诊</strong>一模一样：护士不是先到先看，而是给每个病人打一个"危急分"，分高的先进抢救室。派工规则就是那张打分表。</p>
+            <p>系统内置 <strong>11 条</strong>这样的规则。每条都是一个纯函数：输入工序的<span class="term" data-definition="Feature，特征。用几个数字刻画一道工序当前的处境，例如还有多急、剩多少活、加工要多久。规则就靠这些数字打分。">特征</span>，输出一个分数，越大越优先。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · core/rules.py</span>
+<pre><code><span class="code-line"><span class="code-keyword">def</span> <span class="code-function">atc_rule</span>(op, machine, f, shop):</span>
+<span class="code-line">    processing = f[<span class="code-string">"processing_time"</span>]</span>
+<span class="code-line">    <span class="code-keyword">if</span> processing &lt;= <span class="code-number">0</span>:</span>
+<span class="code-line">        <span class="code-keyword">return</span> <span class="code-number">1000.0</span></span>
+<span class="code-line">    slack = <span class="code-function">max</span>(f[<span class="code-string">"slack"</span>], <span class="code-number">0.0</span>)</span>
+<span class="code-line">    <span class="code-keyword">return</span> (<span class="code-number">1.0</span> / processing) * math.<span class="code-function">exp</span>(-slack / (<span class="code-number">2.0</span> * processing + <span class="code-number">0.01</span>))</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · ATC 规则</span>
+                <div class="translation-lines">
+                  <p class="tl">ATC = 表观延迟成本。它同时看两件事：这活多快能干完、还有多少余量。</p>
+                  <p class="tl">加工时间为 0 的异常工序直接给个极大分，让它立刻走人。</p>
+                  <p class="tl"><span class="term" data-definition="Slack，松弛/余量 = 交期 − 当前时间 − 剩余加工时间。为负说明已经来不及了，越负越紧急。">松弛</span>取非负部分：真正紧急（松弛为负）的会被下一行的指数放大。</p>
+                  <p class="tl">分数 = (1÷加工时间) × e 的 (−松弛/加工时间) 次方。</p>
+                  <p class="tl">翻译：<strong>活越短、越紧急，分越高</strong>——短活先清、快烧眉毛的插队。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🩺</div>
+              <div class="callout-content">
+                <strong class="callout-title">11 条规则 = 11 种分诊哲学</strong>
+                <p>EDD 只看交期（谁快到期谁先），SPT 只看谁活最短，KIT_AWARE 偏爱配套齐全的，BOTTLENECK 让瓶颈工序优先……每条都是一种"该在乎什么"的立场。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">从"选一条规则"到"调一台调音台"</h2>
+            <p>只有 11 条固定规则太死板。真正的杀招是：把打分公式<strong>参数化</strong>成 16 个特征的加权和。每个特征配一个权重，就像调音台上的 16 个推子——推子的组合，定义出无穷多种派工风格。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🎚️</div>
+              <div class="callout-content">
+                <strong class="callout-title">这一步是全局关键</strong>
+                <p>一旦规则变成"16 个权重"，"设计一条好规则"就变成了"找一组好权重"——而找一组好数字，正是优化算法最擅长的事。<strong>模块 4、5、6 优化的，全是这组权重。</strong></p>
+              </div>
+            </div>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/approx_eval.py</span>
+<pre><code><span class="code-line">score_components = {</span>
+<span class="code-line">    <span class="code-string">"urgency"</span>: features[<span class="code-string">"urgency"</span>] / self.time_scale,</span>
+<span class="code-line">    <span class="code-string">"slack"</span>: -features[<span class="code-string">"slack"</span>] / self.time_scale,</span>
+<span class="code-line">    <span class="code-string">"processing_time"</span>: -features[<span class="code-string">"processing_time"</span>] / self.time_scale,</span>
+<span class="code-line">    <span class="code-comment"># ... 共 16 个特征分量</span></span>
+<span class="code-line">}</span>
+<span class="code-line">score = <span class="code-function">sum</span>(candidate.feature_weights.<span class="code-function">get</span>(name, <span class="code-number">0.0</span>)</span>
+<span class="code-line">            * score_components.<span class="code-function">get</span>(name, <span class="code-number">0.0</span>) <span class="code-keyword">for</span> name <span class="code-keyword">in</span> FEATURE_NAMES)</span>
+<span class="code-line">score += candidate.op_bias.<span class="code-function">get</span>(op.id, <span class="code-number">0.0</span>)</span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · 权重 × 特征 = 分数</span>
+                <div class="translation-lines">
+                  <p class="tl">先把每个特征归一化成一个"分量"（除以尺度，让不同量纲可比）。</p>
+                  <p class="tl">紧急度正向加分；松弛越小越加分（前面带负号）。</p>
+                  <p class="tl">加工时间前带负号 → 活越短越加分。</p>
+                  <p class="tl">总共 16 个这样的分量，覆盖交期、装配关键度、瓶颈邻接等。</p>
+                  <p class="tl"><strong>核心一行</strong>：分数 = 候选的 16 个权重 与 16 个特征分量的<span class="term" data-definition="两组数字对应相乘再相加，得到一个数。这里是把 16 个权重和 16 个特征分量配对相乘求和。">点积</span>。</p>
+                  <p class="tl">再叠加 op_bias：针对个别关键工序的微调偏置。</p>
+                  <p class="tl">一句话：<strong>一组权重（candidate）= 一条派工规则</strong>。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">"候选解"到底是什么</h2>
+            <p>于是优化算法眼里的一个"解"，就是下面这个 <span class="term" data-definition="候选参数。优化算法搜索的基本单位：一组特征权重 + 一组 ALNS 算子偏好，代表一种派工策略。它经过仿真解码后才变成一张排程。">CandidateParameters</span>：一小包数字，而不是一张排程。排程要等它被解码器跑过才生成。</p>
+
+            <div class="badge-list stagger-children">
+              <div class="badge-item animate-in"><code class="badge-code">feature_weights</code><span class="badge-desc">16 维特征权重——决定派工打分的"性格"，是被优化的主战场</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">destroy_weights</code><span class="badge-desc">对各"破坏算子"的偏好（模块 5 的 ALNS 会用到）</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">repair_weights</code><span class="badge-desc">对各"修复算子"的偏好</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">op_bias</code><span class="badge-desc">对个别关键工序的定点微调偏置</span></div>
+              <div class="badge-item animate-in"><code class="badge-code">seed_rule_name</code><span class="badge-desc">混入一条内置规则作"底色"，稳住搜索起点</span></div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module2">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="对。processing_time 分量前带负号（活越短分越高），想让长活先上，就得把这个权重调成负的，抵消并反转默认偏好。这正是『调旋钮』的思维。"
+                   data-explanation-wrong="回到那行点积：分数 = 权重 × 特征分量。processing_time 分量本身对短活有利（带负号），要改变行为必须动它对应的权重，而不是别的特征。">
+                <h3 class="quiz-question">现在你想让"加工时间长的工序"反而优先（比如先啃硬骨头）。基于参数化打分，你会怎么调？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把 urgency（紧急度）权重调大</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把 processing_time 的权重调成负值，反转它默认"偏爱短活"的方向</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>换一台机器</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-a"
+                   data-explanation-right="正是关键。把规则写成『16 个权重的点积』后，寻找好规则 = 在 16 维实数空间里找一个好点，而搜索连续数值空间正是遗传算法、邻域搜索这类优化器的主场。"
+                   data-explanation-wrong="再想想为什么要费劲参数化。不是为了跑更快，也不是为了绕过约束——是为了把『设计规则』这个创造性难题，转化成『搜一组数字』这个优化器能自动干的活。">
+                <h3 class="quiz-question">把派工规则参数化成"16 维权重"，对后续优化最根本的意义是什么？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>把"设计一条好规则"变成"在数值空间里搜一组好权重"，交给优化算法自动完成</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>让仿真解码器跑得更快</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>避免机器故障带来的重排</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module2')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module2')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>现在每个"解"都能跑出一排 KPI。但完工快的方案往往延期多，反之亦然——到底哪个才算"最优"？下一个模块引入多目标世界里的核心概念：<strong>Pareto 前沿</strong>。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>

@@ -1,0 +1,155 @@
+    <section class="module" id="module-4" style="background: var(--color-bg)">
+      <div class="module-content">
+        <header class="module-header animate-in">
+          <span class="module-number">04</span>
+          <h1 class="module-title">NSGA-III：用"参考点"驾驭多目标进化</h1>
+          <p class="module-subtitle">遗传算法负责进化候选权重，参考点负责让前沿铺得又满又匀。</p>
+        </header>
+
+        <div class="module-body">
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">进化论，用在一堆权重上</h2>
+            <p><span class="term" data-definition="NSGA = Non-dominated Sorting Genetic Algorithm，非支配排序遗传算法。一类模仿自然选择的多目标优化器：维护一个『种群』（一批候选解），每代交叉变异出后代，再择优存活，逐代逼近 Pareto 前沿。">NSGA</span> 是一类<span class="term" data-definition="Genetic Algorithm，遗传算法。把候选解当成『个体』，通过交叉（混合两个父代）、变异（随机扰动）产生后代，用『适者生存』筛选，一代代逼近好解。">遗传算法</span>。这里的"个体"就是模块 2 那包权重（CandidateParameters）。每一代：交叉变异产生后代 → 仿真解码打分 → 择优存活。难点全在最后一步——<strong>怎么择优</strong>。</p>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">🖼️</div>
+              <div class="callout-content">
+                <strong class="callout-title">策展人的难题</strong>
+                <p>你是画展策展人，展厅（目标空间）很大，展位（种群名额）有限，投稿（候选解）成百上千。若只挑"最惊艳"的，它们可能全是同一风格、挤在展厅一角。高明的策展人会<strong>把作品均匀铺满每个区域</strong>——这正是 NSGA-III 相比老版 NSGA-II 的升级点。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">第一刀：非支配排序，分层</h2>
+            <p>先把整个种群按支配关系剥洋葱：谁也不被支配的是第 0 层（当前最强前沿），剥掉后剩下里谁也不被支配的是第 1 层……存活名额从第 0 层往下按层填。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · optimization/nsga3_core.py</span>
+<pre><code><span class="code-line">selected_indices, last_front = [], []</span>
+<span class="code-line"><span class="code-keyword">for</span> front <span class="code-keyword">in</span> fronts:</span>
+<span class="code-line">    <span class="code-keyword">if</span> <span class="code-function">len</span>(selected_indices) + <span class="code-function">len</span>(front) &lt;= population_size:</span>
+<span class="code-line">        selected_indices.<span class="code-function">extend</span>(front)</span>
+<span class="code-line">    <span class="code-keyword">else</span>:</span>
+<span class="code-line">        last_front = front  <span class="code-comment"># 装不下的临界层</span></span>
+<span class="code-line">        <span class="code-keyword">break</span></span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话</span>
+                <div class="translation-lines">
+                  <p class="tl">从最强的第 0 层开始，一层层往存活名单里塞。</p>
+                  <p class="tl">只要整层都塞得下，就整层收编——它们都是当前的非支配精英。</p>
+                  <p class="tl">直到遇到一层"塞一半就满了"——这层叫临界层（last_front）。</p>
+                  <p class="tl">临界层里该留谁、该舍谁？<strong>这才是 NSGA-III 真正的用武之地。</strong></p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">第二刀：参考点 + niche，保多样性</h2>
+            <p>面对临界层，老版 NSGA-II 用"拥挤度距离"（谁周围空谁留）。但目标一多，拥挤度就失灵。NSGA-III 改用 <span class="term" data-definition="Reference Points，参考点。在目标空间里按结构化方式（Das-Dennis 单纯形格点）均匀撒下的一组方向标。每个候选解会被关联到最近的那条参考方向上。">参考点</span>——像在展厅地面预先划好均匀的网格，每个候选解归属到最近的一个格子。</p>
+
+            <div class="translation-block animate-in">
+              <div class="translation-code">
+                <span class="translation-label">CODE · nsga3_core.py · _niche_select</span>
+<pre><code><span class="code-line"><span class="code-keyword">while</span> <span class="code-function">len</span>(selected) &lt; population_size <span class="code-keyword">and</span> remaining:</span>
+<span class="code-line">    niche_min = <span class="code-function">min</span>(selected_by_ref[i] <span class="code-keyword">for</span> i <span class="code-keyword">in</span> ...)</span>
+<span class="code-line">    niche_indices = [i <span class="code-keyword">for</span> i <span class="code-keyword">in</span> ... <span class="code-keyword">if</span> selected_by_ref[i] == niche_min]</span>
+<span class="code-line">    <span class="code-comment"># 从『最空』的参考点里，挑一个离它最近的候选补进来</span></span>
+<span class="code-line">    selected.<span class="code-function">append</span>(chosen_candidate)</span>
+<span class="code-line">    selected_by_ref[chosen_reference] += <span class="code-number">1</span></span></code></pre>
+              </div>
+              <div class="translation-english">
+                <span class="translation-label">大白话 · niche 保育</span>
+                <div class="translation-lines">
+                  <p class="tl">还没填满就继续：先找出目前<strong>关联解最少</strong>的那些参考点（最空的格子）。</p>
+                  <p class="tl"><span class="term" data-definition="Niche，生态位。这里指一个参考点方向。niche 保育 = 优先照顾解最稀疏的方向，防止种群全部收敛到前沿的某一小段。">niche</span> 保育：优先照顾这些冷清方向，而不是继续往热闹的地方堆。</p>
+                  <p class="tl">从最空的格子里，挑一个离该参考方向最近的候选，补进存活名单。</p>
+                  <p class="tl">这个格子计数 +1，下一轮它就没那么"空"了，注意力转向别处。</p>
+                  <p class="tl">结果：存活者被<strong>均匀地摊在整条前沿上</strong>，而不是挤成一坨。</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout callout-info">
+              <div class="callout-icon">🆚</div>
+              <div class="callout-content">
+                <strong class="callout-title">为什么是 NSGA-III 而不是 II</strong>
+                <p>目标数 ≥ 3 时，几乎所有解都互不支配、"拥挤度"区分不开谁疏谁密，NSGA-II 的多样性机制会崩。参考点用<strong>固定的几何骨架</strong>强行撑开前沿，正好对症这个车间的多目标场景。</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">一代进化的全流程</h2>
+            <div class="flow-animation" data-steps='[
+              {"highlight":"flow-actor-1","label":"父代种群：一批候选权重。两两竞标 + 交叉变异，生出一批后代。"},
+              {"highlight":"flow-actor-2","label":"每个后代交给仿真解码器跑一遍，得到目标向量。","packet":true,"from":"actor-1","to":"actor-2"},
+              {"highlight":"flow-actor-3","label":"父代 + 后代合并，做非支配排序分层。","packet":true,"from":"actor-2","to":"actor-3"},
+              {"highlight":"flow-actor-4","label":"整层收编精英；临界层用参考点 niche 挑选，保证前沿铺匀。","packet":true,"from":"actor-3","to":"actor-4"},
+              {"highlight":"flow-actor-1","label":"存活者成为下一代父代。循环往复，前沿越推越好。","packet":true,"from":"actor-4","to":"actor-1"}
+            ]'>
+              <div class="flow-actors">
+                <div class="flow-actor" id="flow-actor-1"><div class="flow-actor-icon">🧬</div><span>交叉变异</span></div>
+                <div class="flow-actor" id="flow-actor-2"><div class="flow-actor-icon">⚙️</div><span>仿真评估</span></div>
+                <div class="flow-actor" id="flow-actor-3"><div class="flow-actor-icon">🧅</div><span>非支配分层</span></div>
+                <div class="flow-actor" id="flow-actor-4"><div class="flow-actor-icon">📐</div><span>参考点择优</span></div>
+              </div>
+              <div class="flow-packet" id="flow-packet"></div>
+              <div class="flow-step-label" id="flow-label">点击"下一步"，走完 NSGA-III 的一代</div>
+              <div class="flow-controls">
+                <button class="btn flow-next-btn">下一步</button>
+                <button class="btn flow-reset-btn">重来</button>
+                <span class="flow-progress"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="screen animate-in">
+            <h2 class="screen-heading">检验一下理解</h2>
+            <div class="quiz-container" id="quiz-module4">
+              <div class="quiz-question-block"
+                   data-correct="opt-b"
+                   data-explanation-right="正是核心。临界层里的解几乎都互不支配，光比目标值好坏无法拉开——若只挑某一段最好的，种群会收敛到前沿一小块。参考点强制往『最空的方向』补人，才能把整条前沿撑开、铺匀。"
+                   data-explanation-wrong="临界层的解通常已经互不支配了，『谁目标值更好』根本分不出高下，还会让种群扎堆。NSGA-III 在这里追求的是多样性/覆盖，不是单纯的收敛。">
+                <h3 class="quiz-question">临界层装不下时，NSGA-III 为什么不直接挑"目标值最好"的那些解，而要绕道用参考点？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>因为算目标值太慢</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>临界层里解大多互不支配、目标值分不出高下，只挑"最好"会让种群扎堆前沿一小段；参考点强制补充稀疏方向，保证前沿铺匀</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>参考点能让算法更快收敛到单个最优解</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <div class="quiz-question-block"
+                   data-correct="opt-a"
+                   data-explanation-right="对。这个车间要同时权衡总延迟、Makespan、主订单延误率、利用率等多个目标。目标一多，NSGA-II 赖以保多样性的拥挤度距离就失效，所以换成基于参考点的 NSGA-III。"
+                   data-explanation-wrong="选型理由不是种群大小或速度，而是目标维度。三个及以上目标时拥挤度距离会退化，这正是 NSGA-III 用参考点替代拥挤度的动机。">
+                <h3 class="quiz-question">项目选 NSGA-III 而非更常见的 NSGA-II，最主要是因为这个排产问题的什么特点？</h3>
+                <div class="quiz-options">
+                  <button class="quiz-option" data-value="opt-a" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>目标多（≥3 个），拥挤度距离在高维目标下失效，需要参考点来保持前沿多样性</span></button>
+                  <button class="quiz-option" data-value="opt-b" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>种群规模特别大</span></button>
+                  <button class="quiz-option" data-value="opt-c" onclick="selectOption(this)"><div class="quiz-option-radio"></div><span>NSGA-III 每代计算更省时间</span></button>
+                </div>
+                <div class="quiz-feedback"></div>
+              </div>
+
+              <button class="quiz-check-btn" onclick="checkQuiz('quiz-module4')">看看答案</button>
+              <button class="quiz-reset-btn" onclick="resetQuiz('quiz-module4')">再试一次</button>
+            </div>
+
+            <div class="callout callout-accent">
+              <div class="callout-icon">➡️</div>
+              <div class="callout-content">
+                <strong class="callout-title">下一站</strong>
+                <p>NSGA-III 擅长"广度"——把前沿铺满整个空间。但它对单个好解的"深度打磨"较弱。这份精雕细琢的活，交给 <strong>ALNS</strong>：破坏、修复、再破坏。</p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </section>

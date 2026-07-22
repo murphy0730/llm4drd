@@ -1,107 +1,86 @@
 # LLM4DRD 智能调度平台
 
-基于论文 *"LLM-Assisted Automatic Dispatching Rule Design for Dynamic Flexible Assembly Flow Shop Scheduling"* 的完整 Python 实现。
+> 用大语言模型（LLM）自动设计调度规则，把「动态柔性装配流水车间」的排产、优化、在线重排和可视化做成一站式工具。
 
-使用大语言模型（LLM）双专家框架自动设计调度规则，结合仿真引擎、多目标优化、在线调度与精确求解，提供从实例生成到 Web 可视化的一站式解决方案。
+论文 *"LLM-Assisted Automatic Dispatching Rule Design for Dynamic Flexible Assembly Flow Shop Scheduling"* 的完整 Python 实现：**LLM 双专家框架**自动进化调度规则，配套离散事件仿真、NSGA-II 多目标优化、OR-Tools 精确求解、事件驱动在线调度，以及一个开箱即用的 Web 前端。
 
----
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-REST%20API-009688?logo=fastapi&logoColor=white)
+![API](https://img.shields.io/badge/REST%20端点-69-informational)
+![Tests](https://img.shields.io/badge/测试文件-34-success)
+![Updated](https://img.shields.io/badge/最近更新-2026--07-blue)
+![License](https://img.shields.io/badge/License-待补充-lightgrey)
 
-## 目录结构
+**适合谁用**：需要在有交期、有配套（kit）、有机器停机/故障的车间里做智能排产的研究者与工程师；想复现或扩展这篇论文的算法研究团队；需要「仿真 + 优化 + 在线调度」端到端 Demo 的中文开发者。
 
-```
-llm4drd_platform/
-├── config.py              配置管理 (config.json + 环境变量)
-├── config.json            LLM 及数据库配置
-├── demo.py                完整演示脚本 (9 个步骤)
-├── __main__.py            入口: python -m llm4drd_platform
-│
-├── core/                  核心层
-│   ├── models.py          数据模型 (Order/Task/Operation/Machine/Downtime)
-│   ├── simulator.py       离散事件仿真引擎 (堆优化, 增量就绪队列)
-│   └── rules.py           11 条内置调度规则 + 规则编译器
-│
-├── knowledge/             知识表示层
-│   └── graph.py           有向异构图 (订单→任务→工序→机器)
-│
-├── scheduling/            调度引擎层
-│   └── online.py          在线调度引擎 (事件驱动, 支持故障注入与动态重排)
-│
-├── optimization/          多目标优化层
-│   ├── pareto.py          帕累托优化器 + NSGA-II 真实前沿搜索
-│   └── exact.py           OR-Tools CP-SAT 精确求解器
-│
-├── ai/                    AI 进化层
-│   └── evolution.py       LLM 双专家进化引擎 (LLM-A 算法 + LLM-S 评分)
-│
-├── data/                  数据层
-│   ├── db.py              SQLite 数据库 (规则库/实例/停机记录)
-│   └── generator.py       可配置问题实例生成器
-│
-├── api/                   API 服务层
-│   └── server.py          FastAPI REST 服务 (~20 个端点)
-│
-└── frontend/
-    └── index.html         React 单页前端 (甘特图/帕累托/在线调度)
-```
-
----
-
-## 快速开始
-
-### 安装依赖
+**最短上手（60 秒）**：
 
 ```bash
+git clone git@github.com:murphy0730/llm4drd.git
+cd llm4drd
 pip install -r requirements.txt
-# 可选: 精确求解功能
-pip install ortools>=9.7
+python run_server.py          # 自动打开浏览器 → http://127.0.0.1:8888/
 ```
 
-### 运行演示
+> 无需 LLM API Key 即可运行——LLM 进化部分会自动切换到模板回退模式。
 
-```bash
-# 无需 LLM API Key (使用模板回退)
-python -m llm4drd_platform
-
-# 使用真实 LLM
-export LLM_API_KEY=sk-xxx
-export LLM_BASE_URL=https://api.openai.com/v1   # 或任意 OpenAI 兼容端点
-export LLM_MODEL=gpt-4o
-python -m llm4drd_platform
-```
-
-### 启动 Web 服务
-
-```bash
-uvicorn llm4drd_platform.api.server:app --reload --port 8888
-# 前端: http://127.0.0.1:8888/
-```
+**统一入口**：仓库 <https://github.com/murphy0730/llm4drd> ｜ 问题反馈 <https://github.com/murphy0730/llm4drd/issues> ｜ 交互式 API 文档 `http://127.0.0.1:8888/docs`（服务启动后）。
 
 ---
 
-## 核心功能
+## ✨ 项目亮点
 
-### 1. 数据模型 (`core/models.py`)
+- **LLM 自动设计调度规则**：LLM-A（算法专家）生成/交叉/变异规则代码，LLM-S（评分专家）评估质量，混合适应度 `0.7 × 目标值 + 0.3 × LLM 评分`。没有 API Key 也能跑（模板回退）。
+- **四种求解范式一套数据**：11 条内置优先级规则（PDR）、帕累托枚举 / NSGA-II 真实前沿、OR-Tools CP-SAT 精确求解、事件驱动在线调度，共享同一份车间实例与仿真引擎。
+- **面向真实车间**：支持子件加工 + 总装检测的层次结构、工序前置约束、按工艺分组的机器、绝对时间段停机窗口、运行中注入机器故障并动态重排。
+- **能扛大实例**：统一规范图 + 不可变计算投影 + SQLite 两级缓存（进程内 L1 / 磁盘 L2），针对约 1000 订单、2 万+ 工序的规模做过性能优化与保护阈值。
+- **开箱即用的 Web 端**：React 单页前端（`frontend/`）提供甘特图、帕累托前沿、在线调度与评审视图；后端暴露 **69 个 REST 端点**，自带 Swagger 文档。
 
-业务驱动的层次结构：
+---
 
+## 📦 安装
+
+```bash
+pip install -r requirements.txt        # 核心依赖
+pip install "ortools>=9.7"             # 可选：启用 OR-Tools CP-SAT 精确求解
 ```
-订单 (Order)
-  └── 任务 (Task)  [子件加工 + 主任务(总装检测)]
-        └── 工序 (Operation)  [前置关系, 指定工艺类型/机器]
-机器 (Machine)  [按工艺类别分组, 含停机窗口 Downtime]
+
+- 开发与测试环境：**Python 3.14**（建议 Python ≥ 3.10）。
+- 核心依赖：`networkx` `fastapi` `uvicorn` `pydantic v2` `openai`（兼容任意 OpenAI 协议端点）`openpyxl` `python-multipart`。
+
+---
+
+## 🚀 快速开始
+
+### 方式一：启动 Web 平台（推荐）
+
+```bash
+python run_server.py
+# macOS / Linux；自动检测端口占用并打开浏览器 → http://127.0.0.1:8888/
 ```
 
-- `ShopFloor`：完整车间模型，含加速索引
-- `Downtime`：绝对时间段停机（计划性/非计划性）
-- `Machine.next_start_time(t)` / `compute_effective_end(start, dur)`：自动绕过停机窗口
+Windows 可用 `start_server.ps1`。前端页面为 `frontend/index_v2.html`（服务根路径 `/` 即返回该页）。
 
-### 2. 仿真引擎 (`core/simulator.py`)
+### 方式二：命令行完整演示
 
-高性能离散事件仿真：
+```bash
+# 无需 LLM API Key（模板回退）
+python -m llm4drd_platform
 
-- 基于 `heapq` 的事件队列，增量就绪队列（避免全量扫描）
-- 自动跳过机器停机时段
-- KPI：Makespan、总延迟、主订单延误率、关键资源利用率、总等待时间
+# 使用真实 LLM（任意 OpenAI 兼容端点）
+export LLM_API_KEY=sk-xxx
+export LLM_BASE_URL=https://api.deepseek.com/v1   # 或 OpenAI / 其它兼容端点
+export LLM_MODEL=deepseek-chat
+python -m llm4drd_platform
+```
+
+`python -m llm4drd_platform` 会运行 `demo.py`，串联「实例生成 → 仿真 → 帕累托 → 精确求解 → LLM 进化 → 在线调度」的完整流程。
+
+---
+
+## 🧭 使用示例
+
+生成实例并用内置规则跑一次仿真：
 
 ```python
 from llm4drd_platform.data.generator import InstanceGenerator
@@ -110,28 +89,57 @@ from llm4drd_platform.core.rules import BUILTIN_RULES
 
 shop = InstanceGenerator(seed=42).generate(num_orders=10)
 result = Simulator(shop, BUILTIN_RULES["ATC"]).run()
-print(result.to_dict())
+print(result.to_dict())   # Makespan / 总延迟 / 主订单延误率 / 资源利用率 …
 ```
 
-### 3. 内置调度规则 (`core/rules.py`)
+NSGA-II 搜索真实帕累托前沿：
 
-11 条优先级调度规则（PDR）：
+```python
+from llm4drd_platform.optimization.pareto import NSGA2Optimizer
 
-| 规则 | 说明 |
-|------|------|
-| EDD | 最早交期优先 |
-| SPT | 最短加工时间 |
-| LPT | 最长加工时间 |
-| CR | 关键比率 |
-| ATC | 表观延迟成本 |
-| FIFO | 先到先服务 |
-| MST | 最小松弛时间 |
-| PRIORITY | 订单优先级 |
-| KIT_AWARE | 配套感知 |
-| BOTTLENECK | 瓶颈感知 |
-| COMPOSITE | 加权综合 |
+nsga2 = NSGA2Optimizer(shop, ["total_tardiness", "makespan"], pop_size=30, generations=20)
+solutions = nsga2.run()
+pareto = [s for s in solutions if s.rank == 0]
+```
 
-自定义规则：
+LLM 双专家进化调度规则（自动读取 `LLM_API_KEY`，无 Key 则模板回退）：
+
+```python
+from llm4drd_platform.ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
+
+engine = EvolutionEngine(
+    shop=shop, llm=LLMInterface(),
+    config=EvolutionConfig(population_size=8, max_generations=15),
+    db_path="llm4drd.db", objective="total_tardiness",
+)
+result = engine.run()
+print(f"最优 fitness: {result.best_fitness}")
+```
+
+在线调度：推进时间、注入故障、动态重排：
+
+```python
+from llm4drd_platform.scheduling.online import OnlineSchedulerV3
+
+scheduler = OnlineSchedulerV3(shop, rule_name="ATC")
+scheduler.advance(20.0)                        # 推进 20 小时
+scheduler.on_breakdown("turning_1", repair_at=30.0)   # 注入故障
+scheduler.on_repair("turning_1")
+status = scheduler.reschedule("COMPOSITE")     # 动态切换规则重排
+```
+
+### 内置调度规则（11 条）
+
+| 规则 | 说明 | 规则 | 说明 |
+|------|------|------|------|
+| EDD | 最早交期优先 | MST | 最小松弛时间 |
+| SPT | 最短加工时间 | PRIORITY | 订单优先级 |
+| LPT | 最长加工时间 | KIT_AWARE | 配套感知 |
+| CR | 关键比率 | BOTTLENECK | 瓶颈感知 |
+| ATC | 表观延迟成本 | COMPOSITE | 加权综合 |
+| FIFO | 先到先服务 | | |
+
+自定义规则（编译一段 Python 打分函数即可）：
 
 ```python
 from llm4drd_platform.core.rules import compile_rule_from_code
@@ -142,169 +150,100 @@ def my_rule(op, machine, features, shop):
 """)
 ```
 
-特征字典 `features` 包含：`slack`, `remaining`, `processing_time`, `due_date`, `urgency`, `progress`, `priority`, `is_main`, `wait_time`, `prereq_ratio`, `machine_busy_time`
-
-### 4. 多目标优化 (`optimization/`)
-
-**帕累托枚举**（`ParetoOptimizer`）：对 11 条内置规则做非支配排序
-
-**NSGA-II**（`NSGA2Optimizer`）：加权集成规则空间搜索，真实帕累托前沿
-
-```python
-from llm4drd_platform.optimization.pareto import NSGA2Optimizer
-
-nsga2 = NSGA2Optimizer(shop, ["total_tardiness", "makespan"], pop_size=30, generations=20)
-solutions = nsga2.run()
-pareto = [s for s in solutions if s.rank == 0]
-```
-
-支持目标：`total_tardiness`, `makespan`, `main_order_tardy_count`, `main_order_tardy_ratio`, `avg_utilization`, `critical_utilization`, `total_wait_time`, `avg_flowtime`, `max_tardiness`
-
-**精确求解**（`ExactSolver`）：OR-Tools CP-SAT，IntervalVar + NoOverlap + 前置约束
-
-```python
-from llm4drd_platform.optimization.exact import ExactSolver
-
-result = ExactSolver(shop, objectives=["makespan"], time_limit_s=60).solve()
-# result.status: OPTIMAL | FEASIBLE | INFEASIBLE | UNKNOWN | ERROR
-```
-
-### 5. AI 进化引擎 (`ai/evolution.py`)
-
-LLM 双专家框架：
-
-- **LLM-A**（算法专家）：生成、交叉、变异调度规则 Python 代码
-- **LLM-S**（评分专家）：评估规则的调度质量
-- 混合适应度：`0.7 × 目标值 + 0.3 × LLM评分`
-- 无 API Key 时自动切换为模板回退模式
-
-```python
-from llm4drd_platform.ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
-
-llm = LLMInterface()  # 自动读取 LLM_API_KEY 环境变量
-engine = EvolutionEngine(shop=shop, llm=llm,
-                         config=EvolutionConfig(population_size=8, max_generations=15),
-                         db_path="llm4drd.db", objective="total_tardiness")
-result = engine.run()
-print(f"最优 fitness: {result.best_fitness}")
-```
-
-### 6. 在线调度 (`scheduling/online.py`)
-
-事件驱动在线调度器：
-
-```python
-from llm4drd_platform.scheduling.online import OnlineSchedulerV3
-
-scheduler = OnlineSchedulerV3(shop, rule_name="ATC")
-status = scheduler.advance(20.0)        # 推进 20 小时
-scheduler.on_breakdown("turning_1", repair_at=30.0)  # 注入故障
-status = scheduler.advance(15.0)
-scheduler.on_repair("turning_1")
-status = scheduler.reschedule("COMPOSITE")  # 动态切换规则
-```
-
-### 7. 统一图上下文 (`knowledge/`)
-
-`CanonicalGraphBuilder` 是订单、任务、工序与资源关系的唯一业务解释器。在同一份规范图之上，系统生成两个投影：展示投影继续兼容现有 NetworkX/图谱 API；不可变计算投影 `GraphContext` 为混合优化器提供紧凑关系、特征和分组索引。
-
-计算上下文无需预构建。首次请求自动构建并原子写入 SQLite，后续请求依次命中进程内 L1 或 SQLite L2；指纹、版本或完整性不匹配时会清除两份投影并自动完整重建一次，第二次仍失败则显式终止。
-
-### 8. 数据库 (`data/db.py`)
-
-SQLite（WAL 模式）：
-
-- `RuleStore`：规则库增删改查
-- `InstanceStore`：车间实例序列化存储
-- `GraphStore`：图数据存储
-- `GraphArtifactStore`：展示/计算图投影的原子持久化
-- `DowntimeStore`：机器停机记录管理
+`features` 可用键：`slack` `remaining` `processing_time` `due_date` `urgency` `progress` `priority` `is_main` `wait_time` `prereq_ratio` `machine_busy_time`。
 
 ---
 
-## REST API
+## 📁 项目结构
 
-启动后访问 `http://127.0.0.1:8888/docs` 查看交互式 API 文档。
-
-| 路径 | 方法 | 说明 |
-|------|------|------|
-| `/api/generate` | POST | 生成问题实例 |
-| `/api/simulate` | POST | 运行仿真 |
-| `/api/pareto` | POST | 计算帕累托前沿 |
-| `/api/pareto/nsga2` | POST | 启动 NSGA-II (后台任务) |
-| `/api/pareto/nsga2/status/{id}` | GET | 查询进度 |
-| `/api/exact/solve` | POST | 启动精确求解 |
-| `/api/exact/status/{id}` | GET | 查询进度 |
-| `/api/train` | POST | 启动 LLM 进化 |
-| `/api/online/start` | POST | 初始化在线调度器 |
-| `/api/online/advance` | POST | 推进时间 |
-| `/api/online/breakdown` | POST | 注入机器故障 |
-| `/api/online/repair` | POST | 恢复机器 |
-| `/api/online/reschedule` | POST | 动态重排 |
-| `/api/online/status` | GET | 获取当前状态 |
-| `/api/downtime` | GET/POST | 停机记录管理 |
-| `/api/downtime/{id}` | PUT/DELETE | 停机记录编辑 |
-| `/api/graph/build` | POST | 提交后台图谱构建任务 |
-| `/api/graph/status/{id}` | GET | 查询图谱规模、阶段、进度与错误 |
+```
+llm4drd/
+├── run_server.py         Web 服务入口（注册包 + 自动打开浏览器）
+├── __main__.py           CLI 入口：python -m llm4drd_platform → demo.py
+├── demo.py               端到端演示脚本
+├── config.py / config.json   LLM 与数据库配置
+│
+├── core/                 数据模型 + 离散事件仿真引擎 + 11 条调度规则
+├── knowledge/            规范异构图（订单→任务→工序→机器）+ 计算投影 GraphContext
+├── scheduling/           事件驱动在线调度引擎（故障注入 / 动态重排）
+├── optimization/         帕累托 / NSGA-II / OR-Tools CP-SAT 精确求解
+├── ai/                   LLM 双专家进化引擎（LLM-A 算法 + LLM-S 评分）
+├── data/                 SQLite 数据层（规则库/实例/停机/图投影）+ 实例生成器
+├── api/                  FastAPI REST 服务（server.py，69 个端点）
+├── frontend/             React 单页前端（index_v2.html / app_v2.js / app_v2.css）
+├── docgen/               排产结果文档生成
+├── tools/                基准测试与校验脚本（benchmark_* / verify_*）
+├── tests/                34 个测试文件（pytest）
+└── docs/                 论文 PDF、设计与实现文档
+```
 
 ---
 
-## 配置
+## 🌐 REST API
 
-`config.json` 或环境变量：
+服务启动后打开 `http://127.0.0.1:8888/docs` 查看交互式文档（Swagger）。共 **69 个端点**，按模块划分：
 
-```json
-{
-  "llm": {
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "",
-    "model": "gpt-4o",
-    "max_tokens": 2048,
-    "timeout": 60
-  },
-  "database": {
-    "path": "llm4drd.db"
-  }
-}
-```
+| 模块前缀 | 能力 |
+|----------|------|
+| `/api/instance/*` | 实例生成、详情、CSV/Excel 导入导出、订单/任务/工序/机器编辑、校验 |
+| `/api/graph/*` | 后台图谱构建、状态查询、节点/边/邻居检索、按订单过滤 |
+| `/api/simulate/*` | 仿真、对比、参考解、Excel 导出 |
+| `/api/optimize/hybrid/*` | 混合优化任务：状态/结果/排程/机器利用率/评审数据 |
+| `/api/pareto/*` · `/api/exact/*` | 帕累托 / NSGA-II / OR-Tools CP-SAT（后台任务 + 进度查询）|
+| `/api/ai/pareto/*` · `/api/train` | LLM 推荐/问答 / 规则进化训练与日志 |
+| `/api/online/*` | 在线调度：推进、故障、恢复、重排、状态 |
+| `/api/workflow/*` | 四步流程进度与评审 |
+| `/api/downtime/*` · `/api/config/llm` · `/api/health` | 停机记录管理、LLM 配置、健康检查 |
 
-环境变量（优先级高于配置文件）：`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM4DRD_DB`, `LLM4DRD_CONFIG`
+---
 
-图上下文发布模式：
+## ⚙️ 配置
 
-- `LLM4DRD_GRAPH_CONTEXT_MODE=legacy`：使用原 NetworkX 优化路径（默认）。
-- `LLM4DRD_GRAPH_CONTEXT_MODE=shadow`：比较新旧关系和特征，但仍用旧路径求解。
-- `LLM4DRD_GRAPH_CONTEXT_MODE=active`：优化器直接使用缓存的不可变上下文；当前需显式启用。
+`config.json` 或环境变量（环境变量优先级更高）：
 
-`/api/graph/meta` 和 `/api/optimize/hybrid/status/{id}` 会返回缓存层级、指纹前缀、构建/加载时间及失效原因。切换模式后需重启服务；SQLite 新表可保留，无需降级数据库。
+| 环境变量 | 说明 |
+|----------|------|
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | LLM 端点配置（OpenAI 兼容协议）|
+| `LLM4DRD_DB` / `LLM4DRD_CONFIG` | 数据库与配置文件路径 |
+| `LLM4DRD_GRAPH_CONTEXT_MODE` | 计算图上下文模式：`legacy`（默认）/ `shadow`（影子对比）/ `active`（直接使用缓存不可变上下文）|
+| `LLM4DRD_GRAPH_TIMEOUT_S` | 图谱构建 + 保存总超时，默认 180 秒 |
+| `LLM4DRD_GRAPH_WARN_EDGES` / `LLM4DRD_GRAPH_MAX_EDGES` | 关系边预警（默认 30 万）/ 安全上限（默认 200 万）|
+| `LLM4DRD_GRAPH_MAX_NODES` | 节点安全上限，默认 10 万 |
 
-基准命令：
+> ⚠️ 安全提示：`config.json` 请勿写入真实 API Key 后提交——本仓库会自动提交推送到 GitHub，密钥会外泄。建议改用环境变量。
+
+---
+
+## ❓ 适用场景
+
+- **算法研究**：复现/扩展 LLM 自动设计调度规则的论文实验，对比 PDR、元启发式与精确解。
+- **车间排产原型**：为带交期、配套与停机约束的柔性装配流水车间快速搭建可视化排产 Demo。
+- **在线调度实验**：模拟机器故障、动态到单等扰动，验证不同规则的动态重排效果。
+- **多目标权衡分析**：在 makespan、总延迟、主订单延误率、资源利用率等目标间求帕累托前沿。
+
+---
+
+## 🛠️ 开发
 
 ```bash
-python -m llm4drd.tools.benchmark_graph_context --sizes 80,500,2500 --runs 7 --warmup 2 --seed 42 --mode compare --output-dir llm4drd/docs/benchmarks
+pytest tests/                 # 运行测试（共 34 个测试文件）
+
+# 图上下文缓存基准（中/大型实例温启动至少 2× 加速为验收阈值）
+python -m llm4drd.tools.benchmark_graph_context \
+    --sizes 80,500,2500 --runs 7 --warmup 2 --seed 42 \
+    --mode compare --output-dir docs/benchmarks
 ```
 
-验收阈值：中/大型实例温启动至少加速 2 倍，固定评估端到端回退不超过 3%，峰值内存不超过 legacy 的 1.25 倍，序列化方案签名必须一致。
-
-大规模图谱构建保护可通过以下环境变量调整：
-
-- `LLM4DRD_GRAPH_TIMEOUT_S`：构建与保存总超时，默认 180 秒
-- `LLM4DRD_GRAPH_WARN_EDGES`：关系边预警阈值，默认 300,000
-- `LLM4DRD_GRAPH_MAX_EDGES`：关系边安全上限，默认 2,000,000
-- `LLM4DRD_GRAPH_MAX_NODES`：节点安全上限，默认 100,000
+`tools/` 下另有 `benchmark_simulation_perf.py`、`verify_v2_full.py` 等基准与端到端校验脚本。
 
 ---
 
-## 依赖
+## 🤝 贡献
 
-```
-networkx>=3.0       # 异构图
-fastapi>=0.100.0    # Web 框架
-uvicorn>=0.23.0     # ASGI 服务器
-pydantic>=2.0.0     # 数据验证
-openai>=1.0.0       # LLM 客户端 (兼容任意 OpenAI 协议端点)
-python-multipart    # 文件上传
-openpyxl>=3.1.0     # Excel 导出
-ortools>=9.7        # CP-SAT 精确求解 (可选)
-```
-"# llm4drd-platform" 
+欢迎通过 [Issue](https://github.com/murphy0730/llm4drd/issues) 反馈问题或提交 PR。提交前请先运行 `pytest tests/` 确保测试通过。
+
+---
+
+## 📝 License
+
+待补充（仓库暂未包含 LICENSE 文件）。
