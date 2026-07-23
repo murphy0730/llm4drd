@@ -3138,6 +3138,9 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 task["phase"] = "graph_context_loading"
                 task["message"] = "正在加载或构建统一图上下文"
                 task["updated_at"] = time.time()
+                _log_hybrid_event(
+                    task, "加载统一图上下文 · 大规模实例首次构建可能耗时较长"
+                )
                 graph_context, graph_context_diagnostics = (
                     graph_context_service.get_or_build(
                         current_shop,
@@ -3152,6 +3155,9 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 if graph_context_diagnostics.cache_level == "built":
                     task["phase"] = "graph_context_building"
                     task["message"] = "统一图上下文已构建并完成完整性校验"
+                    _log_hybrid_event(task, "统一图上下文构建完成 · 已通过完整性校验")
+                else:
+                    _log_hybrid_event(task, "统一图上下文命中缓存 · 直接复用")
                 task["updated_at"] = time.time()
 
             optimizer = HybridNSGA3ALNSOptimizer(
@@ -3199,6 +3205,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             task["phase"] = "coarse"
             task["message"] = "正在建立基线并初始化候选池"
             task["updated_at"] = time.time()
+            _log_hybrid_event(task, "开始近似广搜 · 建立基线并初始化候选池")
 
             def _progress(snapshot: dict):
                 task = _hybrid_tasks[task_id]

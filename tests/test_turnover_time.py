@@ -1,7 +1,4 @@
-"""工序流转等待时间（turnover_time）语义测试。
-
-对应设计：docs/superpowers/specs/2026-07-16-operation-turnover-time-design.md
-"""
+"""工序流转等待时间（turnover_time）语义测试。"""
 import io
 import sqlite3
 import tempfile

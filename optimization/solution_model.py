@@ -139,8 +139,7 @@ class OptimizationSolution:
             objectives=dict(self.objectives),
             metrics=dict(self.metrics),
             # schedule / analytics_summary 构建后按不可变约定共享，克隆不复制；
-            # 需要修改的调用方必须先自行 list()/dict() 复制（审计见
-            # docs/superpowers/plans/2026-07-16-sim-optimizer-performance.md Task 5）
+            # 需要修改的调用方必须先自行 list()/dict() 复制。
             schedule=self.schedule,
             feasible=self.feasible,
             schedule_signature=self.schedule_signature,

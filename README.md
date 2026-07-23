@@ -130,16 +130,73 @@ status = scheduler.reschedule("COMPOSITE")     # 动态切换规则重排
 
 ### 内置调度规则（11 条）
 
-| 规则 | 说明 | 规则 | 说明 |
-|------|------|------|------|
-| EDD | 最早交期优先 | MST | 最小松弛时间 |
-| SPT | 最短加工时间 | PRIORITY | 订单优先级 |
-| LPT | 最长加工时间 | KIT_AWARE | 配套感知 |
-| CR | 关键比率 | BOTTLENECK | 瓶颈感知 |
-| ATC | 表观延迟成本 | COMPOSITE | 加权综合 |
-| FIFO | 先到先服务 | | |
+11 条固定派工规则定义在 `core/rules.py` 的 `BUILTIN_RULES`（第 6–63 行），函数签名统一为
+`rule(op, machine, features, shop)`，返回**分数越高越优先排**（见下方"派工统一约定"）。
 
-自定义规则（编译一段 Python 打分函数即可）：
+#### 11 条规则及其打分公式
+
+| # | 规则 | 分数公式（代码原文） | 谁优先（人话） | 用到的特征 |
+|---|------|----------------------|----------------|-----------|
+| 1 | **EDD** | `-f["due_date"]` | 交期最早的工序 | `due_date` |
+| 2 | **SPT** | `-f["processing_time"]` | 本工序加工最短的 | `processing_time` |
+| 3 | **LPT** | `f["processing_time"]` | 本工序加工最长的 | `processing_time` |
+| 4 | **CR** | `remaining<=0 → 1000`；否则 `-(f["slack"]/f["remaining"])` | 临界比最小（最紧急）的 | `slack`, `remaining` |
+| 5 | **ATC** | `processing<=0 → 1000`；否则 `(1/processing)·exp(-slack/(2·processing+0.01))` | 短工序且松弛小（紧迫）的，明星规则 | `processing_time`, `slack` |
+| 6 | **FIFO** | `f.get("wait_time", 0.0)` | 在就绪队列等待最久的（先到） | `wait_time` |
+| 7 | **MST** | `-f["slack"]` | 松弛最小的（最赶） | `slack` |
+| 8 | **PRIORITY** | `f["priority"]*10 + f["urgency"]` | 业务优先级高 + 紧急的 | `priority`, `urgency` |
+| 9 | **KIT_AWARE** | `f["prereq_ratio"]*5 + f["urgency"]*2 + f["priority"]` | 前驱齐套度高 + 紧急 + 高优先 | `prereq_ratio`, `urgency`, `priority` |
+| 10 | **BOTTLENECK** | `f["is_main"]*8 + f["urgency"]*3 + f["priority"]*2 - f["processing_time"]*0.1` | 主订单 + 紧急 + 高优先 | `is_main`, `urgency`, `priority`, `processing_time` |
+| 11 | **COMPOSITE** | `urgency_bonus + priority*2 + prereq_ratio*4 + is_main*5 - processing_time*0.05 - tooling_demand*0.1 - personnel_demand*0.1`（其中 `urgency_bonus = abs(slack)*3` 当 `slack<0`，否则 0） | 综合业务重要性（超期重赏，长/高耗资源罚） | `slack`, `priority`, `prereq_ratio`, `is_main`, `processing_time`, `tooling_demand`, `personnel_demand` |
+
+> **派工统一约定**：`core/simulator.py:222` 算分后用 `candidate[:3] > best[:3]` 取**最大分数**优先，
+> 同分按剩余工时小、再 `op.id` 兜底。因此规则里凡"最小者优先"都用**负号**翻成"分数最大优先"。
+> CR、ATC 在可能除零/越界时直接给 `1000`（最高优先）做兜底。
+
+#### 16 维特征及其含义
+
+这 16 维特征（`optimization/solution_model.py` 的 `FEATURE_NAMES`）是派工决策的输入表征，
+由仿真状态（`core/simulator.py:_features`）与知识图谱（`knowledge/context.py:operation_features`）提取：
+
+| # | 特征名 | 含义 | 来源 | 越大表示 |
+|---|--------|------|------|----------|
+| 1 | `urgency` | 紧迫度 = `max(0, -slack)`，已超期时间 | 仿真状态 | 越紧急 |
+| 2 | `slack` | 松弛时间 = `due_date - now - remaining` | 仿真状态 | 越宽裕（<0 已超期） |
+| 3 | `remaining` | 所属任务令剩余总工时 | 仿真状态 | 活越多 |
+| 4 | `processing_time` | 本工序自身加工工时 = `op.work_remaining` | 仿真状态 | 本工序越长 |
+| 5 | `priority` | 业务优先级 = `order.priority` | 仿真状态 | 业务越重要 |
+| 6 | `is_main` | 是否主订单（0/1） | 仿真状态 | 1=主订单 |
+| 7 | `wait_time` | 进入就绪队列后的已等待时间 | 仿真状态 | 等得越久 |
+| 8 | `prereq_ratio` | 前驱齐套比（前驱完成比例，当前恒为 1.0） | 仿真状态 | 越齐套 |
+| 9 | `machine_load` | 候选机器累计忙时 = `machine.total_busy_time` | 仿真状态 | 机器越忙 |
+| 10 | `tooling_demand` | 所需工装类型数 | 仿真状态 | 工装占用越多 |
+| 11 | `personnel_demand` | 所需人员技能数 | 仿真状态 | 人力占用越多 |
+| 12 | `predecessor_depth` | 依赖图上该工序最长前驱链深度（÷操作数归一化） | 知识图谱 | 前驱越多越深 |
+| 13 | `assembly_criticality` | 装配关键度：主订单 1.0 / 主订单祖先 0.78 / 含主任务 0.32 / 其他 0.18 | 知识图谱 | 装配越关键 |
+| 14 | `shared_resource_degree` | 共享资源争用度 = `min(3, 1/可上机数 + 工装稀缺 + 人员稀缺 + 0.25·工装类型数 + 0.25·人员数)` | 知识图谱 | 资源争用越强 |
+| 15 | `bottleneck_adjacency` | 瓶颈邻接度 = `min(1, 0.55·关键设备比 + 0.45·(1/可上机数))` | 知识图谱 | 越靠近瓶颈设备 |
+| 16 | `due_date` | 交期时间戳（工序派生交期，缺失回退任务令/订单交期） | 仿真状态 | 交期越晚 |
+
+> 注：第 1–11、16 共 12 个来自车间/仿真状态；第 12–15 这 4 个来自知识图谱的异构图结构特征。
+> `machine_load` 在 `FEATURE_NAMES` 里的名字，实际由 `machine_busy_time` 别名喂入。
+
+#### 规则与特征的关系
+
+**方向：特征在上游，规则在下游。** 16 维特征是对工序当前状态的"体检报告"，由车间/图谱状态
+独立提取；11 条规则（以及 16 维权重点积可学习派工函数 `approx_eval._priority_score`）都是这些
+特征的**消费者**：
+
+- 每条规则只读取它关心的几个特征算分（如 EDD 只读 `due_date`，ATC 读 `processing_time`+`slack`），
+  规则**不生成**任何特征；
+- 16 维权重点积函数读取**全部 16 维**特征做加权求和，权重是优化解 `CandidateParameters.feature_weights`
+  的一部分，是可学习的；
+- 唯一"相遇"处是 seed 混合（`approx_eval.py:185`）：可学习函数可把某条固定规则的分数以 0.12
+  权重叠加进自身分数做初始化——仍是"规则→分数"，不是"规则→特征"。
+
+> 简言之：**11 条规则 ≠ 16 维特征的来源**；二者共享同一份特征输入。规则是写死的"指标组合公式"
+> （只读其中几个特征），可学习函数则是算法搜出来的"指标组合公式"（读全部 16 维特征）。
+
+自定义规则（编译一段 Python 打分函数即可，复用同样的 `features` 输入）：
 
 ```python
 from llm4drd_platform.core.rules import compile_rule_from_code
@@ -150,7 +207,10 @@ def my_rule(op, machine, features, shop):
 """)
 ```
 
-`features` 可用键：`slack` `remaining` `processing_time` `due_date` `urgency` `progress` `priority` `is_main` `wait_time` `prereq_ratio` `machine_busy_time`。
+`features` 可用键：即上方 **16 维特征** 全部可用（`urgency` `slack` `remaining` `processing_time`
+`priority` `is_main` `wait_time` `prereq_ratio` `machine_load` `tooling_demand` `personnel_demand`
+`predecessor_depth` `assembly_criticality` `shared_resource_degree` `bottleneck_adjacency` `due_date`）；
+此外仿真器还会附带 `progress`、`critical_slack`、`external_due_date` 等辅助键。
 
 ---
 
@@ -171,10 +231,9 @@ llm4drd/
 ├── data/                 SQLite 数据层（规则库/实例/停机/图投影）+ 实例生成器
 ├── api/                  FastAPI REST 服务（server.py，69 个端点）
 ├── frontend/             React 单页前端（index_v2.html / app_v2.js / app_v2.css）
-├── docgen/               排产结果文档生成
 ├── tools/                基准测试与校验脚本（benchmark_* / verify_*）
 ├── tests/                34 个测试文件（pytest）
-└── docs/                 论文 PDF、设计与实现文档
+└── docs/                 当前优化方案、规则参考与性能基准
 ```
 
 ---

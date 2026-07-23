@@ -29,7 +29,6 @@ class GraphFingerprintTests(unittest.TestCase):
     def test_turnover_time_changes_feature_not_topology(self):
         """turnover_time 进入 instance_hash/feature_hash 输入清单，但不改变 topology_hash。
 
-        对应 docs/superpowers/specs/2026-07-16-unified-graph-context-design.md §7.3：
         流转等待时间与加工时间并列为 feature_hash 输入，不改变任何边的存在性。
         """
         left = make_graph_context_shop()

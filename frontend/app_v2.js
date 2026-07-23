@@ -3159,7 +3159,7 @@ function renderSimulatePage() {
   requestAnimationFrame(() => mountGantts());
 }
 
-// 多目标选择：紧凑 chip 流式网格（目标很多时自然换行），方向 min/max 小字标注
+// 多目标选择：两列对齐网格（目标很多时行列整齐），方向 min/max 右置小字标注
 function renderObjectiveSelectors() {
   const catalog = asArray(app.optimizeObjectiveCatalog);
   return `
@@ -3169,7 +3169,7 @@ function renderObjectiveSelectors() {
         return `
         <label class="obj-chip ${on ? "on" : ""}" title="${escapeHtml(item.description || "")}">
           <input type="checkbox" data-objective-key="${escapeHtml(item.key)}" ${on ? "checked" : ""} hidden>
-          <span class="obox">✓</span>${escapeHtml(item.label || getObjectiveLabel(item.key))}<small>${escapeHtml(item.direction || "")}</small>
+          <span class="obox">✓</span><span class="oname">${escapeHtml(item.label || getObjectiveLabel(item.key))}</span><small>${escapeHtml(item.direction || "")}</small>
         </label>`;
       }).join("")}
     </div>
@@ -3230,10 +3230,12 @@ function renderOptimizePage() {
   container.innerHTML = `<div class="opt-layout">${configCard}<div class="stack">${statusStack}</div></div>`;
 }
 
-// 前置检查条：每页唯一的状态通栏（替代旧的大标题 Header 区）
+// 前置检查条：只保留警告/错误/进行中的提示；成功（ok）状态不再占用页面顶部通栏，
+// 完成态统一由侧栏步骤右侧的绿点表达（见 renderFlowbar 的 lamp 同步）。
 function renderPrecheck(targetId, tone, innerHtml) {
   const box = el(targetId);
   if (!box) return;
+  if (tone === "ok") innerHtml = "";
   box.innerHTML = innerHtml ? `<div class="precheck ${tone}">${innerHtml}</div>` : "";
 }
 
@@ -4635,6 +4637,7 @@ function renderInteractiveGraph() {
             onChange: async (id) => { await loadGraphOrder(id); return renderCurrentPage(); },
           })}
         </label>
+        <button class="btn btn-ghost btn-xs graph-rebuild-btn" type="button" data-action="build-graph">重新构建</button>
       </div>
       ${breadcrumb}
       <div class="graph-filters">
@@ -4654,10 +4657,6 @@ function renderInteractiveGraph() {
       <div class="graph-main">
         <div class="graph-canvas-wrap">
           <div class="graph-cytoscape-canvas" data-graph-canvas></div>
-          <div class="graph-canvas-overlay">
-            ${GRAPH_NODE_ORDER.map((type) => `<span><i style="display:inline-block;width:9px;height:9px;border-radius:${type === "machine" ? "3px" : "50%"};background:${graphTypeColor(type)};margin-right:4px"></i>${escapeHtml(graphTypeLabel(type))}</span>`).join("")}
-            <span style="color:var(--text-faint)">实线=结构 · 虚线=资源可行</span>
-          </div>
           <div class="graph-zoom-ctl">
             <button class="btn btn-ghost btn-xs" type="button" data-action="fit-graph-view">适配</button>
             <button class="btn btn-ghost btn-xs" type="button" data-action="reset-graph-view">重置</button>
