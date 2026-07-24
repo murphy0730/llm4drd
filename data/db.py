@@ -301,6 +301,28 @@ def init_db(db_path: str = DB_PATH):
                 created_at   TEXT NOT NULL,
                 PRIMARY KEY (inst_version, rule_name)
             );
+            CREATE TABLE IF NOT EXISTS baseline_solutions (
+                id                 TEXT PRIMARY KEY,
+                emphasis           TEXT NOT NULL,
+                objective_keys     TEXT NOT NULL,
+                feature_names      TEXT NOT NULL,
+                feature_weights    TEXT NOT NULL,
+                scale_json         TEXT NOT NULL,
+                op_bias            TEXT DEFAULT '{}',
+                destroy_weights    TEXT DEFAULT '{}',
+                repair_weights     TEXT DEFAULT '{}',
+                destroy_fraction   REAL DEFAULT 0.3,
+                reached_objectives TEXT NOT NULL,
+                baseline_compare   TEXT NOT NULL,
+                snapshot_id        TEXT,
+                snapshot_version   INTEGER,
+                batch_id           TEXT NOT NULL,
+                created_at         TEXT NOT NULL,
+                status             TEXT NOT NULL DEFAULT 'active',
+                source             TEXT DEFAULT 'learned'
+            );
+            CREATE INDEX IF NOT EXISTS idx_baseline_status ON baseline_solutions(status);
+            CREATE INDEX IF NOT EXISTS idx_baseline_batch ON baseline_solutions(batch_id);
             CREATE INDEX IF NOT EXISTS idx_rules_type ON rules(problem_type, objective);
             CREATE INDEX IF NOT EXISTS idx_rules_active ON rules(is_active);
             CREATE INDEX IF NOT EXISTS idx_results_rule ON schedule_results(rule_id);
@@ -467,6 +489,125 @@ class RuleReferenceCacheStore:
             )
         self._prune_old(version)
         self._mem[(version, rule_name)] = payload
+
+
+# 基准方案库落库/读取时的 JSON 列（存 dict/list，读回时反序列化）。
+_BASELINE_JSON_FIELDS = (
+    "objective_keys",
+    "feature_names",
+    "feature_weights",
+    "scale_json",
+    "op_bias",
+    "destroy_weights",
+    "repair_weights",
+    "reached_objectives",
+    "baseline_compare",
+)
+# 落库列顺序（save_batch 按此拼 INSERT，与建表 schema 对齐）。
+_BASELINE_COLUMNS = (
+    "id", "emphasis", "objective_keys", "feature_names", "feature_weights",
+    "scale_json", "op_bias", "destroy_weights", "repair_weights",
+    "destroy_fraction", "reached_objectives", "baseline_compare",
+    "snapshot_id", "snapshot_version", "batch_id", "created_at", "status", "source",
+)
+
+
+class BaselineSolutionStore:
+    """基准方案库：夜间冷搜索蒸馏出的派工参数方案，供白天优化热启动。
+
+    与 RuleReferenceCacheStore/WorkflowProgressStore 一样，这张表不是实例数据，
+    写入方法绝不调用 _bump_instance_version()——递增版本号会把 _active_shop() 缓存
+    连同刚建好的库一起作废。方案自带 feature_names/scale_json 护栏，加载方在投影前
+    自行校验版本与尺度，故不依赖 inst_version 做失效。
+
+    批次轮转（save_batch）：写入新批前把当前 active 转 previous、既有 previous 删除，
+    始终保留"最新 active + 上一批 previous"两批，避免某晚只跑出单条时无历史对照。
+    """
+
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+
+    @staticmethod
+    def _row_to_dict(row) -> dict:
+        record = dict(row)
+        for field in _BASELINE_JSON_FIELDS:
+            raw = record.get(field)
+            if raw is None:
+                continue
+            try:
+                record[field] = json.loads(raw)
+            except (TypeError, ValueError):
+                logger.warning("baseline_solutions[%s] 字段 %s 内容损坏，置空", record.get("id"), field)
+                record[field] = None
+        return record
+
+    @staticmethod
+    def _row_to_params(record: dict) -> tuple:
+        def _dump(value) -> str:
+            return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True)
+
+        return (
+            record["id"],
+            record["emphasis"],
+            _dump(record.get("objective_keys")),
+            _dump(record.get("feature_names")),
+            _dump(record.get("feature_weights")),
+            _dump(record.get("scale_json")),
+            _dump(record.get("op_bias")),
+            _dump(record.get("destroy_weights")),
+            _dump(record.get("repair_weights")),
+            float(record.get("destroy_fraction", 0.3)),
+            _dump(record.get("reached_objectives")),
+            _dump(record.get("baseline_compare")),
+            record.get("snapshot_id"),
+            record.get("snapshot_version"),
+            record["batch_id"],
+            record.get("created_at") or datetime.now().isoformat(timespec="seconds"),
+            record.get("status", "active"),
+            record.get("source", "learned"),
+        )
+
+    def rotate_history(self, conn) -> None:
+        """保留最新+上一批：既有 previous 删除，当前 active 降级为 previous。"""
+        conn.execute("DELETE FROM baseline_solutions WHERE status='previous'")
+        conn.execute("UPDATE baseline_solutions SET status='previous' WHERE status='active'")
+
+    def save_batch(self, batch_id: str, rows: list[dict]) -> int:
+        """轮转历史后写入一批新的 active 方案。返回写入条数。"""
+        placeholders = ",".join(["?"] * len(_BASELINE_COLUMNS))
+        columns = ",".join(_BASELINE_COLUMNS)
+        with get_db(self.db_path) as conn:
+            self.rotate_history(conn)
+            count = 0
+            for row in rows:
+                record = dict(row)
+                record.setdefault("batch_id", batch_id)
+                record["batch_id"] = batch_id
+                record["status"] = "active"
+                conn.execute(
+                    f"INSERT INTO baseline_solutions ({columns}) VALUES ({placeholders})",
+                    self._row_to_params(record),
+                )
+                count += 1
+        return count
+
+    def load_active(self) -> list[dict]:
+        with get_db(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT * FROM baseline_solutions WHERE status='active' ORDER BY emphasis"
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def has_active(self) -> bool:
+        with get_db(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM baseline_solutions WHERE status='active' LIMIT 1"
+            ).fetchone()
+        return row is not None
+
+    def clear_all(self) -> None:
+        with get_db(self.db_path) as conn:
+            conn.execute("DELETE FROM baseline_solutions")
 
 
 class DowntimeStore:

@@ -39,6 +39,9 @@ from .solution_model import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class _ProcessBackendUnavailable(Exception):
     """进程池基础设施故障（起不来/连接断）；不含任务自身的异常。"""
 
@@ -93,6 +96,11 @@ class HybridConfig:
     baseline_rule_name: str = "ATC"
     # "process": 批量评估用进程池绕开 GIL；"thread": 沿用线程池。
     parallel_backend: str = "process"
+    # 白天热启动：从基准方案库追加 active 方案作为种子。库空/加载失败自动退化为
+    # 现有行为（图谱引导 + 11 规则 + ATC），见 _load_baseline_seeds / _seed_population。
+    baseline_seeds_enabled: bool = True
+    baseline_db_path: str | None = None  # None → 用 data.db 默认 DB_PATH
+    baseline_scale_tolerance: float = 0.20  # 尺度校验阈值：偏差超此比例则跳过该方案
 
 
 @dataclass
@@ -1410,8 +1418,84 @@ class HybridNSGA3ALNSOptimizer:
             "shared_resource_repair": shared_resource_repair,
         }
 
+    def _load_baseline_seeds(self) -> list[CandidateParameters]:
+        """从基准方案库加载 active 方案作为热启动种子候选。
+
+        库空 / 未建表 / 加载失败 / 版本或尺度护栏不过 → 返回 []，白天优化退化为现有行为。
+        护栏（提案 §4.4 / §4.7.2）：
+          - feature_names 与当前 FEATURE_NAMES 不一致 → 跳过（特征定义已变，权重会错位）；
+          - scale_json 与当前实例现算尺度偏差超阈值 → 跳过（尺度耦合导致等效行为漂移）。
+        """
+        if not self.config.baseline_seeds_enabled:
+            return []
+        try:
+            from ..data.db import DB_PATH, BaselineSolutionStore
+
+            store = BaselineSolutionStore(self.config.baseline_db_path or DB_PATH)
+            rows = store.load_active()
+        except Exception as exc:  # 未建表 / DB 缺失 / 损坏：静默退化，不影响优化
+            logger.debug("基准方案库加载失败，退化为现有种子：%s", exc)
+            return []
+
+        current_names = list(FEATURE_NAMES)
+        current_scales = {
+            "time_scale": self.time_scale,
+            "due_scale": self.due_scale,
+            "priority_scale": self.priority_scale,
+        }
+        tolerance = self.config.baseline_scale_tolerance
+        candidates: list[CandidateParameters] = []
+        for row in rows:
+            try:
+                if list(row.get("feature_names") or []) != current_names:
+                    logger.debug("基准方案 %s feature_names 不匹配，跳过", row.get("id"))
+                    continue
+                if not self._scale_within_tolerance(row.get("scale_json") or {}, current_scales, tolerance):
+                    logger.debug("基准方案 %s 尺度偏差超阈值，跳过", row.get("id"))
+                    continue
+                candidates.append(self._candidate_from_baseline_row(row))
+            except Exception as exc:
+                logger.debug("基准方案 %s 重建失败，跳过：%s", row.get("id"), exc)
+                continue
+        if candidates:
+            logger.info("基准方案库热启动：注入 %d 个种子", len(candidates))
+        return candidates
+
+    @staticmethod
+    def _scale_within_tolerance(stored: dict, current: dict, tolerance: float) -> bool:
+        for key, current_value in current.items():
+            stored_value = stored.get(key)
+            if stored_value is None:
+                continue
+            denom = max(abs(float(current_value)), 1e-9)
+            if abs(float(stored_value) - float(current_value)) / denom > tolerance:
+                return False
+        return True
+
+    def _candidate_from_baseline_row(self, row: dict) -> CandidateParameters:
+        weights = row.get("feature_weights") or {}
+        feature_weights = {name: float(weights.get(name, 0.0)) for name in FEATURE_NAMES}
+        destroy = row.get("destroy_weights") or {}
+        repair = row.get("repair_weights") or {}
+        destroy_weights = {name: float(destroy.get(name, 1.0)) for name in DESTROY_OPERATORS}
+        repair_weights = {name: float(repair.get(name, 1.0)) for name in REPAIR_OPERATORS}
+        op_bias = {str(k): float(v) for k, v in (row.get("op_bias") or {}).items()}
+        return CandidateParameters(
+            feature_weights=feature_weights,
+            destroy_weights=destroy_weights,
+            repair_weights=repair_weights,
+            op_bias=op_bias,
+            destroy_fraction=float(row.get("destroy_fraction", 0.3)),
+            seed_rule_name=None,
+            graph_profile="balanced",
+        )
+
     def _seed_population(self) -> list[CandidateParameters]:
         seeds: list[CandidateParameters] = []
+        # 基准方案插在最前：去重与截断时优先保留（提案修订后 §4.5）。
+        baseline_seeds = self._load_baseline_seeds()
+        for candidate in baseline_seeds:
+            seeds.append(self._project_candidate_to_graph_space(candidate, "balanced", blend=0.22))
         for profile_name, guide in self.graph_guides.items():
             seeds.append(self._candidate_from_guide(profile_name, guide.get("seed_rule"), intensity=0.6))
             seeds.append(self._candidate_from_guide(profile_name, "COMPOSITE", intensity=0.4))
@@ -1423,6 +1507,10 @@ class HybridNSGA3ALNSOptimizer:
         unique: dict[str, CandidateParameters] = {}
         for seed in seeds:
             unique.setdefault(seed.signature(), seed)
+        # 防截断：有基线时上调 population_size，确保基线与现有种子都进种群、互不挤占。
+        # 库空时不触发，population_size 维持不变，行为与改前逐字节一致。
+        if baseline_seeds and len(unique) > self.config.population_size:
+            self.config.population_size = len(unique)
         population = list(unique.values())[: self.config.population_size]
         while len(population) < self.config.population_size:
             population.append(self._mutate_candidate(self.rng.choice(list(unique.values())), scale=0.45))

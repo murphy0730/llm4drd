@@ -27,6 +27,7 @@ from ..data.db import (
     DowntimeStore,
     WorkflowProgressStore,
     RuleReferenceCacheStore,
+    BaselineSolutionStore,
     shifts_to_payload,
 )
 from ..data.graph_artifact_store import GraphArtifactStore
@@ -65,10 +66,12 @@ graph_context_service = GraphContextService(graph_artifact_store)
 downtime_store = DowntimeStore()
 workflow_store = WorkflowProgressStore()
 rule_reference_cache_store = RuleReferenceCacheStore()
+baseline_solution_store = BaselineSolutionStore()
 _nsga2_tasks: dict = {}
 _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
 _graph_tasks: dict = {}
+_baseline_tasks: dict = {}
 _latest_hybrid_task_id: Optional[str] = None
 OPTIMIZE_HEARTBEAT_INTERVAL_S = 1.0
 OPTIMIZE_STALL_THRESHOLD_S = 60.0
@@ -2973,6 +2976,98 @@ async def simulate_reference_solutions(req: HeuristicReferenceReq):
             cached_rules.append(rule)
             solutions.append(_reference_view(full, req.objective_keys))
     return {"solutions": solutions, "cached_rules": cached_rules, "missing_rules": missing_rules}
+
+# === Baseline Solution Library（基准方案库）===
+class BaselineBuildReq(BaseModel):
+    time_limit_s: int = 10800
+    generations: int = 1440
+    stagnation_generations: int = 5
+    coarse_time_ratio: float = 0.72
+    seed: int = 42
+    objective_keys: list[str] = [
+        "main_order_tardy_ratio",
+        "critical_active_window_utilization",
+        "avg_flowtime",
+    ]
+
+
+@app.post("/api/baseline/build")
+async def baseline_build(req: BaselineBuildReq):
+    """夜间基准方案库构建（后台任务，不阻塞白天 API）。返回 task_id 供轮询。"""
+    if not shop and not inst_store.has_data():
+        raise HTTPException(400, "请先生成实例")
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+
+    from ..optimization.baseline_build import build_baseline_library
+
+    task_id = str(uuid.uuid4())[:8]
+    _baseline_tasks[task_id] = {
+        "status": "running",
+        "created_at": time.time(),
+        "config": req.model_dump(),
+        "summary": None,
+        "error": None,
+    }
+
+    def _run():
+        try:
+            summary = build_baseline_library(
+                current_shop,
+                objective_keys=req.objective_keys,
+                time_limit_s=req.time_limit_s,
+                generations=req.generations,
+                stagnation_generations=req.stagnation_generations,
+                coarse_time_ratio=req.coarse_time_ratio,
+                seed=req.seed,
+                store=baseline_solution_store,
+            )
+            _baseline_tasks[task_id].update(
+                status="done",
+                summary={
+                    "batch_id": summary["batch_id"],
+                    "extracted": summary["extracted"],
+                    "passed": summary["passed"],
+                    "objective_keys": summary["objective_keys"],
+                    "emphases": [row["emphasis"] for row in summary["rows"]],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("基准方案库构建失败")
+            _baseline_tasks[task_id].update(status="error", error=str(exc))
+
+    threading.Thread(target=_run, name=f"baseline-build-{task_id}", daemon=True).start()
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/baseline/build/{task_id}")
+async def baseline_build_status(task_id: str):
+    task = _baseline_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(404, "未知的构建任务")
+    return task
+
+
+@app.get("/api/baseline/active")
+async def baseline_active():
+    """当前 active 批次的方案概览（供演示下拉/排障使用）。"""
+    rows = baseline_solution_store.load_active()
+    return {
+        "count": len(rows),
+        "solutions": [
+            {
+                "id": row["id"],
+                "emphasis": row["emphasis"],
+                "batch_id": row["batch_id"],
+                "reached_objectives": row["reached_objectives"],
+                "baseline_compare": row["baseline_compare"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ],
+    }
+
 
 # === Exact Reference ===
 @app.get("/api/exact/objectives")
