@@ -31,7 +31,7 @@ from ..data.db import (
 )
 from ..data.graph_artifact_store import GraphArtifactStore
 from ..data.template_builder import build_instance_template_bytes
-from ..knowledge.canonical import compute_graph_fingerprint
+from ..knowledge.canonical import OS_MACHINE_TYPE_ID, compute_graph_fingerprint
 from ..knowledge.context_service import (
     GraphContextMode,
     GraphContextService,
@@ -2236,7 +2236,12 @@ def _estimate_graph_size(current_shop: ShopFloor) -> dict:
     tooling_edges = 0
     personnel_edges = 0
     for op in current_shop.operations.values():
-        machine_edges += len(op.eligible_machine_ids or current_shop._machine_by_type.get(op.process_type, []))
+        machine_ids = op.eligible_machine_ids or current_shop._machine_by_type.get(op.process_type, [])
+        # OS 机器在图谱层归一为单个聚合节点，每工序对 OS 只算 1 条边，
+        # 口径必须与 canonical builder 一致，否则会在预检阶段误触 GRAPH_MAX_EDGES 熔断。
+        non_os = sum(1 for m in machine_ids if current_shop.machines[m].type_id != OS_MACHINE_TYPE_ID)
+        has_os = any(current_shop.machines[m].type_id == OS_MACHINE_TYPE_ID for m in machine_ids)
+        machine_edges += non_os + (1 if has_os else 0)
         tooling_edges += sum(len(current_shop._tooling_by_type.get(type_id, [])) for type_id in op.required_tooling_types)
         personnel_edges += sum(len(current_shop._personnel_by_skill.get(skill_id, [])) for skill_id in op.required_personnel_skills)
     total_edges = structural_edges + machine_edges + tooling_edges + personnel_edges
@@ -3576,11 +3581,14 @@ async def optimize_machine_type_utilization(task_id: str, solution_ids: str):
 def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict], day_hours: float = 24.0) -> dict:
     """按天 × 机器类型的利用率：以偏移 0 为第 0 天起点，按 day_hours 滚动分桶。
 
-    单机类型日利用率 = 该类型当日 busy 时长 /（该类型机器数 × 当日窗口小时数），跨天工序按天切分。
-    返回 {days:[1..n], types:[{type_id,type_name,is_critical,per_day:[util|null]}]}。
+    单机类型日利用率 = 该类型当日占用时长（墙钟 end-start，跨天按天切分）
+                    /（该类型「本方案已排产机器」当日可用工时之和，班次窗口已扣除停机）。
+    分母只统计本方案实际用到的机器，且按班次日历折算，与甘特图机器行/背景遮罩口径一致。
+    返回 {days:[1..n], types:[{type_id,type_name,is_critical,machines_used,machines_total,per_day:[util|null]}]}。
     """
     max_day = -1
     busy: dict[str, dict[int, float]] = {}  # type_id -> {day -> busy hours}
+    used_machines: dict[str, set[str]] = {}  # type_id -> {machine_id}
     for entry in schedule:
         machine_id = entry.get("machine_id")
         start, end = entry.get("start"), entry.get("end")
@@ -3590,6 +3598,7 @@ def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict
         if end <= start:
             continue
         type_id = current_shop.machines[machine_id].type_id
+        used_machines.setdefault(type_id, set()).add(machine_id)
         day_bucket = busy.setdefault(type_id, {})
         day = int(start // day_hours)
         while day * day_hours < end:
@@ -3604,21 +3613,30 @@ def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict
     types: list[dict] = []
     for type_id in sorted(current_shop.machine_types):
         machine_type = current_shop.machine_types[type_id]
-        machines_total = len(current_shop.get_machines_for_type(type_id)) or 1
         day_bucket = busy.get(type_id, {})
         if not day_bucket:
             continue
+        machine_ids = sorted(used_machines.get(type_id, set()))
+        machines = [current_shop.machines[machine_id] for machine_id in machine_ids]
         per_day = []
         for day in range(day_count):
             hours = day_bucket.get(day)
             if hours is None:
                 per_day.append(None)
+                continue
+            day_lo, day_hi = day * day_hours, (day + 1) * day_hours
+            available = sum(machine.available_time_between(day_lo, day_hi) for machine in machines)
+            if available <= 1e-9:
+                # 当日无可用工时却有排产（数据异常）：按满负荷处理
+                per_day.append(1.0)
             else:
-                per_day.append(round(min(1.0, hours / (machines_total * day_hours)), 4))
+                per_day.append(round(min(1.0, hours / available), 4))
         types.append({
             "type_id": type_id,
             "type_name": machine_type.name,
             "is_critical": machine_type.is_critical,
+            "machines_used": len(machine_ids),
+            "machines_total": len(current_shop.get_machines_for_type(type_id)),
             "per_day": per_day,
         })
     return {"days": list(range(1, day_count + 1)), "types": types}

@@ -3,8 +3,12 @@ import math
 import unittest
 from unittest.mock import patch
 
-from llm4drd.core.models import Order, Shift, ShopFloor
-from llm4drd.knowledge.canonical import CanonicalGraphBuilder, compute_graph_fingerprint
+from llm4drd.core.models import (
+    Machine, MachineType, Operation, Order, Shift, ShopFloor, Task,
+)
+from llm4drd.knowledge.canonical import (
+    OS_MACHINE_NODE_ID, CanonicalGraphBuilder, compute_graph_fingerprint,
+)
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 
 
@@ -261,6 +265,63 @@ class CanonicalGraphBuilderTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, [(0, 500, 0, 0)])
+
+
+def make_os_shop() -> ShopFloor:
+    """两台 OS 机器 + 一台普通机器；OP-A 可上两台 OS，OP-B 只上普通机器。"""
+    shop = ShopFloor()
+    shifts = [Shift(day=day, start_hour=0.0, hours=24.0) for day in range(3)]
+    shop.machine_types["OS"] = MachineType("OS", "外协", is_critical=False)
+    shop.machine_types["cut"] = MachineType("cut", "Cut", is_critical=True)
+    shop.machines["OS_1"] = Machine("OS_1", "外协1", "OS", shifts=list(shifts))
+    shop.machines["OS_2"] = Machine("OS_2", "外协2", "OS", shifts=list(shifts))
+    shop.machines["M-C1"] = Machine("M-C1", "Cutter 1", "cut", shifts=list(shifts))
+
+    shop.orders["O-1"] = Order("O-1", "Order 1", release_time=0.0, due_date=40.0, priority=1)
+    task = Task("T-1", "O-1", "Part", True, [], release_time=0.0, due_date=40.0)
+    shop.tasks["T-1"] = task
+    op_a = Operation("OP-A", "T-1", "Outsource", "OS", 4.0, eligible_machine_ids=["OS_1", "OS_2"])
+    op_b = Operation("OP-B", "T-1", "Cut", "cut", 2.0, predecessor_ops=["OP-A"], eligible_machine_ids=["M-C1"])
+    for operation in (op_a, op_b):
+        task.operations.append(operation)
+        shop.operations[operation.id] = operation
+    shop.orders["O-1"].task_ids.append("T-1")
+    shop.orders["O-1"].main_task_id = "T-1"
+    shop.build_indexes()
+    return shop
+
+
+class OsMachineAggregationTests(unittest.TestCase):
+    def test_os_machines_collapse_to_single_node(self):
+        canonical = CanonicalGraphBuilder().build(make_os_shop())
+        machine_nodes = [n for n in canonical.nodes if n.node_type == "machine"]
+        machine_ids = {n.node_id for n in machine_nodes}
+        # 两台 OS 机器归一为单个聚合节点，普通机器保留。
+        self.assertEqual(machine_ids, {OS_MACHINE_NODE_ID, "M:M-C1"})
+        os_node = next(n for n in machine_nodes if n.node_id == OS_MACHINE_NODE_ID)
+        self.assertEqual(os_node.entity_id, "OS")
+        self.assertEqual(os_node.attrs["member_count"], 2)
+
+    def test_operation_links_os_aggregate_with_single_edge(self):
+        canonical = CanonicalGraphBuilder().build(make_os_shop())
+        machine_edges = [
+            (e.source, e.target)
+            for e in canonical.edges
+            if e.edge_type == "machine_eligible"
+        ]
+        # OP-A 可上两台 OS，但只连一条边到聚合节点；OP-B 不受影响。
+        self.assertEqual(
+            sorted(machine_edges),
+            [("OP:OP-A", OS_MACHINE_NODE_ID), ("OP:OP-B", "M:M-C1")],
+        )
+
+    def test_estimate_matches_actual_machine_edges(self):
+        from llm4drd.api.server import _estimate_graph_size
+
+        shop = make_os_shop()
+        canonical = CanonicalGraphBuilder().build(shop)
+        actual = sum(1 for e in canonical.edges if e.edge_type == "machine_eligible")
+        self.assertEqual(_estimate_graph_size(shop)["machine_edges"], actual)
 
 
 if __name__ == "__main__":

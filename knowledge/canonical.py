@@ -14,6 +14,13 @@ ScalarValue: TypeAlias = str | int | float | bool | None
 GRAPH_SCHEMA_VERSION = 1
 GRAPH_BUILDER_VERSION = "canonical-v2"
 
+# OS（外协/共享）类机器在图谱层归一为单个聚合节点，避免上千台机器把
+# machine_eligible 边数撑爆（触发 GRAPH_MAX_EDGES 熔断）并淹没图谱界面。
+# 仿真/优化取可用机器一律走 shop.get_eligible_machines()，不经过图谱边，
+# 故此归一不影响排产产能与结果。
+OS_MACHINE_TYPE_ID = "OS"
+OS_MACHINE_NODE_ID = "M:OS"
+
 
 @dataclass(frozen=True)
 class GraphFingerprint:
@@ -405,7 +412,11 @@ class CanonicalGraphBuilder:
             if progress_callback:
                 progress_callback(processed, total, len(node_order), len(edge_pairs))
 
+        os_machine_ids: list[str] = []
         for machine_id, machine in shop.machines.items():
+            if machine.type_id == OS_MACHINE_TYPE_ID:
+                os_machine_ids.append(machine_id)
+                continue
             machine_type = shop.machine_types.get(machine.type_id)
             add_node(
                 f"M:{machine_id}",
@@ -416,6 +427,20 @@ class CanonicalGraphBuilder:
                     "type_id": machine.type_id,
                     "type_name": machine_type.name if machine_type else "",
                     "is_critical": machine_type.is_critical if machine_type else False,
+                },
+            )
+        if os_machine_ids:
+            os_type = shop.machine_types.get(OS_MACHINE_TYPE_ID)
+            add_node(
+                OS_MACHINE_NODE_ID,
+                "machine",
+                OS_MACHINE_TYPE_ID,
+                {
+                    "label": "外协/OS",
+                    "type_id": OS_MACHINE_TYPE_ID,
+                    "type_name": os_type.name if os_type else "",
+                    "is_critical": os_type.is_critical if os_type else False,
+                    "member_count": len(os_machine_ids),
                 },
             )
 
@@ -550,7 +575,16 @@ class CanonicalGraphBuilder:
             eligible_machine_ids = operation.eligible_machine_ids
             if not eligible_machine_ids:
                 eligible_machine_ids = shop._machine_by_type.get(operation.process_type, [])
+            os_linked = False
             for machine_id in eligible_machine_ids:
+                machine = shop.machines.get(machine_id)
+                if machine is not None and machine.type_id == OS_MACHINE_TYPE_ID:
+                    # OS 机器归一到聚合节点，每工序对 M:OS 只连一条边。
+                    if os_linked:
+                        continue
+                    os_linked = True
+                    add_edge(f"OP:{operation_id}", OS_MACHINE_NODE_ID, "machine_eligible")
+                    continue
                 add_edge(
                     f"OP:{operation_id}",
                     f"M:{machine_id}",

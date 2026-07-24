@@ -241,8 +241,6 @@ function emptyReviewRead() {
     orderId: null,
     schemes: {},
     utilization: null,
-    failedIds: [],
-    failureMessages: {},
     loading: false,
     error: null,
   };
@@ -3562,7 +3560,7 @@ function renderReviewTypeUtilization() {
   const head = `
     <div class="card-head" style="align-items:center">
       <div><h3>机器分类利用率对比 · 当前方案 <span style="color:var(--primary)">${escapeHtml(String(schemeName))}</span></h3>
-      <p>日利用率 = 该类型当日有排产时长 /（该类型机器数 × 当日 24h）；用于定位哪天、哪类机器过载或闲置。点击对比表「◎ 详情」可切换方案。</p></div>
+      <p>日利用率 = 该类型当日排产占用时长 ÷ 当日已排产机器的可用工时（班次扣除停机）；分母只统计本方案实际用到的机器，与下方甘特图机器行口径一致。点击对比表「◎ 详情」可切换方案。</p></div>
       ${legend}
     </div>`;
   if (!candidates.length || !schemeId) {
@@ -3591,7 +3589,11 @@ function renderReviewTypeUtilization() {
         const cls = isBest ? "pct is-best" : v >= 0.9 ? "pct hi" : v < 0.6 ? "pct lo" : "pct";
         return `<td class="${cls}">${formatPercent(v)}</td>`;
       }).join("");
-      return `<tr><td><strong>${escapeHtml(type.type_name)}</strong></td>${cells}</tr>`;
+      const used = type.machines_used, total = type.machines_total;
+      const scale = (used !== undefined && total !== undefined)
+        ? `<br><small class="muted">${escapeHtml(String(used))}/${escapeHtml(String(total))} 台</small>`
+        : "";
+      return `<tr><td><strong>${escapeHtml(type.type_name)}</strong>${scale}</td>${cells}</tr>`;
     }).join("");
     inner = `
       <div class="tbl-wrap util-table-wrap">
@@ -5314,8 +5316,6 @@ async function loadReviewData(selected, orderId = null, includeUtilization = tru
     orderId: selectionChanged ? null : previous.orderId,
     schemes: selectionChanged ? {} : previous.schemes,
     utilization: selectionChanged ? null : previous.utilization,
-    failedIds: selectionChanged ? [] : previous.failedIds,
-    failureMessages: selectionChanged ? {} : previous.failureMessages,
     loading: true,
     error: null,
   };
@@ -5337,8 +5337,6 @@ async function loadReviewData(selected, orderId = null, includeUtilization = tru
       orderId: payload.order_id,
       schemes: payload.schemes || {},
       utilization: payload.type_utilization ?? app.reviewRead.utilization,
-      failedIds: payload.failed_solution_ids || [],
-      failureMessages: payload.failure_messages || {},
       loading: false,
       error: null,
     };

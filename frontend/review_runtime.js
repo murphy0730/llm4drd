@@ -112,41 +112,6 @@
     };
   }
 
-  function escapeHtml(value) {
-    return String(value ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
-  }
-
-  function renderReviewFailureNotes({
-    failedIds,
-    failureMessages,
-    selected,
-    hasData,
-  }) {
-    const selectedItems = Array.isArray(selected) ? selected : [];
-    const messages = failureMessages || {};
-    const failedNote = (Array.isArray(failedIds) ? failedIds : [])
-      .map((failedId) => {
-        const failedName =
-          selectedItems.find((item) => item.id === failedId)?.name || failedId;
-        const failureMessage = messages[failedId];
-        if (failureMessage) {
-          return `<p class="gantt-note"><strong>${escapeHtml(
-            failedName
-          )}</strong>：${escapeHtml(failureMessage)}</p>`;
-        }
-        return `<p class="gantt-note">${escapeHtml(
-          failedName
-        )} 在该订单下无可回放的排产，未在下方甘特显示。</p>`;
-      })
-      .join("");
-    if (hasData) return failedNote;
-    return `${failedNote}<p class="gantt-note">所选方案在当前订单下暂无可展示的排产（参照方案可能不支持排产回放）。</p>`;
-  }
-
   function createRecentOrderStore({
     contextLimit = 24,
     itemLimit = 8,
@@ -533,7 +498,6 @@
     scheduleKey,
     rankOrders,
     bindOrderComboboxOpen,
-    renderReviewFailureNotes,
     createRecentOrderStore,
     createOrderComboboxController,
     handleOrderComboboxKey,

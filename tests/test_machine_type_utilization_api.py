@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from fastapi import HTTPException
 
 from llm4drd.api import server
+from llm4drd.core.models import Machine, Shift
 from llm4drd.data.db import InstanceStore, WorkflowProgressStore, init_db
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 
@@ -46,6 +47,34 @@ class MachineTypeUtilizationFunctionTests(unittest.TestCase):
         shop = make_graph_context_shop()
         result = server._machine_type_utilization(shop, [_entry("M-C1", None, 5.0)])
         self.assertEqual(result, {})
+
+
+class MachineTypeDailyUtilizationTests(unittest.TestCase):
+    """日利用率分母 = 当日「已排产机器」的可用工时之和（班次扣除停机）。"""
+
+    def _cut_row(self, shop, schedule):
+        payload = server._machine_type_daily_utilization(shop, schedule)
+        return next(row for row in payload["types"] if row["type_id"] == "cut"), payload
+
+    def test_denominator_excludes_unused_machines(self):
+        shop = make_graph_context_shop()  # cut 类型 2 台，均 24h 班次
+        row, payload = self._cut_row(shop, [_entry("M-C1", 0.0, 24.0)])
+        self.assertEqual(payload["days"], [1])
+        self.assertEqual(row["per_day"], [1.0])  # 旧口径：24 /(2 台 × 24h) = 0.5
+        self.assertEqual((row["machines_used"], row["machines_total"]), (1, 2))
+
+    def test_denominator_follows_shift_calendar(self):
+        shop = make_graph_context_shop()
+        shop.machines["M-C1"] = Machine("M-C1", "Cutter 1", "cut", shifts=[Shift(day=0, start_hour=8.0, hours=8.0)])
+        shop.build_indexes()
+        row, _ = self._cut_row(shop, [_entry("M-C1", 8.0, 16.0)])
+        self.assertEqual(row["per_day"], [1.0])  # 旧口径：8 /(1 台 × 24h) = 0.333
+
+    def test_day_without_schedule_is_none(self):
+        shop = make_graph_context_shop()
+        row, payload = self._cut_row(shop, [_entry("M-C1", 0.0, 6.0), _entry("M-C1", 48.0, 54.0)])
+        self.assertEqual(payload["days"], [1, 2, 3])
+        self.assertEqual(row["per_day"], [0.25, None, 0.25])
 
 
 class MachineTypeUtilizationApiTests(unittest.TestCase):

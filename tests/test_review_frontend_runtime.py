@@ -531,36 +531,6 @@ class ReviewFrontendRuntimeTests(unittest.TestCase):
             """
         )
 
-    def test_review_failure_notes_are_precise_generic_and_escaped(self):
-        self._run_node(
-            """
-            const partial = runtime.renderReviewFailureNotes({
-              failedIds: ["RULE:OLD", "RULE:MISSING"],
-              failureMessages: {
-                "RULE:OLD": '请先计算 <script>alert("x")</script>'
-              },
-              selected: [
-                {id: "RULE:OLD", name: "旧规则 <b>"},
-                {id: "RULE:MISSING", name: "无消息规则"}
-              ],
-              hasData: true
-            });
-            assert(partial.includes("请先计算 &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"));
-            assert(partial.includes("旧规则 &lt;b&gt;"));
-            assert(partial.includes("无消息规则 在该订单下无可回放"));
-            assert(!partial.includes("所选方案在当前订单下暂无可展示"));
-            assert(!partial.includes("<script>"));
-
-            const noData = runtime.renderReviewFailureNotes({
-              failedIds: [],
-              failureMessages: {},
-              selected: [],
-              hasData: false
-            });
-            assert(noData.includes("所选方案在当前订单下暂无可展示"));
-            """
-        )
-
     def test_data_requests_cancel_stale_work_and_cache_completed_payloads(self):
         self._run_node(
             """

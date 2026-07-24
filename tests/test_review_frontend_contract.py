@@ -30,7 +30,8 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertIn("options.selectedOrder", JS)
         self.assertIn("options.solutionIds", JS)
         self.assertIn("groupMode", JS)
-        self.assertIn("selected.map((item) => item.id)", JS)
+        # solutionIds 归一化后参与 viewKey：顺序变化不应误判为新视图
+        self.assertIn("solutionIds: asArray(options.solutionIds).map(String).sort()", JS)
 
     def test_review_api_accepts_abort_signals(self):
         self.assertIn("getReviewData(taskId, solutionIds, orderId, includeUtilization, signal)", JS)
@@ -55,7 +56,7 @@ class ReviewFrontendContractTests(unittest.TestCase):
     def test_review_selection_drops_stale_pending_canvas_without_full_render(self):
         self.assertIn('app.pendingGantts.delete("gantt-review-compare")', JS)
         start = JS.index('if (action === "toggle-candidate")')
-        end = JS.index('if (action === "retry-type-utilization")', start)
+        end = JS.index('if (action === "generate-exact-single")', start)
         self.assertNotIn("renderCurrentPage()", JS[start:end])
         self.assertIn("ensureReviewData(getSelectedReviewCandidates())", JS[start:end])
 
@@ -74,12 +75,12 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertNotIn("data-gantt-order-select", JS)
 
     def test_combobox_selection_paths_preserve_gantt_loading_contracts(self):
-        self.assertIn("ReviewRuntime.rankOrders(", JS)
         self.assertIn("ReviewRuntime.createOrderComboboxController(", JS)
         self.assertIn("ReviewRuntime.handleOrderComboboxKey(controller, event)", JS)
-        self.assertIn("reviewDataClient.searchOrders({ taskId, ids, query }, signal)", JS)
+        # 模糊排序内聚在 controller 内部，不再由页面侧直接调用
+        self.assertIn("rankOrders(matches, query, limit, { current, recent })", RUNTIME_JS)
+        # 服务端取数模式：搜索走可取消的评审订单接口，选中后按订单重载甘特
         self.assertIn("api.searchReviewOrders(taskId, [solutionId], query, signal)", JS)
-        self.assertIn("loadReviewData(getSelectedReviewCandidates(), order.order_id, false)", JS)
         self.assertIn("loadPlanGantt(taskId, solutionId, order.order_id)", JS)
 
     def test_comboboxes_mount_after_timeline_and_review_region_rendering(self):
@@ -107,23 +108,23 @@ class ReviewFrontendContractTests(unittest.TestCase):
         reset_end = JS.index("\nfunction ", reset_start)
         self.assertIn("app.orderComboboxRecent.reset()", JS[reset_start:reset_end])
 
-    def test_order_combobox_recent_keys_cover_all_three_data_contexts(self):
-        for context in (
-            'contextKey: `local::${app.currentSceneId || "current-instance"}::${id}::${ReviewRuntime.normalizeIds(options.solutionIds).join(",")}`',
-            'contextKey: `plan::${taskId}::${solutionId}`',
-            'contextKey: `review::${ReviewRuntime.selectionKey(taskId, ids)}`',
-        ):
-            self.assertIn(context, JS)
+    def test_order_combobox_recent_key_is_scoped_by_data_context(self):
+        # 甘特已统一到 renderTimeline：服务端取数模式用单选 combobox（plan 上下文），
+        # 本地模式改用 renderMultiSelectFilter，因此只剩这一个 combobox 上下文。
+        self.assertIn("contextKey: `plan::${taskId}::${solutionId}`", JS)
+        self.assertIn("const recentKey = `${config.id}::${config.contextKey}`", JS)
         self.assertIn("source.recentKey", JS)
-        self.assertIn("config.contextKey", JS)
+        # 本地模式不再挂 combobox，避免跨实例串用最近订单
+        self.assertIn("renderMultiSelectFilter({", JS)
 
     def test_review_gantt_preserves_escaped_backend_failure_messages(self):
-        start = JS.index("function reviewGanttStatusHtml(")
-        end = JS.index("\nfunction renderReviewGantt(", start)
+        # 评审甘特已改为单方案：后端失败信息就地转义展示，并提供重试入口
+        start = JS.index("function renderReviewGantt(")
+        end = JS.index("\nfunction renderReviewLibraryTab(", start)
         source = JS[start:end]
-        self.assertIn("ReviewRuntime.renderReviewFailureNotes({", source)
-        self.assertIn("failureMessages: state.failureMessages", source)
-        self.assertIn("hasData: Boolean(data)", source)
+        self.assertIn("escapeHtml(st.error)", source)
+        self.assertIn('data-action="retry-review-scheme"', source)
+        self.assertIn("if (st.loading)", source)
 
     def test_review_commits_are_guarded_by_request_generation_and_schedule(self):
         self.assertIn("let reviewReadRequestGeneration = 0", JS)
@@ -133,9 +134,6 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertGreaterEqual(JS[start:end].count("isCurrentReviewReadRequest("), 2)
 
     def test_pending_order_does_not_relabel_or_upsert_committed_schemes(self):
-        start = JS.index("function currentReviewGanttData(")
-        end = JS.index("\nfunction reviewGanttStatusHtml(", start)
-        self.assertIn("if (app.reviewRead.loading) return null;", JS[start:end])
         load_start = JS.index("async function loadReviewData(")
         load_end = JS.index("\nfunction ensureReviewData(", load_start)
         self.assertIn("orderId: selectionChanged ? null : previous.orderId", JS[load_start:load_end])
@@ -145,31 +143,23 @@ class ReviewFrontendContractTests(unittest.TestCase):
         comparison_start = JS.index("function renderReviewCandidateComparison")
         comparison_end = JS.index("function renderReviewTypeUtilization")
         comparison_source = JS[comparison_start:comparison_end]
-        self.assertIn(
-            '<th class="compare-check"><span class="sr-only">选择方案</span></th>',
-            comparison_source,
-        )
+        self.assertIn('<th class="compare-check"', comparison_source)
+        self.assertIn('<span class="sr-only">选择方案</span>', comparison_source)
         self.assertNotIn('const headers = ["选"', comparison_source)
         self.assertIn('aria-label="勾选 ${escapeHtml(item.name)}"', comparison_source)
 
+        # 利用率区块已改为「按天 × 机器类型」表：无进度条/副标题装饰，行内最佳高亮，
+        # 并标注该类型「已排产/总台数」以说明日利用率分母口径。
         utilization_start = JS.index("function renderReviewTypeUtilization")
-        utilization_end = JS.index("function buildReviewGanttData")
+        utilization_end = JS.index("function ensureReviewGanttSchemeSelection(")
         utilization_source = JS[utilization_start:utilization_end]
-        for token in (
-            "used_machines",
-            "machines_total",
-            "type_id",
-            "is_critical",
-            "util-bar",
-            "cell-sub",
-        ):
+        for token in ("util-bar", "cell-sub"):
             self.assertNotIn(token, utilization_source)
-        self.assertIn(
-            "<td><strong>${escapeHtml(type.type_name)}</strong></td>",
-            utilization_source,
-        )
-        self.assertIn("<strong>${formatPercent(entry.utilization)}</strong>", utilization_source)
-        self.assertIn('class="${isBest ? "is-best" : ""}"', utilization_source)
+        self.assertIn("<strong>${escapeHtml(type.type_name)}</strong>", utilization_source)
+        self.assertIn("formatPercent(v)", utilization_source)
+        self.assertIn('"pct is-best"', utilization_source)
+        self.assertIn("type.machines_used", utilization_source)
+        self.assertIn("type.machines_total", utilization_source)
 
         self.assertIn(".util-col-type { width: 132px; }", CSS)
         util_css_start = CSS.index(".util-table")

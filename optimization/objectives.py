@@ -86,13 +86,13 @@ OBJECTIVE_SPECS: dict[str, ObjectiveSpec] = {
         key="avg_active_window_utilization",
         label="平均活跃窗口利用率",
         direction="max",
-        description="全部机器忙碌加工时间除以各自最早开工到最晚完工活跃窗口跨度的平均值。",
+        description="全部机器占用时长（含跨班次间隔，与甘特图条块一致）除以各自最早开工到最晚完工活跃窗口跨度的平均值。",
     ),
     "critical_active_window_utilization": ObjectiveSpec(
         key="critical_active_window_utilization",
         label="关键资源活跃窗口利用率",
         direction="max",
-        description="关键机器忙碌加工时间除以各自最早开工到最晚完工活跃窗口跨度的平均值。",
+        description="关键机器占用时长（含跨班次间隔，与甘特图条块一致）除以各自最早开工到最晚完工活跃窗口跨度的平均值。",
     ),
     "avg_net_available_utilization": ObjectiveSpec(
         key="avg_net_available_utilization",
@@ -254,6 +254,7 @@ def build_schedule_analytics(shop: ShopFloor, result: SimResult) -> ScheduleAnal
 
     task_completion: dict[str, float] = {}
     machine_busy: dict[str, float] = {}
+    machine_occupied: dict[str, float] = {}
     machine_first_start: dict[str, float] = {}
     machine_last_end: dict[str, float] = {}
     tooling_busy: dict[str, float] = {}
@@ -278,6 +279,7 @@ def build_schedule_analytics(shop: ShopFloor, result: SimResult) -> ScheduleAnal
         machine_id = entry.get("machine_id")
         if machine_id:
             machine_busy[machine_id] = machine_busy.get(machine_id, 0.0) + duration
+            machine_occupied[machine_id] = machine_occupied.get(machine_id, 0.0) + occupied
             machine_first_start[machine_id] = min(machine_first_start.get(machine_id, start), start)
             machine_last_end[machine_id] = max(machine_last_end.get(machine_id, end), end)
         for tooling_id in entry.get("tooling_ids", []) or []:
@@ -381,7 +383,9 @@ def build_schedule_analytics(shop: ShopFloor, result: SimResult) -> ScheduleAnal
         first_start = machine_first_start.get(machine_id)
         last_end = machine_last_end.get(machine_id)
         active_span = max(0.0, (last_end - first_start)) if first_start is not None and last_end is not None else 0.0
-        active_ratio = busy / active_span if active_span > 1e-9 else 0.0
+        # 活跃窗口口径统一为墙钟：分子用占用时长（含跨班次间隔），与甘特图条块一致
+        occupied = machine_occupied.get(machine_id, busy)
+        active_ratio = occupied / active_span if active_span > 1e-9 else 0.0
         machine_active_window_utilization[machine_id] = min(1.0, max(0.0, active_ratio))
         machine = shop.machines.get(machine_id)
         if machine is not None and active_span > 1e-9:
