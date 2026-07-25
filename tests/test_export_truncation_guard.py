@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from fastapi import HTTPException
@@ -61,6 +62,24 @@ class RejectTruncatedScheduleTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             server._reject_truncated_schedule(resolved)
         self.assertEqual(ctx.exception.status_code, 409)
+
+
+class SimExportEndpointGuardTest(unittest.TestCase):
+    """前端漏判时的第二道防线：回传标记为截断的明细，后端必须拒绝而不是生成残缺文件。"""
+
+    def test_rejects_truncated_payload(self):
+        req = server.SimExportReq(
+            gantt=_entries(120), metrics={}, rule="方案一",
+            schedule_truncated=True, schedule_total=12000,
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(server.export_sim_excel(req))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("12000", ctx.exception.detail)
+
+    def test_default_payload_is_not_treated_as_truncated(self):
+        req = server.SimExportReq(gantt=_entries(3), metrics={})
+        self.assertFalse(req.schedule_truncated)
 
 
 if __name__ == "__main__":

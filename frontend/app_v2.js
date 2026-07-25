@@ -1394,6 +1394,10 @@ function normalizeCandidate(raw, overrides = {}) {
     metrics: mergedMetrics,
     summary: mergedSummary,
     schedule: asArray(raw.schedule),
+    // 后端发给前端的 schedule 是展示用截断版，这两个标记必须透传，否则导出侧无从判断
+    // 手上这份明细是否完整（见 handleExportSolution）。
+    scheduleTotal: raw.schedule_total ?? asArray(raw.schedule).length,
+    scheduleTruncated: !!raw.schedule_truncated,
     deltaVsBaseline: raw.delta_vs_baseline || {},
     candidate: raw.candidate || {},
     raw,
@@ -5825,16 +5829,23 @@ async function handleExportSolution(solutionId) {
   const canUseTask = taskId && candidate.source !== "exact_reference";
   // 前端持有的 schedule 是展示用的截断版（后端 schedule_limit=120），不能当完整排产导出，
   // 否则会产出「看起来正常、实际只有前 120 条」的文件。
-  const scheduleIsComplete = candidate.schedule?.length && !candidate.schedule_truncated;
+  const scheduleIsComplete = candidate.schedule?.length && !candidate.scheduleTruncated;
   const exportFromSchedule = async () => {
     if (!candidate.schedule?.length) throw new Error("该方案暂无排产明细可导出。");
-    if (candidate.schedule_truncated) {
+    if (candidate.scheduleTruncated) {
       throw new Error(
-        `本地只有该方案的前 ${candidate.schedule.length} 条排程（共 ${candidate.schedule_total ?? "?"} 条），`
+        `本地只有该方案的前 ${candidate.schedule.length} 条排程（共 ${candidate.scheduleTotal ?? "?"} 条），`
         + "无法导出完整排产。"
       );
     }
-    return api.exportSimExcel({ gantt: candidate.schedule, rule: candidate.name, metrics: candidate.metrics || {} });
+    return api.exportSimExcel({
+      gantt: candidate.schedule,
+      rule: candidate.name,
+      metrics: candidate.metrics || {},
+      // 回传截断标记，后端据此拒绝残缺导出（前端漏判时的第二道防线）
+      schedule_truncated: !!candidate.scheduleTruncated,
+      schedule_total: candidate.scheduleTotal ?? null,
+    });
   };
   try {
     const blob = canUseTask
@@ -5847,7 +5858,8 @@ async function handleExportSolution(solutionId) {
     if (canUseTask && scheduleIsComplete) {
       try {
         downloadBlob(await exportFromSchedule(), filename);
-        toast("方案导出成功。", "success");
+        // 兜底导出的来源与服务端不同，必须说清楚，不能让用户以为走的是正常路径
+        toast(`已用本地明细导出（服务端导出失败：${error.message}）`, "warning");
         return;
       } catch (_) {
         // 兜底也失败则落到下方统一提示

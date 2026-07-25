@@ -103,6 +103,33 @@ class SimExportHeaderTest(unittest.TestCase):
         self.assertRegex(rows[1][5], DISPLAY_DATETIME)
 
 
+class PredecessorCoverageLogTest(unittest.TestCase):
+    """前置列为空时用这条日志区分：op_id 对不上（op_found=False）vs 实例本就没有前置（True）。"""
+
+    def _log_line(self, gantt: list[dict]) -> str:
+        shop = make_graph_context_shop()
+        with self.assertLogs(level="INFO") as captured:
+            server._build_sim_export_excel({"gantt": gantt, "metrics": {}}, shop)
+        return next(line for line in captured.output if "sim export" in line)
+
+    def test_unknown_op_id_reports_not_found(self):
+        line = self._log_line([{"op_id": "OP-NOT-EXIST", "start": 0.0, "end": 1.0}])
+        self.assertIn("predecessor_hits=0", line)
+        self.assertIn("op_found=False", line)
+
+    def test_known_op_without_predecessors_reports_found(self):
+        line = self._log_line([{"op_id": "OP-11", "start": 0.0, "end": 1.0}])  # 实例里无前置
+        self.assertIn("predecessor_hits=0", line)
+        self.assertIn("op_found=True", line)
+
+    def test_counts_hits(self):
+        line = self._log_line([
+            {"op_id": "OP-12", "start": 0.0, "end": 1.0},  # 有前置工序
+            {"op_id": "OP-11", "start": 1.0, "end": 2.0},  # 无前置
+        ])
+        self.assertIn("predecessor_hits=1", line)
+
+
 class SolutionExportHeaderTest(unittest.TestCase):
     def _payload(self) -> bytes:
         shop = make_graph_context_shop()

@@ -364,6 +364,9 @@ class SimExportReq(BaseModel):
     rule: Optional[str] = None
     diagnosis: Optional[str] = None
     diagnosis_detail: Optional[Any] = None
+    # 前端持有的方案排程是展示用截断版；带上标记，后端据此拒绝导出残缺明细
+    schedule_truncated: bool = False
+    schedule_total: Optional[int] = None
 
 
 class ReviewProgressReq(BaseModel):
@@ -2101,6 +2104,19 @@ def _schedule_headers(*keys: str) -> list[str]:
     return [SCHEDULE_COLUMN_LABELS[key] for key in keys]
 
 
+def _log_predecessor_coverage(tag: str, current_shop: Optional[ShopFloor], rows: int, hits: int, sample_op_id) -> None:
+    """记录前置字段的命中率，用来区分「op_id 对不上」与「实例里本就没有前置」。"""
+    if current_shop is None:
+        logging.info("%s: rows=%d predecessor_hits=0 (no active instance)", tag, rows)
+        return
+    sample = str(sample_op_id) if sample_op_id is not None else None
+    op = current_shop.operations.get(sample) if sample else None
+    logging.info(
+        "%s: rows=%d predecessor_hits=%d instance_ops=%d miss_sample=%s op_found=%s",
+        tag, rows, hits, len(current_shop.operations), sample, op is not None,
+    )
+
+
 def _predecessor_labels(current_shop: Optional[ShopFloor], op_id) -> tuple[str, str]:
     """工序的前置工序 / 前置任务令（导入 operations sheet 的 predecessor_ops、predecessor_tasks）。
 
@@ -2135,8 +2151,14 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
         "是否延误", "是否主订单",
     ]
     ws.append(headers)
+    predecessor_hits = 0
+    predecessor_miss_sample = None
     for e in sorted(gantt, key=lambda x: (x.get("start") or 0)):
         predecessor_ops, predecessor_tasks = _predecessor_labels(shop, e.get("op_id"))
+        if predecessor_ops or predecessor_tasks:
+            predecessor_hits += 1
+        elif predecessor_miss_sample is None:
+            predecessor_miss_sample = e.get("op_id")
         ws.append([
             e.get("op_id", ""),
             # 前端回传的排产明细可能是精简条目，缺名称时回退到 ID，保证列不空
@@ -2160,6 +2182,7 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
             "是" if e.get("is_tardy") else "否",
             "是" if e.get("is_main") else "否",
         ])
+    _log_predecessor_coverage("sim export", shop, len(gantt), predecessor_hits, predecessor_miss_sample)
 
     # Sheet 2: 关键指标
     ws_metrics = wb.create_sheet("关键指标")
@@ -2254,6 +2277,13 @@ async def export_sim_excel(req: Optional[SimExportReq] = Body(None)):
     未回传时回退到最近一次仿真结果 last_sim_payload。
     """
     current_shop = _active_shop()
+    if req is not None and req.schedule_truncated:
+        raise HTTPException(
+            400,
+            f"回传的排产明细只有前 {len(req.gantt)} 条"
+            f"（共 {req.schedule_total if req.schedule_total is not None else '?'} 条），"
+            "导出会得到残缺文件。请重新运行一次优化后再导出。",
+        )
     if req is not None and req.gantt:
         payload = {
             "gantt": req.gantt,
@@ -5142,8 +5172,14 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
         "tooling_ids", "personnel_ids", "start", "end", "start_at", "end_at", "duration",
         "elapsed_duration", "is_main", "due_at", "status", "status_label",
     ))
+    predecessor_hits = 0
+    predecessor_miss_sample = None
     for entry in export_schedule:
         predecessor_ops, predecessor_tasks = _predecessor_labels(current_shop, entry.get("op_id"))
+        if predecessor_ops or predecessor_tasks:
+            predecessor_hits += 1
+        elif predecessor_miss_sample is None:
+            predecessor_miss_sample = entry.get("op_id")
         ws_schedule.append([
             entry.get("order_id"),
             entry.get("order_name"),
@@ -5167,6 +5203,10 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
             entry.get("status"),
             entry.get("status_label") or _schedule_status_label(entry.get("status")),
         ])
+
+    _log_predecessor_coverage(
+        "solution export", current_shop, len(export_schedule), predecessor_hits, predecessor_miss_sample,
+    )
 
     ws_calendar = wb.create_sheet("机器日历")
     ws_calendar.append([
