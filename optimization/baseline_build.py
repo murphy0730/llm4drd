@@ -101,14 +101,17 @@ def build_baseline_library(
     solutions = optimizer.archive.solutions()
     extracted = extract_baseline_solutions(solutions, specs)
 
-    # ATC 基线与候选都过同一 approx_evaluator，保证门禁比较同口径。
-    atc_sol = optimizer.approx_evaluator.evaluate(optimizer._default_candidate("ATC"), "baseline_gate", 0)
+    # 门禁必须用真实 Simulator 口径（提案 §4.3）。approx_evaluator 是 coarse 搜索的快速代理，
+    # 其目标值与真实排产差异极大（实测同一 ATC 候选 approx 与 Simulator 的延误/流程差 5~30%），
+    # 用它比较会系统性误判。ATC 与候选都过 _simulate_candidate，archive 解的 objectives 本身
+    # 也是真实 Simulator 值，三者同口径。
+    atc_sol = optimizer._simulate_candidate(optimizer._default_candidate("ATC"), "baseline_gate", 0)
     snapshot_version = get_instance_version(db_path)
 
     rows: list[dict] = []
     for emphasis, sol in extracted:
-        approx_sol = optimizer.approx_evaluator.evaluate(sol.candidate, "baseline_gate", 0)
-        passed, compare = passes_quality_gate(approx_sol, atc_sol, specs, emphasis)
+        real_sol = optimizer._simulate_candidate(sol.candidate, "baseline_gate", 0)
+        passed, compare = passes_quality_gate(real_sol, atc_sol, specs, emphasis)
         if not passed:
             logger.info("基准方案 %s 未过质量门禁，丢弃", emphasis)
             continue
