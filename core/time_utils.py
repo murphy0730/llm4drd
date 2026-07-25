@@ -37,6 +37,25 @@ def isoformat_or_none(value: datetime | None) -> str | None:
     return ensure_aware(value).isoformat(timespec="seconds")
 
 
+def format_display_datetime(value: Any) -> Any:
+    """把 ISO 时间串/datetime 转成导出展示用的 'YYYY-MM-DD HH:MM:SS'。
+
+    None 原样返回；无法解析的值（空串、'-' 等脏数据）原样返回，避免导出中断。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    text = str(value).strip()
+    if not text:
+        return value
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def offset_hours_to_datetime(plan_start: datetime, offset_hours: float | None) -> datetime | None:
     if offset_hours is None:
         return None

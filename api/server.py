@@ -40,7 +40,7 @@ from ..knowledge.context_service import (
 )
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
 from ..scheduling.online import OnlineSchedulerV3
-from ..core.time_utils import datetime_to_offset_hours
+from ..core.time_utils import datetime_to_offset_hours, format_display_datetime
 from .review_read import (
     ReviewReadCache,
     build_review_solution_index,
@@ -2058,6 +2058,36 @@ async def export_validation_excel():
     )
 
 
+# 排程明细导出的唯一列名口径：仿真导出与方案导出共用，避免两处表头再次分叉。
+SCHEDULE_COLUMN_LABELS = {
+    "order_id": "计划号",
+    "order_name": "订单名称",
+    "task_id": "任务令",
+    "op_id": "工序ID",
+    "op_name": "工序",
+    "machine_id": "计划工位",
+    "machine_name": "机器名称",
+    "process_type": "工序类型",
+    "start": "开始(小时)",
+    "end": "结束(小时)",
+    "start_at": "计划开工时间",
+    "end_at": "计划完工时间",
+    "due_at": "排产交期",
+    "duration": "时长(小时)",
+    "elapsed_duration": "占用时长(小时)",
+    "tooling_ids": "工装ID",
+    "personnel_ids": "人员ID",
+    "status": "状态",
+    "status_label": "状态说明",
+    "is_main": "是否主订单",
+    "priority": "优先级",
+}
+
+
+def _schedule_headers(*keys: str) -> list[str]:
+    return [SCHEDULE_COLUMN_LABELS[key] for key in keys]
+
+
 def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
     """把一次仿真结果（/api/simulate 返回的 payload）导出为多 sheet 的 Excel。"""
     gantt = payload.get("gantt") or []
@@ -2073,27 +2103,32 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
     ws = wb.active
     ws.title = "排程结果"
     headers = [
-        "工序ID", "任务ID", "订单ID", "订单名称", "机器ID", "工序类型",
-        "开始(小时)", "开始时间", "结束(小时)", "结束时间", "时长(小时)",
-        "状态", "优先级", "交期", "是否延误", "是否主订单",
+        *_schedule_headers(
+            "op_id", "op_name", "task_id", "order_id", "order_name", "machine_id", "machine_name",
+            "process_type", "start", "start_at", "end", "end_at", "duration", "status", "priority", "due_at",
+        ),
+        "是否延误", "是否主订单",
     ]
     ws.append(headers)
     for e in sorted(gantt, key=lambda x: (x.get("start") or 0)):
         ws.append([
             e.get("op_id", ""),
+            # 前端回传的排产明细可能是精简条目，缺名称时回退到 ID，保证列不空
+            e.get("op_name") or e.get("op_id", ""),
             e.get("task_id", ""),
             e.get("order_id", ""),
             e.get("order_name", ""),
             e.get("machine_id", ""),
+            e.get("machine_name") or e.get("machine_id", ""),
             e.get("process_type", ""),
             e.get("start"),
-            e.get("start_at"),
+            format_display_datetime(e.get("start_at")),
             e.get("end"),
-            e.get("end_at"),
+            format_display_datetime(e.get("end_at")),
             e.get("duration"),
             e.get("status") or "completed",
             e.get("priority", ""),
-            e.get("due_at"),
+            format_display_datetime(e.get("due_at")),
             "是" if e.get("is_tardy") else "否",
             "是" if e.get("is_main") else "否",
         ])
@@ -2131,7 +2166,10 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
 
     # Sheet 3: 延误明细
     ws_tardy = wb.create_sheet("延误明细")
-    ws_tardy.append(["订单ID", "订单名称", "工序ID", "机器ID", "结束时间", "交期", "超出(小时)"])
+    ws_tardy.append([
+        *_schedule_headers("order_id", "order_name", "op_id", "machine_id", "end_at", "due_at"),
+        "超出(小时)",
+    ])
     for e in sorted(gantt, key=lambda x: (x.get("end") or 0), reverse=True):
         if e.get("is_tardy"):
             due = e.get("due_date")
@@ -2139,7 +2177,8 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
             over = round(end - due, 3) if isinstance(end, (int, float)) and isinstance(due, (int, float)) else ""
             ws_tardy.append([
                 e.get("order_id", ""), e.get("order_name", ""), e.get("op_id", ""),
-                e.get("machine_id", ""), e.get("end_at"), e.get("due_at"), over,
+                e.get("machine_id", ""), format_display_datetime(e.get("end_at")),
+                format_display_datetime(e.get("due_at")), over,
             ])
 
     # Sheet 4: 诊断与未完成工序
@@ -2158,7 +2197,7 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
         if unscheduled:
             ws_diag.append([])
             ws_diag.append(["未完成工序数", len(unscheduled)])
-            ws_diag.append(["工序ID", "任务ID", "工序类型", "状态"])
+            ws_diag.append(_schedule_headers("op_id", "task_id", "process_type", "status"))
             for op in unscheduled:
                 status = getattr(op, "status", "")
                 status = getattr(status, "value", status)  # OpStatus 枚举 openpyxl 无法直接写入
@@ -5027,15 +5066,15 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
     wb = openpyxl.Workbook()
     export_schedule = _solution_schedule_with_initial_history(current_shop, solution)
     ws_summary = wb.active
-    ws_summary.title = "summary"
+    ws_summary.title = "方案摘要"
     ws_summary.append(["task_id", task_id])
     ws_summary.append(["solution_id", solution.get("solution_id")])
     ws_summary.append(["source", solution.get("source") or solution.get("rule_name") or "baseline"])
     ws_summary.append(["evaluation_mode", solution.get("evaluation_mode", "exact")])
-    ws_summary.append(["plan_start_at", current_shop.time_label(0.0)])
+    ws_summary.append(["plan_start_at", format_display_datetime(current_shop.time_label(0.0))])
     ws_summary.append(["objective_count", len(export_result.get("objective_keys", []))])
     ws_summary.append([])
-    ws_summary.append(["metric", "value"])
+    ws_summary.append(["指标", "数值"])
     for key, value in (solution.get("objectives") or {}).items():
         ws_summary.append([key, value])
     for key, value in (solution.get("summary") or {}).items():
@@ -5047,17 +5086,17 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
         else:
             ws_summary.append([key, value])
     ws_summary.append([])
-    ws_summary.append(["status_legend", "meaning"])
+    ws_summary.append(["状态", "含义"])
     ws_summary.append(["已完成", "计划起点前已经完成的历史工序"])
     ws_summary.append(["进行中", "计划起点时已开工、仍占用资源的工序"])
     ws_summary.append(["未来排产", "本次方案中新安排的未来工序"])
 
-    ws_schedule = wb.create_sheet("schedule")
-    ws_schedule.append([
+    ws_schedule = wb.create_sheet("排程结果")
+    ws_schedule.append(_schedule_headers(
         "order_id", "order_name", "task_id", "op_id", "op_name", "machine_id", "machine_name",
         "tooling_ids", "personnel_ids", "start", "end", "start_at", "end_at", "duration",
         "elapsed_duration", "is_main", "due_at", "status", "status_label",
-    ])
+    ))
     for entry in export_schedule:
         ws_schedule.append([
             entry.get("order_id"),
@@ -5071,18 +5110,24 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
             ",".join(entry.get("personnel_ids", []) or []),
             entry.get("start"),
             entry.get("end"),
-            entry.get("start_at"),
-            entry.get("end_at"),
+            format_display_datetime(entry.get("start_at")),
+            format_display_datetime(entry.get("end_at")),
             entry.get("duration"),
             entry.get("elapsed_duration"),
             entry.get("is_main"),
-            entry.get("due_at"),
+            format_display_datetime(entry.get("due_at")),
             entry.get("status"),
             entry.get("status_label") or _schedule_status_label(entry.get("status")),
         ])
 
-    ws_calendar = wb.create_sheet("machine_calendar")
-    ws_calendar.append(["machine_id", "machine_name", "window_type", "start", "end", "start_at", "end_at"])
+    ws_calendar = wb.create_sheet("机器日历")
+    ws_calendar.append([
+        *_schedule_headers("machine_id", "machine_name"),
+        "窗口类型",
+        *_schedule_headers("start", "end"),
+        # 机器日历是班次/停机窗口，不是工序排产，故用中性的开始/结束时间
+        "开始时间", "结束时间",
+    ])
     for row in _calendar_export_rows(current_shop, export_schedule):
         ws_calendar.append([
             row["machine_id"],
@@ -5090,12 +5135,12 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
             row["window_type"],
             row["start"],
             row["end"],
-            row["start_at"],
-            row["end_at"],
+            format_display_datetime(row["start_at"]),
+            format_display_datetime(row["end_at"]),
         ])
 
-    ws_rules = wb.create_sheet("rule_profile")
-    ws_rules.append(["field", "value"])
+    ws_rules = wb.create_sheet("规则参数")
+    ws_rules.append(["字段", "取值"])
     for key, value in (solution.get("candidate") or {}).items():
         if isinstance(value, dict):
             for sub_key, sub_value in value.items():
@@ -5103,8 +5148,8 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
         else:
             ws_rules.append([key, value])
 
-    ws_legend = wb.create_sheet("status_legend")
-    ws_legend.append(["status", "label", "color", "description"])
+    ws_legend = wb.create_sheet("状态图例")
+    ws_legend.append(["状态", "名称", "颜色", "说明"])
     ws_legend.append(["completed", "已完成", _schedule_status_color("completed"), "计划起点前已经完成的历史工序"])
     ws_legend.append(["in_progress", "进行中", _schedule_status_color("in_progress"), "计划起点时已开工、仍占用资源的工序"])
     ws_legend.append(["scheduled", "未来排产", _schedule_status_color("scheduled"), "本次方案中新安排的未来工序"])
