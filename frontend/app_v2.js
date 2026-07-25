@@ -5823,8 +5823,17 @@ async function handleExportSolution(solutionId) {
   const taskId = app.optimizeResult?.task_id || app.optimizeTaskId;
   // 精确冠军参考不在 hybrid task 内、但自带 schedule；无 taskId 时也退回客户端明细导出。
   const canUseTask = taskId && candidate.source !== "exact_reference";
+  // 前端持有的 schedule 是展示用的截断版（后端 schedule_limit=120），不能当完整排产导出，
+  // 否则会产出「看起来正常、实际只有前 120 条」的文件。
+  const scheduleIsComplete = candidate.schedule?.length && !candidate.schedule_truncated;
   const exportFromSchedule = async () => {
     if (!candidate.schedule?.length) throw new Error("该方案暂无排产明细可导出。");
+    if (candidate.schedule_truncated) {
+      throw new Error(
+        `本地只有该方案的前 ${candidate.schedule.length} 条排程（共 ${candidate.schedule_total ?? "?"} 条），`
+        + "无法导出完整排产。"
+      );
+    }
     return api.exportSimExcel({ gantt: candidate.schedule, rule: candidate.name, metrics: candidate.metrics || {} });
   };
   try {
@@ -5834,8 +5843,8 @@ async function handleExportSolution(solutionId) {
     downloadBlob(blob, filename);
     toast("方案导出成功。", "success");
   } catch (error) {
-    // 优化任务解析失败时，若候选自带排产明细，退回客户端明细导出兜底。
-    if (canUseTask && candidate.schedule?.length) {
+    // 服务端导出失败时，只有候选自带完整明细才兜底；截断数据宁可报错也不导出。
+    if (canUseTask && scheduleIsComplete) {
       try {
         downloadBlob(await exportFromSchedule(), filename);
         toast("方案导出成功。", "success");
@@ -5844,7 +5853,7 @@ async function handleExportSolution(solutionId) {
         // 兜底也失败则落到下方统一提示
       }
     }
-    toast(`导出失败：${error.message}`, "warning");
+    toast(`导出失败：${error.message} 可刷新页面重试；若优化结果已失效，需重新运行一次优化。`, "warning");
   }
 }
 

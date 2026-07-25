@@ -35,6 +35,7 @@ from .solution_model import (
     REPAIR_OPERATORS,
     CandidateParameters,
     OptimizationSolution,
+    schedule_payload_fields as _schedule_payload_fields,
     schedule_signature,
 )
 
@@ -1861,7 +1862,7 @@ class HybridNSGA3ALNSOptimizer:
                 "personnel_utilization": round(solution.metrics.get("personnel_utilization", 0.0), 4),
                 "evaluation_mode": solution.metrics.get("evaluation_mode", "exact"),
             },
-            "schedule": solution.schedule if schedule_limit is None else solution.schedule[:schedule_limit],
+            **_schedule_payload_fields(solution.schedule, schedule_limit),
         }
 
     def _format_baseline_payload(self, solution: OptimizationSolution, schedule_limit: int | None = 120) -> dict:
@@ -1871,7 +1872,7 @@ class HybridNSGA3ALNSOptimizer:
             "evaluation_mode": solution.metrics.get("evaluation_mode", "exact"),
             "objectives": {spec.key: round(solution.objectives.get(spec.key, 0.0), 4) for spec in self.specs},
             "metrics": self._format_metric_payload(solution.metrics),
-            "schedule": solution.schedule if schedule_limit is None else solution.schedule[:schedule_limit],
+            **_schedule_payload_fields(solution.schedule, schedule_limit),
             "summary": solution.analytics_summary,
         }
 

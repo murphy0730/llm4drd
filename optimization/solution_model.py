@@ -114,6 +114,23 @@ def schedule_signature(schedule: list[dict]) -> str:
     return hashlib.sha1(repr(normalized).encode("utf-8")).hexdigest()
 
 
+def schedule_payload_fields(schedule: list[dict], schedule_limit: int | None) -> dict:
+    """排程明细的 payload 片段：带上是否被截断，以及截断前的真实条数。
+
+    发给前端展示的方案只保留前 schedule_limit 条，全量版本只存在服务端。没有这个
+    标记，前后端都无法判断手上这份 schedule 是否完整，导出时会把展示用的截断数据
+    当成完整排产写进 Excel。
+    """
+    entries = list(schedule or [])
+    total = len(entries)
+    truncated = schedule_limit is not None and total > schedule_limit
+    return {
+        "schedule": entries[:schedule_limit] if truncated else entries,
+        "schedule_total": total,
+        "schedule_truncated": truncated,
+    }
+
+
 @dataclass
 class OptimizationSolution:
     solution_id: str

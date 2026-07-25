@@ -55,7 +55,8 @@ class SimExportHeaderTest(unittest.TestCase):
     def test_schedule_headers(self):
         rows = _sheet_rows(self._payload(), "排程结果")
         self.assertEqual(rows[0], [
-            "工序ID", "工序", "任务令", "计划号", "订单名称", "计划工位", "机器名称", "工序类型",
+            "工序ID", "工序", "前工序ID", "前任务令ID", "任务令", "计划号", "订单名称",
+            "计划工位", "机器名称", "工序类型",
             "开始(小时)", "计划开工时间", "结束(小时)", "计划完工时间", "时长(小时)",
             "状态", "优先级", "排产交期", "是否延误", "是否主订单",
         ])
@@ -74,6 +75,26 @@ class SimExportHeaderTest(unittest.TestCase):
         simplified = next(row for row in rows[1:] if row[header.index("工序ID")] == "OP-21")
         self.assertEqual(simplified[header.index("工序")], "OP-21")
         self.assertEqual(simplified[header.index("机器名称")], "M-C2")
+
+    def test_predecessors_come_from_instance(self):
+        """排程条目不带前置关系，导出时按 op_id 回查实例的 operations 定义。"""
+        shop = make_graph_context_shop()
+        gantt = [
+            {"op_id": "OP-12", "task_id": "T-11", "start": 4.0, "end": 6.0},  # predecessor_ops=["OP-11"]
+            {"op_id": "OP-13", "task_id": "T-12", "start": 6.0, "end": 9.0},  # predecessor_tasks=["T-11"]
+        ]
+        rows = _sheet_rows(server._build_sim_export_excel({"gantt": gantt, "metrics": {}}, shop), "排程结果")
+        header = rows[0]
+        by_op = {row[header.index("工序ID")]: row for row in rows[1:]}
+        self.assertEqual(by_op["OP-12"][header.index("前工序ID")], "OP-11")
+        self.assertEqual(by_op["OP-13"][header.index("前任务令ID")], "T-11")
+        # 无前置的列留空而不是报错
+        self.assertIn(by_op["OP-12"][header.index("前任务令ID")], (None, ""))
+
+    def test_predecessors_blank_without_shop(self):
+        rows = _sheet_rows(self._payload(), "排程结果")
+        header = rows[0]
+        self.assertIn(rows[1][header.index("前工序ID")], (None, ""))
 
     def test_tardy_sheet_headers(self):
         rows = _sheet_rows(self._payload(), "延误明细")
@@ -95,7 +116,10 @@ class SolutionExportHeaderTest(unittest.TestCase):
                     "start_at": shop.time_label(0.0), "end_at": shop.time_label(4.0),
                     "duration": 4.0, "elapsed_duration": 4.0, "is_main": False,
                     "due_at": shop.time_label(24.0),
-                }
+                },
+                # 前置关系按 op_id 从实例回查：OP-12 依赖工序 OP-11，OP-13 依赖任务 T-11
+                {"op_id": "OP-12", "task_id": "T-11", "start": 4.0, "end": 6.0},
+                {"op_id": "OP-13", "task_id": "T-12", "start": 6.0, "end": 9.0},
             ],
             "objectives": {"makespan": 4.0},
             "summary": {},
@@ -111,7 +135,8 @@ class SolutionExportHeaderTest(unittest.TestCase):
     def test_schedule_headers(self):
         rows = _sheet_rows(self._payload(), "排程结果")
         self.assertEqual(rows[0], [
-            "计划号", "订单名称", "任务令", "工序ID", "工序", "计划工位", "机器名称",
+            "计划号", "订单名称", "任务令", "工序ID", "工序", "前工序ID", "前任务令ID",
+            "计划工位", "机器名称",
             "工装ID", "人员ID", "开始(小时)", "结束(小时)", "计划开工时间", "计划完工时间",
             "时长(小时)", "占用时长(小时)", "是否主订单", "排产交期", "状态", "状态说明",
         ])
@@ -121,6 +146,13 @@ class SolutionExportHeaderTest(unittest.TestCase):
         header, first = rows[0], rows[1]
         for column in ("计划开工时间", "计划完工时间", "排产交期"):
             self.assertRegex(first[header.index(column)], DISPLAY_DATETIME)
+
+    def test_predecessors_come_from_instance(self):
+        rows = _sheet_rows(self._payload(), "排程结果")
+        header = rows[0]
+        by_op = {row[header.index("工序ID")]: row for row in rows[1:]}
+        self.assertEqual(by_op["OP-12"][header.index("前工序ID")], "OP-11")
+        self.assertEqual(by_op["OP-13"][header.index("前任务令ID")], "T-11")
 
     def test_calendar_headers(self):
         rows = _sheet_rows(self._payload(), "机器日历")

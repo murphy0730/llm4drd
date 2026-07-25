@@ -19,6 +19,7 @@ from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
+from ..optimization.solution_model import schedule_payload_fields
 from ..data.db import (
     init_db,
     get_instance_version,
@@ -479,6 +480,19 @@ def _normalize_initial_status(value: str | None) -> str:
     return status if status in {"pending", "ready", "processing", "completed"} else ""
 
 
+def _serialized_schedule_fields(serialized: list[dict], total: int, schedule_limit: int | None) -> dict:
+    """已序列化排程的 payload 片段，与 solution_model.schedule_payload_fields 同口径。
+
+    发给前端的方案只带前 schedule_limit 条，全量版本只存在服务端；没有这个标记，
+    导出时会把展示用的截断数据当成完整排产写进 Excel。
+    """
+    return {
+        "schedule": serialized,
+        "schedule_total": total,
+        "schedule_truncated": schedule_limit is not None and total > schedule_limit,
+    }
+
+
 def _has_initial_wip(current_shop: ShopFloor) -> bool:
     return any(op.status.value in {"ready", "processing", "completed"} for op in current_shop.operations.values())
 
@@ -523,9 +537,8 @@ def _rule_reference_solution(
         "evaluation_mode": "exact",
     }
     schedule = []
-    schedule_entries = list(result.schedule or [])
-    if schedule_limit is not None:
-        schedule_entries = schedule_entries[:schedule_limit]
+    all_entries = list(result.schedule or [])
+    schedule_entries = all_entries if schedule_limit is None else all_entries[:schedule_limit]
     for entry in schedule_entries:
         task = current_shop.tasks.get(entry["task_id"])
         order = current_shop.orders.get(task.order_id) if task else None
@@ -562,7 +575,7 @@ def _rule_reference_solution(
             "feature_weights": {},
             "bias_count": 0,
         },
-        "schedule": schedule,
+        **_serialized_schedule_fields(schedule, len(all_entries), schedule_limit),
     }
 
 
@@ -688,8 +701,7 @@ def _build_exact_reference_fallback(
 
     chosen = dict(winner)
     schedule_entries = list(chosen.get("schedule") or [])
-    if schedule_limit is not None:
-        chosen["schedule"] = schedule_entries[:schedule_limit]
+    chosen.update(schedule_payload_fields(schedule_entries, schedule_limit))
     analytics = build_schedule_analytics(current_shop, SimResult(schedule=schedule_entries))
     objective_payload = {
         key: round(float(analytics.objective_values.get(key, 0.0)), 4)
@@ -838,9 +850,8 @@ def _build_exact_reference_solution(
         payload_objectives["weighted_score"] = round(float(result.objectives["weighted_score"]), 6)
 
     schedule = []
-    schedule_entries = list(result.schedule or [])
-    if schedule_limit is not None:
-        schedule_entries = schedule_entries[:schedule_limit]
+    all_entries = list(result.schedule or [])
+    schedule_entries = all_entries if schedule_limit is None else all_entries[:schedule_limit]
     for entry in schedule_entries:
         task = current_shop.tasks.get(entry["task_id"])
         order = current_shop.orders.get(task.order_id) if task else None
@@ -888,7 +899,7 @@ def _build_exact_reference_solution(
             "bias_count": 0,
         },
         "exact_info": exact_info,
-        "schedule": schedule,
+        **_serialized_schedule_fields(schedule, len(all_entries), schedule_limit),
     }
 
 
@@ -2065,6 +2076,8 @@ SCHEDULE_COLUMN_LABELS = {
     "task_id": "任务令",
     "op_id": "工序ID",
     "op_name": "工序",
+    "predecessor_ops": "前工序ID",
+    "predecessor_tasks": "前任务令ID",
     "machine_id": "计划工位",
     "machine_name": "机器名称",
     "process_type": "工序类型",
@@ -2088,6 +2101,17 @@ def _schedule_headers(*keys: str) -> list[str]:
     return [SCHEDULE_COLUMN_LABELS[key] for key in keys]
 
 
+def _predecessor_labels(current_shop: Optional[ShopFloor], op_id) -> tuple[str, str]:
+    """工序的前置工序 / 前置任务令（导入 operations sheet 的 predecessor_ops、predecessor_tasks）。
+
+    排程条目本身不带前置关系，按 op_id 回查实例；实例不可用或工序已不存在时留空。
+    """
+    op = current_shop.operations.get(str(op_id)) if current_shop is not None else None
+    if op is None:
+        return "", ""
+    return ";".join(op.predecessor_ops or []), ";".join(op.predecessor_tasks or [])
+
+
 def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
     """把一次仿真结果（/api/simulate 返回的 payload）导出为多 sheet 的 Excel。"""
     gantt = payload.get("gantt") or []
@@ -2104,17 +2128,21 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
     ws.title = "排程结果"
     headers = [
         *_schedule_headers(
-            "op_id", "op_name", "task_id", "order_id", "order_name", "machine_id", "machine_name",
+            "op_id", "op_name", "predecessor_ops", "predecessor_tasks",
+            "task_id", "order_id", "order_name", "machine_id", "machine_name",
             "process_type", "start", "start_at", "end", "end_at", "duration", "status", "priority", "due_at",
         ),
         "是否延误", "是否主订单",
     ]
     ws.append(headers)
     for e in sorted(gantt, key=lambda x: (x.get("start") or 0)):
+        predecessor_ops, predecessor_tasks = _predecessor_labels(shop, e.get("op_id"))
         ws.append([
             e.get("op_id", ""),
             # 前端回传的排产明细可能是精简条目，缺名称时回退到 ID，保证列不空
             e.get("op_name") or e.get("op_id", ""),
+            predecessor_ops,
+            predecessor_tasks,
             e.get("task_id", ""),
             e.get("order_id", ""),
             e.get("order_name", ""),
@@ -2138,6 +2166,8 @@ def _build_sim_export_excel(payload: dict, shop: Optional[ShopFloor]) -> bytes:
     ws_metrics.append(["指标", "数值"])
     metric_order = [
         ("规则", rule),
+        # 导出条数写进文件，用户打开即可自证明细是否完整
+        ("导出排程条数", len(gantt)),
         ("可行性 feasible", metrics.get("feasible")),
         ("完成工序 / 总工序", f'{metrics.get("completed_operations")} / {metrics.get("total_operations")}'),
         ("总周期 makespan(小时)", metrics.get("makespan")),
@@ -4139,7 +4169,7 @@ def optimize_hybrid_export_solution(req: ExportSolutionReq):
     current_shop = _active_shop()
     if current_shop is None:
         raise HTTPException(400, "当前没有可用实例")
-    solution = _resolve_export_solution(current_shop, task, req.solution_id)
+    solution = _reject_truncated_schedule(_resolve_export_solution(current_shop, task, req.solution_id))
     payload = _build_solution_export_bytes(current_shop, task_id, task.get("export_result") or task.get("result") or {}, solution)
     safe_solution_id = str(solution.get("solution_id", "solution")).replace(":", "_")
     filename = f"solution_export_{safe_solution_id}.xlsx"
@@ -4937,6 +4967,18 @@ def _has_complete_schedule(solution: dict) -> bool:
         return False
 
 
+def _reject_truncated_schedule(solution: dict) -> dict:
+    """截断的展示用排程不能当作导出源：宁可报错，也不产出看起来正常的残缺文件。"""
+    if solution.get("schedule_truncated"):
+        raise HTTPException(
+            409,
+            f"该方案在服务端只剩展示用的前 {len(solution.get('schedule') or [])} 条排程"
+            f"（共 {solution.get('schedule_total', '?')} 条），无法导出完整排产。"
+            "优化结果可能已随实例变更失效，请重新运行一次优化后再导出。",
+        )
+    return solution
+
+
 def _resolve_export_solution(current_shop: Optional[ShopFloor], task: dict, solution_id: str) -> dict:
     export_result = task.get("export_result") or task.get("result") or {}
     baseline = export_result.get("baseline")
@@ -5073,6 +5115,8 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
     ws_summary.append(["evaluation_mode", solution.get("evaluation_mode", "exact")])
     ws_summary.append(["plan_start_at", format_display_datetime(current_shop.time_label(0.0))])
     ws_summary.append(["objective_count", len(export_result.get("objective_keys", []))])
+    # 导出条数写进文件，用户打开即可自证明细是否完整
+    ws_summary.append(["导出排程条数", len(export_schedule)])
     ws_summary.append([])
     ws_summary.append(["指标", "数值"])
     for key, value in (solution.get("objectives") or {}).items():
@@ -5093,17 +5137,21 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
 
     ws_schedule = wb.create_sheet("排程结果")
     ws_schedule.append(_schedule_headers(
-        "order_id", "order_name", "task_id", "op_id", "op_name", "machine_id", "machine_name",
+        "order_id", "order_name", "task_id", "op_id", "op_name",
+        "predecessor_ops", "predecessor_tasks", "machine_id", "machine_name",
         "tooling_ids", "personnel_ids", "start", "end", "start_at", "end_at", "duration",
         "elapsed_duration", "is_main", "due_at", "status", "status_label",
     ))
     for entry in export_schedule:
+        predecessor_ops, predecessor_tasks = _predecessor_labels(current_shop, entry.get("op_id"))
         ws_schedule.append([
             entry.get("order_id"),
             entry.get("order_name"),
             entry.get("task_id"),
             entry.get("op_id"),
             entry.get("op_name"),
+            predecessor_ops,
+            predecessor_tasks,
             entry.get("machine_id"),
             entry.get("machine_name"),
             ",".join(entry.get("tooling_ids", []) or []),
