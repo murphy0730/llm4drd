@@ -5034,13 +5034,43 @@ def _resolve_export_solution(current_shop: Optional[ShopFloor], task: dict, solu
     raise HTTPException(404, f"未找到方案 {solution_id}")
 
 
+def _schedule_time_window(schedule: list[dict]) -> tuple[float, float]:
+    """本次排程占用的时间窗 [最早开工, 最晚完工]（小时偏移）。
+
+    前端回传的精简排程条目可能缺 start/end，故只统计数值型取值；一个有效值都取不到时
+    退化成 [0.0, 0.0]，宁可导出接近空的日历，也不能退回全量而撑爆 Excel 行上限。
+    """
+    starts = [entry.get("start") for entry in schedule]
+    ends = [entry.get("end") for entry in schedule]
+    numeric_starts = [value for value in starts if isinstance(value, (int, float))]
+    numeric_ends = [value for value in ends if isinstance(value, (int, float))]
+    if not numeric_starts and not numeric_ends:
+        return 0.0, 0.0
+    window_start = float(min(numeric_starts)) if numeric_starts else 0.0
+    window_end = float(max(numeric_ends)) if numeric_ends else window_start
+    return window_start, max(window_start, window_end)
+
+
 def _calendar_export_rows(current_shop: ShopFloor, schedule: list[dict]) -> list[dict]:
+    """排产用到的机器在排程时间窗内的班次/停机窗口。
+
+    日历会被 ensure_calendar_days 按模板扩到最多 720 天，全量铺开时
+    机器数 × 天数 × 每天班次数 会越过 Excel 单表 1048576 行上限（openpyxl 的 append
+    不校验行号，直到读 sheet.columns 才报错），故按排程时间窗裁剪：排程范围之外的
+    空日历既解释不了这次排产，也不该占行。
+    """
+    window_start, window_end = _schedule_time_window(schedule)
     touched_machine_ids = {entry.get("machine_id") for entry in schedule if entry.get("machine_id") in current_shop.machines}
     rows: list[dict] = []
+    scanned = 0
     for machine_id in sorted(touched_machine_ids):
         machine = current_shop.machines[machine_id]
+        scanned += len(machine.shifts) + len(machine.downtimes)
         for shift in machine.shifts:
             payload = _shift_payload(current_shop, machine, shift)
+            # 按 shift.day 判断会漏掉 start_hour - anchor_hour 造成的跨日偏移，只能用实际区间
+            if payload["end"] < window_start or payload["start"] > window_end:
+                continue
             rows.append(
                 {
                     "machine_id": machine_id,
@@ -5053,6 +5083,8 @@ def _calendar_export_rows(current_shop: ShopFloor, schedule: list[dict]) -> list
                 }
             )
         for downtime in machine.downtimes:
+            if downtime.end_time < window_start or downtime.start_time > window_end:
+                continue
             rows.append(
                 {
                     "machine_id": machine_id,
@@ -5064,6 +5096,10 @@ def _calendar_export_rows(current_shop: ShopFloor, schedule: list[dict]) -> list
                     "end_at": current_shop.time_label(downtime.end_time),
                 }
             )
+    logging.info(
+        "calendar export: machines=%d rows_before=%d rows_after=%d window=[%.3f, %.3f]",
+        len(touched_machine_ids), scanned, len(rows), window_start, window_end,
+    )
     return rows
 
 
@@ -5147,6 +5183,13 @@ def _build_solution_export_bytes(current_shop: ShopFloor, task_id: str, export_r
     ws_summary.append(["objective_count", len(export_result.get("objective_keys", []))])
     # 导出条数写进文件，用户打开即可自证明细是否完整
     ws_summary.append(["导出排程条数", len(export_schedule)])
+    # 机器日历按排程时间窗裁剪，把口径写进文件，避免用户以为日历被截断
+    calendar_window_start, calendar_window_end = _schedule_time_window(export_schedule)
+    ws_summary.append([
+        "机器日历时间范围",
+        f"{format_display_datetime(current_shop.time_label(calendar_window_start))}"
+        f" ~ {format_display_datetime(current_shop.time_label(calendar_window_end))}",
+    ])
     ws_summary.append([])
     ws_summary.append(["指标", "数值"])
     for key, value in (solution.get("objectives") or {}).items():
