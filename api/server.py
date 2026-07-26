@@ -47,6 +47,7 @@ from .review_read import (
     build_review_solution_index,
     search_order_facets,
 )
+from .planning_query_service import PlanningQueryError, PlanningQueryService
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="LLM4DRD智能调度平台", version="3.0")
@@ -232,6 +233,9 @@ class GenReq(BaseModel):
 
 class SimReq(BaseModel):
     rule_name: str = "ATC"
+
+class RunRulePlanningReq(BaseModel):
+    rule_name: str = Field(min_length=1, max_length=64)
 
 class ParetoReq(BaseModel):
     objectives: list[str] = ["total_tardiness", "makespan"]
@@ -3267,6 +3271,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
     created_at = time.time()
     _hybrid_tasks[task_id] = {
         "status": "running",
+        "instance_version": get_instance_version(inst_store.db_path),
         "phase": "initializing",
         "message": "正在初始化优化器并校验实例数据",
         "created_at": created_at,
@@ -5677,3 +5682,326 @@ async def ai_analyze_schedule(req: NLAnalysisReq):
         "rule_description": rule_desc,
         "llm_raw": raw_resp[:3000],
     }
+
+
+# =============================================================================
+# 只读查询端点（供外部 AI Agent 通过 HTTP GET 调用）
+# 追加于文件末尾；仅依赖本模块既有全局变量与私有辅助函数，不改动任何现有端点。
+#
+# 依赖（均已在文件顶部/前文中定义，粘贴后不会 NameError）：
+#   - app                       : FastAPI 实例        (server.py:52)
+#   - graph_store               : GraphStore 实例     (server.py:64)
+#   - inst_store                : InstanceStore 实例  (server.py:63)，_active_shop() 内部用
+#   - Simulator                 : 已 import           (server.py:17)
+#   - BUILTIN_RULES             : 已 import           (server.py:15)；默认规则用 BUILTIN_RULES["ATC"]
+#   - _cached_sim_runtime       : 构建并缓存 SimulationRuntime (server.py:111)
+#   - build_schedule_analytics  : 已 import           (server.py:20)
+#   - _serialize_schedule_entry : 序列化单条排程       (server.py:419)
+#   - _json_safe                : 递归 JSON 安全化     (server.py:909)
+#   - _active_shop              : 从 DB 重建 ShopFloor  (server.py:926)
+#   - _sim_lock                 : 仿真串行锁           (server.py:84)，与 /api/simulate 共享全局缓存
+#   - ShopFloor                 : 已 import           (server.py:13)，仅用于类型标注
+# =============================================================================
+
+
+def _query_build_shop_or_404() -> ShopFloor:
+    """复用 /api/simulate 的取数方式：从 DB 重建（带版本号缓存）当前车间。"""
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "请先生成实例（数据库为空）")
+    return current_shop
+
+
+def _query_enrich_entry(current_shop: ShopFloor, entry: dict) -> dict:
+    """复用 /api/simulate 的排程条目富化逻辑（server.py:2984 同款），
+    给每条排程附加 order_id/order_name/priority/due_date/is_tardy/is_main。"""
+    task = current_shop.tasks.get(entry.get("task_id"))
+    order = current_shop.orders.get(task.order_id) if task else None
+    due_finite = order is not None and math.isfinite(order.due_date)
+    return _serialize_schedule_entry(
+        current_shop,
+        {
+            **entry,
+            "order_id": order.id if order else "",
+            "order_name": order.name if order else "",
+            "priority": order.priority if order else 1,
+            "due_date": round(order.due_date, 3) if due_finite else 0,
+            "due_at": current_shop.time_label(order.due_date) if due_finite else None,
+            "is_tardy": (
+                entry.get("end") is not None
+                and due_finite
+                and entry["end"] > order.due_date
+            ),
+            "is_main": task.is_main if task else False,
+        },
+    )
+
+
+@app.get("/api/query/order/{order_id}/schedule")
+def query_order_schedule(order_id: str):
+    # 复用 /api/simulate 的默认规则 ATC 跑一次仿真（server.py:2950 的默认分支），
+    # 不要求调用方传规则。与 simulate 一样持 _sim_lock 串行访问全局缓存。
+    with _sim_lock:
+        current_shop = _query_build_shop_or_404()
+        order = current_shop.orders.get(order_id)
+        if order is None:
+            raise HTTPException(404, f"未找到订单: {order_id}")
+
+        func = BUILTIN_RULES["ATC"]
+        sim = Simulator(current_shop, func, runtime=_cached_sim_runtime(current_shop))
+        r = sim.run()
+        analytics = build_schedule_analytics(current_shop, r)
+
+        schedule = []
+        for e in r.schedule:
+            task = current_shop.tasks.get(e.get("task_id"))
+            entry_order_id = task.order_id if task else None
+            if entry_order_id != order_id:
+                continue
+            schedule.append(_query_enrich_entry(current_shop, e))
+
+        metrics = r.to_dict()
+        metrics.update({key: round(float(value), 4) for key, value in analytics.objective_values.items()})
+        metrics["completed_operations"] = analytics.completed_operations
+        metrics["total_operations"] = len(current_shop.operations)
+        metrics["feasible"] = analytics.feasible
+
+    return _json_safe({
+        "order_id": order_id,
+        "order_name": order.name,
+        "schedule": schedule,
+        "metrics": metrics,
+    })
+
+
+@app.get("/api/query/operation/{op_id}/predecessors")
+def query_operation_predecessors(op_id: str):
+    with _sim_lock:
+        current_shop = _active_shop()  # 仅用于解析 op_name/task_id；为空也不阻塞边的返回
+        node_id = f"OP:{op_id}"
+        neighbors = graph_store.get_node_neighbors(node_id)
+    predecessors = []
+    for edge in neighbors.get("incoming", []):
+        if edge.get("edge_type") != "operation_sequence":
+            continue
+        src = edge.get("source", "")
+        pred_id = src[len("OP:"):] if src.startswith("OP:") else src
+        item = {"op_id": pred_id}
+        op = current_shop.operations.get(pred_id) if current_shop is not None else None
+        if op is not None:
+            item["op_name"] = op.name
+            item["task_id"] = op.task_id
+        predecessors.append(item)
+    return _json_safe({"operation_id": op_id, "predecessors": predecessors})
+
+
+@app.get("/api/query/operation/{op_id}/successors")
+def query_operation_successors(op_id: str):
+    with _sim_lock:
+        current_shop = _active_shop()
+        node_id = f"OP:{op_id}"
+        neighbors = graph_store.get_node_neighbors(node_id)
+    successors = []
+    for edge in neighbors.get("outgoing", []):
+        if edge.get("edge_type") != "operation_sequence":
+            continue
+        tgt = edge.get("target", "")
+        succ_id = tgt[len("OP:"):] if tgt.startswith("OP:") else tgt
+        item = {"op_id": succ_id}
+        op = current_shop.operations.get(succ_id) if current_shop is not None else None
+        if op is not None:
+            item["op_name"] = op.name
+            item["task_id"] = op.task_id
+        successors.append(item)
+    return _json_safe({"operation_id": op_id, "successors": successors})
+
+
+# === Planning query API (read-only, for MCP and other local clients) ===
+
+
+def _planning_query_service() -> PlanningQueryService:
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(
+            400,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "PLANNING_INSTANCE_NOT_FOUND",
+                    "message": "当前没有可用的排产实例",
+                    "suggestions": [],
+                },
+            },
+        )
+    return PlanningQueryService(
+        shop=current_shop,
+        tasks=_hybrid_tasks,
+        latest_task_id=_latest_hybrid_task_id,
+        instance_version=get_instance_version(inst_store.db_path),
+    )
+
+
+def _planning_error(error: PlanningQueryError) -> HTTPException:
+    status_codes = {
+        "PLANNING_TASK_NOT_FOUND": 404,
+        "SOLUTION_NOT_FOUND": 404,
+        "ORDER_NOT_FOUND": 404,
+        "OPERATION_NOT_FOUND": 404,
+        "PLANNING_TASK_NOT_READY": 409,
+        "PLANNING_SNAPSHOT_STALE": 409,
+        "INVALID_ARGUMENT": 422,
+    }
+    return HTTPException(
+        status_codes.get(error.code, 400),
+        detail=error.to_dict(),
+    )
+
+
+def _planning_csv(value: Optional[str]) -> list[str] | None:
+    if value is None:
+        return None
+    return list(dict.fromkeys(
+        item.strip() for item in str(value).split(",") if item.strip()
+    ))
+
+
+def _planning_response(data: dict | list, *, task_defaulted: bool | None = None) -> dict:
+    meta = {"time_unit": "hour"}
+    if task_defaulted is not None:
+        meta["task_defaulted"] = task_defaulted
+    return _json_safe({"ok": True, "data": data, "meta": meta})
+
+
+@app.get("/api/query/planning/overview")
+def planning_overview(task_id: Optional[str] = None):
+    try:
+        data = _planning_query_service().get_overview(task_id)
+    except PlanningQueryError as error:
+        raise _planning_error(error) from error
+    return _planning_response(data, task_defaulted=task_id is None)
+
+
+@app.get("/api/query/planning/solutions")
+def planning_solutions(
+    task_id: Optional[str] = None,
+    solution_ids: Optional[str] = None,
+    metric_keys: Optional[str] = None,
+):
+    try:
+        data = _planning_query_service().compare_solutions(
+            task_id,
+            _planning_csv(solution_ids),
+            _planning_csv(metric_keys),
+        )
+    except PlanningQueryError as error:
+        raise _planning_error(error) from error
+    return _planning_response(data, task_defaulted=task_id is None)
+
+
+@app.get("/api/query/planning/orders/search")
+def planning_orders_search(q: str = "", limit: int = 20):
+    data = _planning_query_service().search_orders(q, limit)
+    return _planning_response(data)
+
+
+@app.get("/api/query/planning/order/{order_id}")
+def planning_order(
+    order_id: str,
+    task_id: Optional[str] = None,
+    solution_ids: Optional[str] = None,
+):
+    try:
+        data = _planning_query_service().get_order_planning(
+            order_id,
+            task_id=task_id,
+            solution_ids=_planning_csv(solution_ids),
+        )
+    except PlanningQueryError as error:
+        raise _planning_error(error) from error
+    return _planning_response(data, task_defaulted=task_id is None)
+
+
+@app.get("/api/query/planning/operations/search")
+def planning_operations_search(
+    q: str = "",
+    order_id: Optional[str] = None,
+    limit: int = 20,
+):
+    data = _planning_query_service().search_operations(
+        q,
+        order_id=order_id,
+        limit=limit,
+    )
+    return _planning_response(data)
+
+
+@app.get("/api/query/planning/operation/{operation_id}")
+def planning_operation(
+    operation_id: str,
+    task_id: Optional[str] = None,
+    solution_ids: Optional[str] = None,
+):
+    try:
+        data = _planning_query_service().get_operation_planning(
+            operation_id,
+            task_id=task_id,
+            solution_ids=_planning_csv(solution_ids),
+        )
+    except PlanningQueryError as error:
+        raise _planning_error(error) from error
+    return _planning_response(data, task_defaulted=task_id is None)
+
+
+@app.get("/api/query/planning/rules")
+def planning_rules():
+    rules = [
+        {
+            "rule_name": rule_name,
+            "description": RULE_DESCRIPTIONS.get(rule_name, "").replace("调度", "排产"),
+            "is_default": rule_name == "ATC",
+        }
+        for rule_name in get_all_rule_names()
+    ]
+    return _planning_response({"rule_count": len(rules), "rules": rules})
+
+
+@app.post("/api/command/planning/run-rule")
+def run_rule_planning(req: RunRulePlanningReq):
+    rule_name = req.rule_name.strip().upper()
+    if rule_name not in BUILTIN_RULES:
+        available_rules = get_all_rule_names()
+        raise HTTPException(
+            422,
+            detail={
+                "ok": False,
+                "error": {
+                    "code": "PLANNING_RULE_NOT_FOUND",
+                    "message": f"未找到内置排产规则: {rule_name}",
+                    "suggestions": [
+                        {
+                            "rule_name": name,
+                            "description": RULE_DESCRIPTIONS.get(name, "").replace("调度", "排产"),
+                        }
+                        for name in available_rules
+                    ],
+                },
+            },
+        )
+
+    with _sim_lock:
+        result = _simulate_locked(SimReq(rule_name=rule_name))
+
+    planning = list(result.get("gantt") or [])
+    preview_limit = 20
+    data = {
+        "rule_name": rule_name,
+        "rule_description": RULE_DESCRIPTIONS.get(rule_name, "").replace("调度", "排产"),
+        "metrics": result.get("metrics") or {},
+        "operation_count": len(planning),
+        "planning_preview": planning[:preview_limit],
+        "planning_truncated": len(planning) > preview_limit,
+        "diagnosis": result.get("diagnosis"),
+        "diagnosis_detail": result.get("diagnosis_detail"),
+        "latest_simulation_updated": True,
+    }
+    return _planning_response(data)
