@@ -2191,11 +2191,12 @@ function filterGanttMachineRows(rows, filter) {
   });
 }
 
-// 含停机的机器优先，其次工序数降序——资源异常先被看到，而不是“最忙的前 N 台”
+// 含停机的机台优先置顶（配合 ⚠ 徽标便于定位异常），其余按机器号自然排序；
+// 不再按工序数降序，避免高负载机台扎堆排在最前，导致累计工序数提前触顶（GANTT_PAGE_MAX_ITEMS）、
+// 分页忽多忽少（例如前几页仅 2 台机器）
 function sortGanttMachineRows(rows) {
   return rows.slice().sort((a, b) =>
     (Number(b.hasDowntime) - Number(a.hasDowntime))
-    || (b.opCount - a.opCount)
     || String(a.id).localeCompare(String(b.id), "zh-CN", { numeric: true }));
 }
 
