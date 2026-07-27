@@ -176,6 +176,42 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertIn("position: absolute", sr_only_css)
         self.assertIn("clip:", sr_only_css)
 
+    def test_multi_select_commit_keeps_explicit_selection(self):
+        # 全选必须原样提交全量 id：折叠成空数组会与订单筛选下游的「未选择」语义撞车，
+        # 大实例下被首单兜底覆盖，表现为「全选后点空白处只剩第一个订单」。
+        self.assertIn("source.onChange(Array.from(working));", JS)
+        self.assertNotIn("working.size >= total ? [] : Array.from(working)", JS)
+        # 大实例首单兜底仍保留（空数组 = 未选择）
+        self.assertIn(
+            "if (!localSelectedIds.length && !allowAll && orderOptions.length) localSelectedIds = [orderOptions[0]];",
+            JS,
+        )
+        # 全选后的性能保护：机器行分页额外受单页条目数上限约束
+        self.assertIn("function paginateGanttMachineRows(", JS)
+        self.assertIn("GANTT_PAGE_MAX_ITEMS", JS)
+        self.assertIn("pageItems", JS)
+        # 机器类型侧仍把「全选」折叠成空数组，保持 filterGanttMachineRows 的不过滤语义
+        self.assertIn("types.length >= facet.typeOptions.length ? [] : types", JS)
+        # 全选后按订单集合过滤必须走 Set，避免 O(条目数 × 选中数)
+        self.assertIn("selectedOrderSet.has(item.order_id", JS)
+
+    def test_graph_layout_is_wide(self):
+        # 图谱过高的来源是 rankSep 过大（150 → fit 后仅 51% 缩放）；压到 80 让整图变宽扁。
+        # 方向保持 TB：末层资源节点多，TB 下横向铺开才是宽的方向（改 LR 实测反而更高）。
+        self.assertIn(
+            'name: "dagre", rankDir: "TB", rankSep: 80, nodeSep: 32',
+            JS,
+        )
+        self.assertNotIn("rankSep: 150", JS)
+
+    def test_optimize_layout_is_single_column(self):
+        # 优化求解页：多目标优化配置在上、运行状态与日志在下
+        opt_start = CSS.index(".opt-layout {")
+        opt_css = CSS[opt_start:CSS.index("\n", opt_start)]
+        self.assertNotIn("400px", opt_css)
+        self.assertIn(".opt-layout .sticky-col { position: static; }", CSS)
+        self.assertIn("配置上方目标与参数", JS)
+
 
 if __name__ == "__main__":
     unittest.main()

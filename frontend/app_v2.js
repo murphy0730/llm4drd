@@ -12,6 +12,10 @@ const CONFIG = {
   GANTT_MAX_GROUPS: 40,
   // 甘特每页机器行数（筛选/分页后单页渲染上限，沿用原 40 台的 vis 安全值）
   GANTT_PAGE_SIZE: 40,
+  // 甘特每页条目数上限：机器行数少但条目极多时（如全选订单、少量机台承载上万工序），
+  // 仅按行数分页仍会让 vis-timeline 锁死主线程，故按累计工序数再切一刀（每页至少保留 1 行）。
+  // 取值低于 GANTT_ALL_ORDERS_MAX_OPS，给班次外/停机遮罩的 background 条目留余量。
+  GANTT_PAGE_MAX_ITEMS: 1500,
   // 甘特图"全部订单"选项仅在条目数不超过该值时提供，大实例强制按订单聚焦
   GANTT_ALL_ORDERS_MAX_OPS: 2000,
   // 按订单层级分组时每页工序行数（行=工序，树形表头行为订单/任务令）
@@ -201,7 +205,9 @@ const app = {
   ganttViewWindows: {},
   // 甘特图订单筛选：canvasId -> 选中的订单 id（"__all__" 表示全部，仅小实例提供）
   ganttOrderFilter: {},
-  // 甘特图订单多选筛选：canvasId -> 选中的订单 id 数组（空数组 = 全部订单）
+  // 甘特图订单多选筛选：canvasId -> 选中的订单 id 数组。
+  // 空数组/未设置 = 「未选择」，由 renderTimeline 按实例规模兜底（小实例=全部，大实例=首单）；
+  // 显式全选提交的是全量 id，不再折叠成空数组，因而不会被首单兜底覆盖。
   ganttOrderMulti: {},
   // Excel 风格多选订单筛选组件的已注册数据源：id -> config
   multiSelectSources: new Map(),
@@ -573,7 +579,8 @@ function mountOrderComboboxes() {
 // —— 通用「可搜索 + 多选」下拉筛选框（客户端）——
 // 订单与机器类型两个甘特筛选共用同一组件，交互与外观一致。
 // config: { id, options:[{id, label}], selectedIds:string[], onChange:(ids)=>void, noun, unit? }
-// 语义：选中 0 个 = 全部；顶部「全选」勾选即选中全部；输入框按 label 模糊过滤。
+// 语义：selectedIds 原样表达当前选中集合（全选 = 全量 id）；渲染层把空数组视为「全部」勾选态，
+// 「空数组是否等价于全部」由各调用点自行定义（订单=未选择走兜底，机器类型=不过滤）。
 // 交互性能：面板内改动只维护本地工作集，关闭面板时一次性提交（避免每次勾选都重建甘特）。
 const MULTI_SELECT_RENDER_CAP = 300;
 
@@ -649,9 +656,10 @@ function mountMultiSelectFilters() {
     };
 
     const commit = () => {
-      // 空集合与全选都表示"全部"，统一提交为空数组，让上游按无筛选处理
-      const ids = working.size >= total ? [] : Array.from(working);
-      source.onChange(ids);
+      // 原样提交当前工作集：全选提交全量 id，而不是折叠成空数组——空数组在订单筛选下游
+      // 还承载「未选择」语义（大实例会被首单兜底覆盖），折叠会让用户的全选静默失效。
+      // 「全选是否要折叠成空数组」交由各调用点自行决定（见机器类型筛选的 onChange）。
+      source.onChange(Array.from(working));
     };
 
     const open = () => {
@@ -2180,6 +2188,25 @@ function sortGanttMachineRows(rows) {
     || String(a.id).localeCompare(String(b.id), "zh-CN", { numeric: true }));
 }
 
+// 机器行分页：每页最多 pageSize 行，且累计工序数不超过 maxItems（每页至少保留 1 行，
+// 避免单台超量机台把整页挤空）。row.opCount 由 countByMachine 预先算好，直接累加即可。
+function paginateGanttMachineRows(rows, pageSize, maxItems) {
+  const pages = [];
+  let current = [];
+  let itemCount = 0;
+  rows.forEach((row) => {
+    if (current.length && (current.length >= pageSize || itemCount + row.opCount > maxItems)) {
+      pages.push(current);
+      current = [];
+      itemCount = 0;
+    }
+    current.push(row);
+    itemCount += row.opCount;
+  });
+  if (current.length) pages.push(current);
+  return pages.length ? pages : [[]];
+}
+
 // 订单内二级筛选：状态 / 关键字（工序号·任务·机器） / 时间窗（偏移小时）
 function filterGanttEntries(entries, filter) {
   const query = String(filter.query || "").trim().toLowerCase();
@@ -2384,9 +2411,11 @@ function buildGanttData(entries, options = {}) {
 
   // —— 模式二：按机器资源（原逻辑），大实例按筛选+分页控制单页行数，vis 不会锁死 ——
   const pageSize = CONFIG.GANTT_PAGE_SIZE || CONFIG.GANTT_MAX_GROUPS;
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  // 行数分页之外再按累计工序数切分：全选订单时机器行数可能远少于 40，但条目数上万，仅限行数挡不住
+  const pages = paginateGanttMachineRows(filteredRows, pageSize, CONFIG.GANTT_PAGE_MAX_ITEMS || 1500);
+  const pageCount = pages.length;
   const page = Math.min(Math.max(1, Number(machineFilter.page) || 1), pageCount);
-  const pageRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
+  const pageRows = pages[page - 1] || [];
   const keep = new Set(pageRows.map((row) => row.id));
 
   const visible = normalized.filter((item) => keep.has(item.machineId));
@@ -2400,6 +2429,9 @@ function buildGanttData(entries, options = {}) {
     mode: "machine",
     totalGroups: allRows.length,
     filteredGroups: filteredRows.length,
+    filteredItems: filteredRows.reduce((sum, row) => sum + row.opCount, 0),
+    pageGroups: pageRows.length,
+    pageItems: pageRows.reduce((sum, row) => sum + row.opCount, 0),
     downtimeGroups,
     page, pageCount, pageSize, typeOptions, filter: machineFilter,
   };
@@ -2503,20 +2535,25 @@ function renderTimeline(entries, options = {}) {
   const orderOptions = Array.from(orderNames.keys())
     .sort((a, b) => String(a).localeCompare(String(b), "zh-CN", { numeric: true }));
   const allowAll = serverMode ? false : allEntries.length <= CONFIG.GANTT_ALL_ORDERS_MAX_OPS;
-  // 本地模式：订单多选集合（空数组 = 全部订单）。大实例默认聚焦首个订单，避免一次性全量渲染卡死。
+  // 本地模式：订单多选集合（空数组/未设置 = 未选择）。大实例默认聚焦首个订单，避免一次性全量渲染卡死；
+  // 用户显式全选时提交的是全量 id（非空），因此不会再被这里的首单兜底覆盖。
   let localSelectedIds = [];
   if (!serverMode) {
-    localSelectedIds = asArray(app.ganttOrderMulti[id]).filter((oid) => orderOptions.includes(oid));
+    const orderOptionSet = new Set(orderOptions);
+    localSelectedIds = asArray(app.ganttOrderMulti[id]).filter((oid) => orderOptionSet.has(oid));
     if (!localSelectedIds.length && !allowAll && orderOptions.length) localSelectedIds = [orderOptions[0]];
   }
   // selectedOrder 兼容下游（分组/配色/构建）：单选=该订单；多选或全部=特殊 "__all__"（走机器分组）
   const selectedOrder = serverMode
     ? (serverOrders.selectedOrder || orderOptions[0])
     : (localSelectedIds.length === 1 ? localSelectedIds[0] : "__all__");
+  // 选中集合走 Set：全选后 includes 是 O(条目数 × 选中数)（2 万 × 1000），足以卡住主线程；
+  // 且全选等价于不过滤，直接复用 allEntries 省掉一次全量遍历。
+  const selectedOrderSet = new Set(localSelectedIds);
   const orderEntries = serverMode
     ? allEntries
-    : (localSelectedIds.length
-      ? allEntries.filter((item) => localSelectedIds.includes(item.order_id || "-"))
+    : (localSelectedIds.length && localSelectedIds.length < orderOptions.length
+      ? allEntries.filter((item) => selectedOrderSet.has(item.order_id || "-"))
       : allEntries);
 
   // 订单内二级筛选：状态 / 关键字 / 时间窗（选中订单后仍可继续过滤，见问题 B）
@@ -2576,6 +2613,10 @@ function renderTimeline(entries, options = {}) {
       selectedIds: localSelectedIds,
       onChange: (ids) => {
         app.ganttOrderMulti[id] = ids;
+        // 订单集合变化会重算机器行与页数，回到第 1 页，避免停留在已不存在的页码上
+        const f = getGanttMachineFilter(id);
+        f.page = 1;
+        app.ganttMachineFilter[id] = f;
         return renderCurrentPage();
       },
     });
@@ -2590,14 +2631,16 @@ function renderTimeline(entries, options = {}) {
     selectedIds: asArray(facet.filter.types),
     onChange: (types) => {
       const f = getGanttMachineFilter(id);
-      f.types = types;
+      // 机器类型侧空数组只有「不过滤」一种含义：全选折叠成空数组，这样上游订单/状态筛选
+      // 之后引入新类型时仍按「全部类型」处理，不会被存下来的旧全量列表挡掉。
+      f.types = types.length >= facet.typeOptions.length ? [] : types;
       f.page = 1;
       app.ganttMachineFilter[id] = f;
       return renderCurrentPage();
     },
   }) : "";
   const hitText = facet
-    ? `命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} ${groupMode === "order" ? "道工序行" : "台机器"}`
+    ? `命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} ${groupMode === "order" ? "道工序行" : "台机器"}${facet.pageCount > 1 ? ` · 第 ${formatInt(facet.page)}/${formatInt(facet.pageCount)} 页` : ""}`
     : `共 ${formatInt(data.groups.length)} 行`;
   const filterRow = `
     <div class="gantt-filter-row nowrap">
@@ -2623,7 +2666,7 @@ function renderTimeline(entries, options = {}) {
   const pager = facet && facet.pageCount > 1 ? `
     <div class="gantt-pager">
       <button class="btn-ghost" data-gantt-page="${facet.page - 1}" data-canvas="${escapeHtml(id)}" ${facet.page <= 1 ? "disabled" : ""}>上一页</button>
-      <span>第 ${formatInt(facet.page)} / ${formatInt(facet.pageCount)} 页 · 命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} ${groupMode === "order" ? "道工序行" : "台机器"}</span>
+      <span>第 ${formatInt(facet.page)} / ${formatInt(facet.pageCount)} 页${groupMode === "machine" && facet.pageItems !== undefined ? ` · 本页 ${formatInt(facet.pageGroups)} 台机器 / ${formatInt(facet.pageItems)} 道工序` : ""} · 命中 ${formatInt(facet.filteredGroups)} / ${formatInt(facet.totalGroups)} ${groupMode === "order" ? "道工序行" : "台机器"}</span>
       <button class="btn-ghost" data-gantt-page="${facet.page + 1}" data-canvas="${escapeHtml(id)}" ${facet.page >= facet.pageCount ? "disabled" : ""}>下一页</button>
     </div>
   ` : "";
@@ -3228,7 +3271,7 @@ function renderOptimizePage() {
   `;
   const statusStack = status || result
     ? `${renderOptimizeStatus()}${renderOptimizeLogCard()}`
-    : `<div class="card card-pad">${renderEmptyState("尚未启动优化", "配置左侧目标与参数后点击「启动优化」，这里会实时显示进度环、阶段指示与运行日志。")}</div>`;
+    : `<div class="card card-pad">${renderEmptyState("尚未启动优化", "配置上方目标与参数后点击「启动优化」，这里会实时显示进度环、阶段指示与运行日志。")}</div>`;
   container.innerHTML = `<div class="opt-layout">${configCard}<div class="stack">${statusStack}</div></div>`;
 }
 
@@ -4796,7 +4839,11 @@ function mountInteractiveGraph() {
 
   const runLayout = () => {
     try {
-      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 150, nodeSep: 28, edgeSep: 10, ranker: "tight-tree", padding: 40, fit: true, animate: false }).run();
+      // 保持 TB：本图层数少（订单▸任务▸工序▸资源）而末层资源节点多，TB 下末层横向铺开才是宽的方向
+      // （实测改 LR 反而把 29 个资源节点竖着堆起来，更高）。太高的真正来源是 rankSep 过大——
+      // 150 时整图约 1123×972、fit 后只剩 51% 缩放；压到 80 并略放宽 nodeSep 后约 1194×622，
+      // 宽高比 1.16→1.92 贴合画布，且不再被缩小（100%），标签可读。
+      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 80, nodeSep: 32, edgeSep: 10, ranker: "tight-tree", padding: 40, fit: true, animate: false }).run();
     } catch (error) {
       console.warn("Dagre layout unavailable, falling back to breadthfirst", error);
       cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: true }).run();

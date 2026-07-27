@@ -2934,9 +2934,15 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
 .rule-card p { margin: 4px 0 0; font-size: 10.5px; color: var(--text-soft); line-height: 1.45; }
 
 /* ---------- 优化页 ---------- */
-.opt-layout { display: grid; grid-template-columns: 400px 1fr; gap: 16px; align-items: start; }
+/* 上下排列：多目标优化配置在上，运行状态与日志在下（JS 组装顺序本就是配置卡在前） */
+.opt-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 .sticky-col { position: sticky; top: 16px; }
+/* 单列布局下配置卡吸顶会压住下方的状态与日志，故在优化页内取消（.sticky-col 是通用类，不动全局） */
+.opt-layout .sticky-col { position: static; }
+/* 配置卡整宽后，2 列会把每个输入拉得过长，优化页内加密到 4 列（全局 .form-grid 仍是 2 列） */
+.opt-layout .form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .obj-chip-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.opt-layout .obj-chip-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .obj-chip {
   display: flex; align-items: center; gap: 6px; padding: 5px 8px; min-width: 0;
   border: 1.5px solid var(--line); border-radius: 8px; cursor: pointer;
@@ -3057,7 +3063,9 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
 
 @media (max-width: 1200px) {
   .rule-grid { grid-template-columns: repeat(3, 1fr); }
-  .opt-layout { grid-template-columns: 1fr; }
+  /* 优化页已是单列，窄屏只需把配置卡内部的 4 列栅格收回 2 列 */
+  .opt-layout .form-grid,
+  .opt-layout .obj-chip-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid-4 { grid-template-columns: 1fr 1fr; }
   .graph-main { grid-template-columns: 1fr; }
   .graph-detail-v3 { border-left: 0; border-top: 1px solid var(--line); max-height: none; }
