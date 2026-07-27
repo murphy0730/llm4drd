@@ -1435,12 +1435,23 @@ function schemeDisplayName(index) {
   return `方案${num}`;
 }
 
+// 后端 solution.source 是算法内部的世代/阶段标记（init/coarse_offspring/promoted_exact/…），
+// 不是前端展示分类；只有 baseline / heuristic_rule / exact_reference(_fallback) 是有语义的分类值，
+// 其余一律归为 pareto。混淆两者会导致 promoted_exact 之类内部标记被子串误判成“精确冠军”。
+function candidateCategory(rawSource, fallback = "pareto") {
+  const value = String(rawSource || "");
+  if (value === "baseline") return "baseline";
+  if (value.startsWith("exact_reference")) return "exact_reference";
+  if (value === "heuristic_rule") return "heuristic";
+  return fallback;
+}
+
 // 来源徽标（对比表方案名旁的小 chip）：基线 ATC / Pareto / 启发式 EDD / 精确冠军
 function candidateSourceTag(item) {
   const source = String(item?.source || "");
   if (source === "baseline") return { label: `基线 ${item.raw?.rule_name || item.heuristicRuleName || "ATC"}`, cls: "info" };
   if (source === "exact_reference") return { label: "精确冠军", cls: "ok" };
-  if (source === "reference" || source === "heuristic") return { label: `启发式 ${item.heuristicRuleName || ""}`.trim(), cls: "neutral" };
+  if (source === "heuristic") return { label: `启发式 ${item.heuristicRuleName || ""}`.trim(), cls: "neutral" };
   return { label: "Pareto", cls: "blue" };
 }
 
@@ -1450,13 +1461,13 @@ function getReviewCandidates() {
     items.push(normalizeCandidate(app.optimizeResult.baseline, { source: "baseline" }));
   }
   asArray(app.optimizeResult?.solutions).forEach((item) => {
-    items.push(normalizeCandidate(item, { source: item.source || "pareto" }));
+    items.push(normalizeCandidate(item, { source: candidateCategory(item.source, "pareto") }));
   });
   asArray(app.optimizeResult?.reference_solutions).forEach((item) => {
-    items.push(normalizeCandidate(item, { source: item.source || "reference" }));
+    items.push(normalizeCandidate(item, { source: candidateCategory(item.source, "heuristic") }));
   });
   asArray(app.referenceSolutions).forEach((item) => {
-    items.push(normalizeCandidate(item, { source: item.source || "heuristic" }));
+    items.push(normalizeCandidate(item, { source: candidateCategory(item.source, "heuristic") }));
   });
   if (app.exactReference) {
     items.push(normalizeCandidate(app.exactReference, { source: "exact_reference" }));
