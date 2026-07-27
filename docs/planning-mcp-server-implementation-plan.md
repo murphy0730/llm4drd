@@ -181,6 +181,7 @@ GET /api/query/planning/overview?task_id=<optional>
     "solutions": [
       {
         "solution_id": "S-6cf6190f25",
+        "solution_name": "方案二",
         "source": "hybrid",
         "feasible": true,
         "total_tardiness_hours": 0.0,
@@ -209,6 +210,9 @@ GET /api/query/planning/solutions
 - `metric_keys`：可选，逗号分隔。
 
 未指定 `solution_ids` 时默认返回候选方案，不自动混入基线和参考方案。
+
+所有含方案的查询结果同时返回 `solution_name` 与 `solution_id`：前者与方案评审界面的
+“方案一 / 方案二 / ……”一致，用于面向用户展示；后者仅用于后续精确查询。
 
 ### 6.3 订单搜索
 

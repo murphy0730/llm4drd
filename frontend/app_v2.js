@@ -151,6 +151,7 @@ const app = {
   simStatus: null,
   simElapsedTimer: null,
   simRule: "ATC",
+  dispatchStrategySets: [],
   referenceSolutions: [],
   // 规则参照方案的加载状态：key = 排序规则 + 目标键，防并发重复；cachedRules/missingRules
   // 供 chip 标记就绪/未计算；computing 为正在后台仿真的规则（spinner）。
@@ -188,6 +189,7 @@ const app = {
     refineRounds: 1,
     alnsAggression: 1.0,
     baselineRuleName: "ATC",
+    warmStartSetId: "",
     coldStart: false,
   },
   exactForm: {
@@ -372,7 +374,14 @@ const api = {
   getGraphEdges(limit = 80, offset = 0) { return this.json(`/graph/edges?limit=${limit}&offset=${offset}`); },
   getGraphOrder(orderId) { return this.json(`/graph/order/${encodeURIComponent(orderId)}`); },
   searchGraphOrder(query) { return this.json(`/graph/orders/search?q=${encodeURIComponent(query)}`); },
-  simulate(ruleName) { return this.json("/simulate", "POST", { rule_name: ruleName }); },
+  simulate(ruleName) {
+    if (String(ruleName).startsWith("saved:")) {
+      return this.json("/simulate", "POST", { strategy_id: String(ruleName).slice(6) });
+    }
+    return this.json("/simulate", "POST", { rule_name: ruleName });
+  },
+  getDispatchStrategySets() { return this.json("/dispatch-strategy-sets"); },
+  saveDispatchStrategySet(payload) { return this.json("/dispatch-strategy-sets", "POST", payload); },
   exportSimExcel(payload = null) {
     // 回传前端已持有的排产明细（app.simResult 或某方案的 schedule），后端据此生成 Excel，
     // 避免依赖易失效的后端 last_sim_payload。payload 为空时后端回退到最近一次仿真结果。
@@ -2698,7 +2707,7 @@ function renderTimeline(entries, options = {}) {
   return `
     <div class="surface-card">
       <div class="card-head">
-        <div><h3>${escapeHtml(options.title || "资源甘特图")}</h3>
+        <div><h3>${options.titleHtml || escapeHtml(options.title || "资源甘特图")}</h3>
         <p>条块颜色=订单标识色，质感区分已完成 / 进行中 / 未来排产；红色竖线为"现在"进度分界；斜纹遮罩显示班次外与停机占用。</p></div>
         ${selectedOrder === "__all__" ? `<span class="chip info">${escapeHtml(hitText)}</span>` : `<span class="chip info">${escapeHtml(selectedOrder)}</span>`}
       </div>
@@ -3130,6 +3139,34 @@ function fitGraphViewport(bounds) {
   app.graphView.panY = 80 - bounds.minY * zoom;
 }
 
+function savedDispatchStrategies() {
+  return asArray(app.dispatchStrategySets).flatMap((set) =>
+    asArray(set.strategies).map((strategy) => ({ ...strategy, setName: set.name })),
+  );
+}
+
+function dispatchRuleLabel(value) {
+  const raw = String(value || "ATC");
+  if (!raw.startsWith("saved:")) return raw;
+  const strategy = savedDispatchStrategies().find((item) => item.id === raw.slice(6));
+  return strategy?.name || "已保存方案";
+}
+
+function renderBaselineRuleOptions(selected) {
+  const builtins = CONFIG.HEURISTIC_RULES
+    .map((rule) => `<option value="${rule}" ${rule === selected ? "selected" : ""}>${rule}</option>`)
+    .join("");
+  const saved = asArray(app.dispatchStrategySets).map((set) => `
+    <optgroup label="${escapeHtml(set.name)}">
+      ${asArray(set.strategies).map((strategy) => {
+        const value = `saved:${strategy.id}`;
+        return `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(strategy.name)}</option>`;
+      }).join("")}
+    </optgroup>
+  `).join("");
+  return `<optgroup label="内置规则">${builtins}</optgroup>${saved}`;
+}
+
 function renderSimulatePage() {
   const container = el("simulate-content");
   if (!container) return;
@@ -3137,6 +3174,7 @@ function renderSimulatePage() {
   const completed = formatInt(simMetrics.completed_operations || 0);
   const total = formatInt(simMetrics.total_operations || 0);
   const infeasible = !!app.simResult && simMetrics.feasible === false;
+  const simRuleLabel = dispatchRuleLabel(app.simRule);
   // 前置检查条
   if (infeasible) {
     renderPrecheck("simulate-precheck", "err", `⚠ 仿真不完整：仅完成 ${completed} / ${total} 道工序，下方指标不可用于决策。<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="import">去查看校验结果 →</button>`);
@@ -3149,7 +3187,7 @@ function renderSimulatePage() {
   const ruleCards = `
     <article class="surface-card">
       <div class="card-head">
-        <div><h3>选择派工规则</h3><p>当前 ${escapeHtml(app.simRule)}。仿真结果作为优化求解的基线参照。</p></div>
+        <div><h3>选择派工规则</h3><p>当前 ${escapeHtml(simRuleLabel)}。仿真结果作为优化求解的基线参照。</p></div>
         <button class="btn btn-primary" type="button" data-action="run-simulate" ${app.simBusy ? "disabled" : ""}>${app.simBusy ? "仿真运行中…" : "运行仿真"}</button>
       </div>
       <div class="rule-grid">
@@ -3158,6 +3196,13 @@ function renderSimulatePage() {
             <strong>${escapeHtml(rule)}</strong><p>${escapeHtml(HEURISTIC_RULE_BLURB[rule] || "经典派工规则")}</p>
           </button>
         `).join("")}
+        ${savedDispatchStrategies().map((strategy) => {
+          const value = `saved:${strategy.id}`;
+          return `
+            <button class="rule-card ${value === app.simRule ? "selected" : ""}" type="button" data-action="select-sim-rule" data-rule="${escapeHtml(value)}">
+              <strong>${escapeHtml(strategy.name)}</strong><p>${escapeHtml(strategy.setName)} · 已保存派工方案</p>
+            </button>`;
+        }).join("")}
       </div>
       <div id="sim-status" class="mt-16">${renderSimStatusInner(app.simStatus)}</div>
     </article>
@@ -3179,7 +3224,7 @@ function renderSimulatePage() {
   ` : "";
   const detail = app.simResult ? `
     ${renderTimeline(app.simResult.gantt, {
-      title: `规则仿真甘特图 · ${app.simRule}`,
+      title: `规则仿真甘特图 · ${app.simResult?.rule || simRuleLabel}`,
       canvasId: "gantt-sim",
       solutionIds: [app.simResult.solution_id || `RULE:${app.simRule}`],
     })}
@@ -3199,7 +3244,7 @@ function renderSimulatePage() {
       )}
     </article>
   ` : app.simBusy
-    ? `<article class="surface-card">${renderEmptyState("仿真计算中…", `正在运行规则仿真（${escapeHtml(app.simRule)}），完成后将自动展示甘特图与指标。`)}</article>`
+    ? `<article class="surface-card">${renderEmptyState("仿真计算中…", `正在运行规则仿真（${escapeHtml(simRuleLabel)}），完成后将自动展示甘特图与指标。`)}</article>`
     : `<article class="surface-card">${renderEmptyState("尚未运行仿真", "选择派工规则后点击「运行仿真」按钮，这里会展示完整的时间轴、状态分布和停机遮罩。")}</article>`;
   container.innerHTML = `<div class="stack">${ruleCards}${infeasibleBanner}${kpiCards}${detail}</div>`;
   requestAnimationFrame(() => mountGantts());
@@ -3256,7 +3301,13 @@ function renderOptimizePage() {
           <label><span>ALNS 强度</span><input id="opt-alns-aggression" type="number" min="0.5" max="3" step="0.1" value="${app.optimizeForm.alnsAggression}"></label>
           <label><span>基线规则</span>
             <select id="opt-baseline-rule">
-              ${CONFIG.HEURISTIC_RULES.map((rule) => `<option value="${rule}" ${rule === app.optimizeForm.baselineRuleName ? "selected" : ""}>${rule}</option>`).join("")}
+              ${renderBaselineRuleOptions(app.optimizeForm.baselineRuleName)}
+            </select>
+          </label>
+          <label><span>热启动方案集</span>
+            <select id="opt-warm-start-set" ${app.optimizeForm.coldStart ? "disabled" : ""}>
+              <option value="">仅使用系统基准方案库</option>
+              ${asArray(app.dispatchStrategySets).map((set) => `<option value="${escapeHtml(set.id)}" ${set.id === app.optimizeForm.warmStartSetId ? "selected" : ""}>${escapeHtml(set.name)}（${formatInt(asArray(set.strategies).length)} 个）</option>`).join("")}
             </select>
           </label>
         </div>
@@ -3543,7 +3594,7 @@ function renderReviewCandidateComparison() {
       </td>
       ${visibleKeys.map((key) => cell(item, key)).join("")}
       <td class="compare-ops"><div class="row-ops">
-        <button class="op-btn detail ${detailOn ? "on" : ""}" type="button" data-action="focus-candidate" data-id="${escapeHtml(item.id)}" title="联动下方利用率与排程甘特">◎ 详情</button>
+        <button class="op-btn detail ${detailOn ? "on" : ""}" type="button" data-action="focus-candidate" data-id="${escapeHtml(item.id)}" title="联动下方利用率与排产甘特图">◎ 详情</button>
         <button class="op-btn ai" type="button" data-action="send-candidate-to-ai" data-id="${escapeHtml(item.id)}" title="送入 AI 评审">✦ AI 评审</button>
         <button class="op-btn exp" type="button" data-action="export-selected-solution" data-id="${escapeHtml(item.id)}" title="导出该方案 Excel">⬇ 导出</button>
       </div></td>
@@ -3660,7 +3711,7 @@ function renderReviewTypeUtilization() {
   return `<article class="surface-card">${head}${inner}</article>`;
 }
 
-// 评审方案排程甘特：单方案 + 订单多选，复用统一甘特（renderTimeline，按机器分组 + 4 天默认窗口）。
+// 评审方案排产甘特图：单方案 + 订单多选，复用统一甘特（renderTimeline，按机器分组 + 4 天默认窗口）。
 function ensureReviewGanttSchemeSelection() {
   const candidates = getReviewCandidates();
   if (!candidates.length) { app.reviewGanttSchemeId = null; return; }
@@ -3693,7 +3744,7 @@ function ensureReviewSchemeSchedule(schemeId) {
 function renderReviewGantt() {
   ensureReviewGanttSchemeSelection();
   const candidates = getReviewCandidates();
-  const emptyHead = `<div class="card-head"><div><h3>排程甘特 · 当前方案</h3><p>与「◎ 详情」联动；样式与筛选能力和规则仿真甘特一致；默认显示前 4 天，可滚动查看全部。</p></div></div>`;
+  const emptyHead = `<div class="card-head"><div><h3>排产甘特图 · 当前方案</h3><p>与「◎ 详情」联动；样式与筛选能力和规则仿真甘特一致；默认显示前 4 天，可滚动查看全部。</p></div></div>`;
   if (!candidates.length) {
     return `<article class="surface-card">${emptyHead}<div class="empty-state"><p>暂无方案，请先运行优化或加载参照方案。</p></div></article>`;
   }
@@ -3713,7 +3764,8 @@ function renderReviewGantt() {
     return `<article class="surface-card"><div class="empty-state"><p>该方案没有可显示的排程。</p></div></article>`;
   }
   return renderTimeline(st.entries, {
-    title: `排程甘特 · 当前方案 ${schemeName}`,
+    title: `排产甘特图 · 当前方案 ${schemeName}`,
+    titleHtml: `排产甘特图 · 当前方案 <span style="color:var(--primary)">${escapeHtml(String(schemeName))}</span>`,
     canvasId: "gantt-review-scheme",
     solutionIds: [schemeId],
   });
@@ -3723,8 +3775,14 @@ function renderReviewLibraryTab() {
   ensureReviewSelection();
   ensureReferenceSolutions();
   const candidates = getReviewCandidates();
+  const canSave = !!app.optimizeResult?.task_id && asArray(app.optimizeResult?.solutions).length > 0;
   return `
     <div class="stack">
+      ${canSave ? `
+        <article class="surface-card strategy-save-bar">
+          <div><h3>保存为派工方案集</h3><p>将本次 ${formatInt(asArray(app.optimizeResult.solutions).length)} 个 Pareto 方案命名后，发布到规则仿真和热启动配置。</p></div>
+          <button class="btn btn-primary" type="button" data-action="save-dispatch-strategy-set">保存并发布</button>
+        </article>` : ""}
       <div id="review-comparison-region">
         ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
           "暂无方案池",
@@ -3736,6 +3794,62 @@ function renderReviewLibraryTab() {
       <div id="review-gantt-region">${candidates.length ? renderReviewGantt() : ""}</div>
     </div>
   `;
+}
+
+function showDispatchStrategySaveModal() {
+  const solutions = asArray(app.optimizeResult?.solutions);
+  if (!app.optimizeResult?.task_id || !solutions.length) {
+    toast("当前没有可保存的优化方案。", "warning");
+    return;
+  }
+  document.querySelector(".strategy-save-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "error-modal-overlay strategy-save-overlay";
+  const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  overlay.innerHTML = `
+    <form class="error-modal strategy-save-modal">
+      <div class="card-head"><div><h3>保存派工方案集</h3><p>方案名称发布后会同时出现在规则仿真和多目标优化配置中。</p></div></div>
+      <label><span>方案集名称</span><input name="set_name" maxlength="100" required value="三目标方案集-${date}"></label>
+      <div class="strategy-name-list">
+        ${solutions.map((solution, index) => `
+          <label><span>${escapeHtml(schemeDisplayName(index))}</span><input name="strategy_name" data-solution-id="${escapeHtml(solution.solution_id)}" maxlength="80" required value="${escapeHtml(schemeDisplayName(index))}"></label>
+        `).join("")}
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" type="button" data-strategy-save-cancel>取消</button>
+        <button class="btn btn-primary" type="submit">保存并发布</button>
+      </div>
+    </form>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector("[data-strategy-save-cancel]")?.addEventListener("click", close);
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+  overlay.querySelector("form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = overlay.querySelector('[type="submit"]');
+    const name = overlay.querySelector('[name="set_name"]')?.value.trim();
+    const namedSolutions = Array.from(overlay.querySelectorAll('[name="strategy_name"]')).map((input) => ({
+      solution_id: input.dataset.solutionId,
+      name: input.value.trim(),
+    }));
+    if (!name || namedSolutions.some((item) => !item.name)) return;
+    submit.disabled = true;
+    submit.textContent = "正在保存…";
+    try {
+      const saved = await api.saveDispatchStrategySet({ task_id: app.optimizeResult.task_id, name, solutions: namedSolutions });
+      const payload = await api.getDispatchStrategySets();
+      app.dispatchStrategySets = asArray(payload?.sets);
+      app.optimizeForm.warmStartSetId = saved.id;
+      close();
+      toast(`已发布方案集：${saved.name}`, "success");
+      await renderCurrentPage();
+    } catch (error) {
+      submit.disabled = false;
+      submit.textContent = "保存并发布";
+      toast(`保存方案集失败：${error.message}`, "error");
+    }
+  });
+  overlay.querySelector('[name="set_name"]')?.focus();
 }
 
 // 启发式参照 chips（Tab 条右侧）：基线/计算中/未计算/已纳入 四种状态
@@ -5003,14 +5117,19 @@ async function renderCurrentPage() {
 
 async function loadCatalogs() {
   try {
-    const [optRes, exactRes, llmRes] = await Promise.all([
+    const [optRes, exactRes, llmRes, strategyRes] = await Promise.all([
       api.getOptimizeObjectives().catch(() => ({ objectives: [] })),
       api.getExactObjectives().catch(() => ({ objectives: [] })),
       api.getLlmConfig().catch(() => null),
+      api.getDispatchStrategySets().catch(() => ({ sets: [] })),
     ]);
     app.optimizeObjectiveCatalog = asArray(optRes?.objectives);
     app.exactObjectiveCatalog = asArray(exactRes?.objectives);
     app.llmConfig = llmRes;
+    app.dispatchStrategySets = asArray(strategyRes?.sets);
+    if (!app.optimizeForm.warmStartSetId && app.dispatchStrategySets.length) {
+      app.optimizeForm.warmStartSetId = app.dispatchStrategySets[0].id;
+    }
     if (!app.optimizeForm.objectiveKeys.length && app.optimizeObjectiveCatalog.length) {
       app.optimizeForm.objectiveKeys = app.optimizeObjectiveCatalog.slice(0, 3).map((item) => item.key);
     }
@@ -5120,6 +5239,7 @@ function collectOptimizeForm() {
   app.optimizeForm.refineRounds = Number(el("opt-refine-rounds")?.value || app.optimizeForm.refineRounds);
   app.optimizeForm.alnsAggression = Number(el("opt-alns-aggression")?.value || app.optimizeForm.alnsAggression);
   app.optimizeForm.baselineRuleName = el("opt-baseline-rule")?.value || app.optimizeForm.baselineRuleName;
+  app.optimizeForm.warmStartSetId = el("opt-warm-start-set")?.value ?? app.optimizeForm.warmStartSetId;
   app.optimizeForm.coldStart = Boolean(el("opt-cold-start")?.checked);
   refreshOptimizeBudgetRecommendation({ preserveManual: true });
   return {
@@ -5131,7 +5251,9 @@ function collectOptimizeForm() {
     coarse_time_ratio: app.optimizeForm.coarseTimeRatio,
     refine_rounds: app.optimizeForm.refineRounds,
     alns_aggression: app.optimizeForm.alnsAggression,
-    baseline_rule_name: app.optimizeForm.baselineRuleName,
+    baseline_rule_name: String(app.optimizeForm.baselineRuleName).startsWith("saved:") ? "ATC" : app.optimizeForm.baselineRuleName,
+    baseline_strategy_id: String(app.optimizeForm.baselineRuleName).startsWith("saved:") ? String(app.optimizeForm.baselineRuleName).slice(6) : null,
+    warm_start_set_id: app.optimizeForm.coldStart ? null : (app.optimizeForm.warmStartSetId || null),
     cold_start: app.optimizeForm.coldStart,
   };
 }
@@ -5729,9 +5851,10 @@ async function handleSimulate() {
   if (app.simBusy) return;
   app.simBusy = true;
   const startedAt = Date.now();
+  const simRuleLabel = dispatchRuleLabel(app.simRule);
   app.simStatus = {
     phase: "running",
-    message: `正在运行规则仿真（${app.simRule}）：提交请求并初始化排程上下文…`,
+    message: `正在运行规则仿真（${simRuleLabel}）：提交请求并初始化排程上下文…`,
     elapsedMs: 0,
   };
   syncSimulateControls();
@@ -5747,7 +5870,7 @@ async function handleSimulate() {
   }, 300);
   app.simElapsedTimer = stageTimer;
   try {
-    app.simStatus.message = `规则引擎计算中（${app.simRule}）…`;
+    app.simStatus.message = `规则引擎计算中（${simRuleLabel}）…`;
     const note = el("sim-status-note");
     if (note) note.textContent = app.simStatus.message;
     app.simResult = await api.simulate(app.simRule);
@@ -5767,9 +5890,9 @@ async function handleSimulate() {
     });
     app.simStatus = diagnosis
       ? { phase: "done-warn", message: `仿真完成，但结果不完整：${diagnosis}`, elapsedMs }
-      : { phase: "done", message: `规则仿真已完成（${app.simRule}），耗时 ${formatDurationMs(elapsedMs)}。`, elapsedMs };
+      : { phase: "done", message: `规则仿真已完成（${app.simResult?.rule || simRuleLabel}），耗时 ${formatDurationMs(elapsedMs)}。`, elapsedMs };
     if (diagnosis) toast(`仿真完成，但结果不完整：${diagnosis}`, "error");
-    else toast(`规则仿真已完成：${app.simRule}`, "success");
+    else toast(`规则仿真已完成：${app.simResult?.rule || simRuleLabel}`, "success");
   } catch (error) {
     app.simStatus = {
       phase: "error",
@@ -6036,6 +6159,7 @@ async function handleAction(action, target) {
     app.simRule = target.dataset.rule || app.simRule;
     return renderCurrentPage();
   }
+  if (action === "save-dispatch-strategy-set") return showDispatchStrategySaveModal();
   if (action === "reset-compare-cols") {
     try { localStorage.removeItem(REVIEW_COMPARE_HIDDEN_LS); } catch { /* 忽略 */ }
     app.reviewColConfigOpen = true;
@@ -6188,7 +6312,7 @@ async function handleAction(action, target) {
   if (action === "generate-exact-weighted") return handleGenerateExact("weighted");
   if (action === "export-selected-solution") return handleExportSolution(target?.dataset.id || getSelectedReviewCandidate()?.id);
   if (action === "focus-candidate") {
-    // ◎ 详情：联动下方利用率对比与排程甘特切换到该方案
+    // ◎ 详情：联动下方利用率对比与排产甘特图切换到该方案
     const id = target.dataset.id;
     app.reviewDetailId = id;
     app.reviewGanttSchemeId = id;
@@ -6391,7 +6515,7 @@ function bindGlobalEvents() {
       persistReviewProgress();
       updateShell();
     }
-    if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression, #opt-baseline-rule")) {
+    if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression, #opt-baseline-rule, #opt-warm-start-set")) {
       collectOptimizeForm();
       updateOptimizeBudgetHint();
       return;

@@ -48,6 +48,7 @@ TOOL_DEFINITIONS = [
         "name": "get_planning_overview",
         "description": (
             "查询排产概览、候选方案数量、Pareto Archive 规模及各方案的总延误和完工跨度。"
+            "返回的 solution_name 与方案评审界面一致；solution_id 仅作为后续查询标识。"
             "适用于：有多少候选方案、各方案总延误分别是多少。"
         ),
         "inputSchema": {
@@ -58,7 +59,10 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "compare_planning_solutions",
-        "description": "比较一个或多个候选排产方案的指定指标，最多比较 4 个方案。",
+        "description": (
+            "比较一个或多个候选排产方案的指定指标，最多比较 4 个方案。"
+            "面向用户展示时使用返回的 solution_name，不使用内部 solution_id 作为方案名。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -92,6 +96,7 @@ TOOL_DEFINITIONS = [
         "name": "get_order_planning",
         "description": (
             "查询指定订单在一个或多个候选排产方案中的工序安排、完工时间和订单延误。"
+            "面向用户展示时使用返回的 solution_name。"
             "适用于：某订单怎么排、何时完工、不同方案有什么差异。"
         ),
         "inputSchema": {
@@ -109,6 +114,7 @@ TOOL_DEFINITIONS = [
         "name": "get_operation_planning",
         "description": (
             "查询指定工序在一个或多个候选排产方案中的计划开始、结束时间和资源。"
+            "面向用户展示时使用返回的 solution_name。"
             "适用于：某工序排在什么时候、在哪台机器加工。"
         ),
         "inputSchema": {

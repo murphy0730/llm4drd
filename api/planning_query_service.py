@@ -9,6 +9,7 @@ from ..core.models import Operation, Order, ShopFloor
 MAX_SOLUTIONS = 4
 MAX_SEARCH_RESULTS = 50
 MAX_ORDER_OPERATIONS = 200
+CHINESE_NUMERALS = ("零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
 
 
 @dataclass
@@ -48,6 +49,7 @@ class PlanningQueryService:
     def get_overview(self, task_id: str | None = None) -> dict:
         resolved_id, task, payload = self._resolve_task(task_id)
         candidates = list(payload.get("solutions") or [])
+        solution_names = self._solution_names(task, payload)
         return {
             "instance_version": self._instance_version,
             "task_id": resolved_id,
@@ -56,7 +58,10 @@ class PlanningQueryService:
             "archive_size": int(payload.get("archive_size", 0) or 0),
             "baseline_count": 1 if (payload.get("baseline") or {}).get("solution_id") else 0,
             "reference_count": len(self._reference_solutions(task, payload)),
-            "solutions": [self._solution_summary(solution) for solution in candidates],
+            "solutions": [
+                self._solution_summary(solution, solution_names)
+                for solution in candidates
+            ],
         }
 
     def compare_solutions(
@@ -67,6 +72,7 @@ class PlanningQueryService:
     ) -> dict:
         resolved_id, task, payload = self._resolve_task(task_id)
         solutions, truncated = self._select_solutions(task, payload, solution_ids)
+        solution_names = self._solution_names(task, payload)
         keys = metric_keys or [
             "total_tardiness",
             "main_order_tardy_total_time",
@@ -79,7 +85,7 @@ class PlanningQueryService:
                 for key in keys
             }
             rows.append({
-                **self._solution_summary(solution),
+                **self._solution_summary(solution, solution_names),
                 "metric_values": metrics,
             })
         return {
@@ -127,6 +133,7 @@ class PlanningQueryService:
             )
         resolved_id, task, payload = self._resolve_task(task_id)
         solutions, solutions_truncated = self._select_solutions(task, payload, solution_ids)
+        solution_names = self._solution_names(task, payload)
         operation_limit = max(1, min(int(max_operations), MAX_ORDER_OPERATIONS))
         planning_rows = []
         for solution in solutions:
@@ -152,6 +159,7 @@ class PlanningQueryService:
             )
             planning_rows.append({
                 "solution_id": solution.get("solution_id"),
+                "solution_name": self._solution_name(solution, solution_names),
                 "feasible": bool(solution.get("feasible", False)),
                 "planned": bool(entries),
                 "operation_count": len(entries),
@@ -223,6 +231,7 @@ class PlanningQueryService:
             )
         resolved_id, task, payload = self._resolve_task(task_id)
         solutions, truncated = self._select_solutions(task, payload, solution_ids)
+        solution_names = self._solution_names(task, payload)
         placements = []
         for solution in solutions:
             entry = next(
@@ -235,12 +244,14 @@ class PlanningQueryService:
             if entry is None:
                 placements.append({
                     "solution_id": solution.get("solution_id"),
+                    "solution_name": self._solution_name(solution, solution_names),
                     "planned": False,
                     "reason": "operation_not_present_in_solution",
                 })
                 continue
             placements.append({
                 "solution_id": solution.get("solution_id"),
+                "solution_name": self._solution_name(solution, solution_names),
                 "planned": True,
                 **self._operation_entry(entry, include_identity=False),
             })
@@ -301,10 +312,17 @@ class PlanningQueryService:
                 )
             missing = [item for item in requested if item not in available]
             if missing:
+                solution_names = self._solution_names(task, payload)
                 raise PlanningQueryError(
                     "SOLUTION_NOT_FOUND",
                     f"未找到方案: {', '.join(missing)}",
-                    [{"solution_id": key} for key in available],
+                    [
+                        {
+                            "solution_id": key,
+                            "solution_name": solution_names.get(key, key),
+                        }
+                        for key in available
+                    ],
                 )
             return [available[item] for item in requested], False
         candidates = list(payload.get("solutions") or [])
@@ -335,9 +353,38 @@ class PlanningQueryService:
                     merged[str(item["solution_id"])] = item
         return list(merged.values())
 
-    def _solution_summary(self, solution: dict) -> dict:
+    def _solution_names(self, task: dict, payload: dict) -> dict[str, str]:
+        ordered = self._solution_index(task, payload)
+        return {
+            solution_id: self._scheme_display_name(index)
+            for index, solution_id in enumerate(ordered)
+        }
+
+    @staticmethod
+    def _solution_name(solution: dict, solution_names: dict[str, str]) -> str:
+        solution_id = str(solution.get("solution_id") or "")
+        return solution_names.get(solution_id, solution_id)
+
+    @staticmethod
+    def _scheme_display_name(index: int) -> str:
+        number = index + 1
+        if number <= 10:
+            numeral = CHINESE_NUMERALS[number]
+        elif number < 20:
+            numeral = f"十{CHINESE_NUMERALS[number - 10]}"
+        else:
+            ones = CHINESE_NUMERALS[number % 10] if number % 10 else ""
+            numeral = f"{CHINESE_NUMERALS[number // 10]}十{ones}"
+        return f"方案{numeral}"
+
+    def _solution_summary(
+        self,
+        solution: dict,
+        solution_names: dict[str, str],
+    ) -> dict:
         return {
             "solution_id": solution.get("solution_id"),
+            "solution_name": self._solution_name(solution, solution_names),
             "source": solution.get("source", "hybrid"),
             "feasible": bool(solution.get("feasible", False)),
             "total_tardiness_hours": self._rounded(

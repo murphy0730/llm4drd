@@ -149,6 +149,7 @@ class PlanningQueryApiTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["data"]["candidate_count"], 1)
         self.assertEqual(payload["data"]["archive_size"], 3)
+        self.assertEqual(payload["data"]["solutions"][0]["solution_name"], "方案一")
         self.assertEqual(payload["meta"]["time_unit"], "hour")
         self.assertTrue(payload["meta"]["task_defaulted"])
 
@@ -156,11 +157,13 @@ class PlanningQueryApiTests(unittest.TestCase):
         payload = server.planning_order("O-1", solution_ids="S-1")
 
         self.assertEqual(payload["data"]["solutions"][0]["operation_count"], 3)
+        self.assertEqual(payload["data"]["solutions"][0]["solution_name"], "方案一")
 
     def test_operation_endpoint_returns_placement(self) -> None:
         payload = server.planning_operation("OP-13", solution_ids="S-1")
 
         self.assertTrue(payload["data"]["placements"][0]["planned"])
+        self.assertEqual(payload["data"]["placements"][0]["solution_name"], "方案一")
         self.assertEqual(payload["data"]["placements"][0]["machine_id"], "M-A1")
 
     def test_domain_error_becomes_structured_http_error(self) -> None:

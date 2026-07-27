@@ -113,6 +113,19 @@ class WarmStartTests(unittest.TestCase):
         self.assertGreater(opt.config.population_size, 24)
         self.assertEqual(len(population), opt.config.population_size)
 
+    def test_explicit_saved_strategy_is_injected_without_projection(self):
+        probe = self._optimizer(baseline_seeds_enabled=False)
+        candidate = probe._default_candidate("SPT")
+        candidate.op_bias = {"OP-11": 0.314159}
+        optimizer = self._optimizer(
+            baseline_seeds_enabled=False,
+            population_size=4,
+            warm_start_candidates=[candidate],
+        )
+        population = optimizer._seed_population()
+        self.assertIn(candidate.signature(), _seed_signatures(population))
+        self.assertGreaterEqual(optimizer.config.population_size, 4)
+
     def test_feature_names_mismatch_skipped(self):
         probe = self._optimizer()
         self.store.save_batch(
@@ -140,6 +153,22 @@ class WarmStartTests(unittest.TestCase):
         result = optimizer.run()
         self.assertGreaterEqual(result.found_solution_count, 1)
         self.assertGreaterEqual(len(optimizer.archive.solutions()), 1)
+
+    def test_saved_strategy_can_be_exact_baseline(self):
+        probe = self._optimizer(baseline_seeds_enabled=False)
+        candidate = probe._default_candidate("SPT")
+        optimizer = self._optimizer(
+            baseline_seeds_enabled=False,
+            baseline_candidate=candidate,
+            baseline_strategy_name="方案一｜流程时间优先",
+            warm_start_candidates=[candidate],
+            generations=1,
+            alns_iterations_per_candidate=0,
+        )
+        result = optimizer.run()
+        self.assertEqual(result.baseline["rule_name"], "方案一｜流程时间优先")
+        self.assertTrue(result.baseline["metrics"]["feasible"])
+        self.assertTrue(all("candidate_parameters" in item for item in result.solutions))
 
 
 if __name__ == "__main__":

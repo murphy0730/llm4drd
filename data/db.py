@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional
@@ -323,6 +324,37 @@ def init_db(db_path: str = DB_PATH):
             );
             CREATE INDEX IF NOT EXISTS idx_baseline_status ON baseline_solutions(status);
             CREATE INDEX IF NOT EXISTS idx_baseline_batch ON baseline_solutions(batch_id);
+            CREATE TABLE IF NOT EXISTS dispatch_strategy_sets (
+                id                   TEXT PRIMARY KEY,
+                name                 TEXT NOT NULL,
+                source_task_id       TEXT,
+                source_mode          TEXT NOT NULL DEFAULT 'cold',
+                objective_keys       TEXT NOT NULL DEFAULT '[]',
+                instance_version     INTEGER,
+                instance_fingerprint TEXT,
+                status               TEXT NOT NULL DEFAULT 'published',
+                created_at           TEXT NOT NULL,
+                updated_at           TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dispatch_strategies (
+                id                 TEXT PRIMARY KEY,
+                set_id             TEXT NOT NULL REFERENCES dispatch_strategy_sets(id) ON DELETE CASCADE,
+                strategy_code      TEXT NOT NULL UNIQUE,
+                name               TEXT NOT NULL,
+                source_solution_id TEXT NOT NULL,
+                candidate_json     TEXT NOT NULL,
+                objective_values   TEXT NOT NULL DEFAULT '{}',
+                metrics_snapshot   TEXT NOT NULL DEFAULT '{}',
+                feature_names      TEXT NOT NULL DEFAULT '[]',
+                scale_json         TEXT NOT NULL DEFAULT '{}',
+                graph_context_mode TEXT,
+                sort_order         INTEGER NOT NULL DEFAULT 0,
+                status             TEXT NOT NULL DEFAULT 'active',
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_dispatch_strategy_set ON dispatch_strategies(set_id, sort_order);
+            CREATE INDEX IF NOT EXISTS idx_dispatch_strategy_status ON dispatch_strategies(status);
             CREATE INDEX IF NOT EXISTS idx_rules_type ON rules(problem_type, objective);
             CREATE INDEX IF NOT EXISTS idx_rules_active ON rules(is_active);
             CREATE INDEX IF NOT EXISTS idx_results_rule ON schedule_results(rule_id);
@@ -608,6 +640,120 @@ class BaselineSolutionStore:
     def clear_all(self) -> None:
         with get_db(self.db_path) as conn:
             conn.execute("DELETE FROM baseline_solutions")
+
+
+_DISPATCH_STRATEGY_JSON_FIELDS = (
+    "candidate_json",
+    "objective_values",
+    "metrics_snapshot",
+    "feature_names",
+    "scale_json",
+)
+
+
+class DispatchStrategyStore:
+    """Persistent, user-named dispatch strategies grouped by optimization run."""
+
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+
+    @staticmethod
+    def _strategy_to_dict(row) -> dict:
+        record = dict(row)
+        for field in _DISPATCH_STRATEGY_JSON_FIELDS:
+            try:
+                record[field] = json.loads(record.get(field) or ("[]" if field == "feature_names" else "{}"))
+            except (TypeError, ValueError):
+                record[field] = [] if field == "feature_names" else {}
+        return record
+
+    def save_set(self, record: dict, strategies: list[dict]) -> dict:
+        now = datetime.now().isoformat(timespec="seconds")
+        set_id = str(record.get("id") or uuid.uuid4())
+        with get_db(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO dispatch_strategy_sets
+                (id, name, source_task_id, source_mode, objective_keys, instance_version,
+                 instance_fingerprint, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
+                """,
+                (
+                    set_id,
+                    str(record["name"]).strip(),
+                    record.get("source_task_id"),
+                    record.get("source_mode", "cold"),
+                    json.dumps(record.get("objective_keys") or [], ensure_ascii=False),
+                    record.get("instance_version"),
+                    record.get("instance_fingerprint"),
+                    now,
+                    now,
+                ),
+            )
+            for index, item in enumerate(strategies):
+                strategy_id = str(item.get("id") or uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO dispatch_strategies
+                    (id, set_id, strategy_code, name, source_solution_id, candidate_json,
+                     objective_values, metrics_snapshot, feature_names, scale_json,
+                     graph_context_mode, sort_order, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                    """,
+                    (
+                        strategy_id,
+                        set_id,
+                        item.get("strategy_code") or f"DSP-{set_id[:8].upper()}-{index + 1:02d}",
+                        str(item["name"]).strip(),
+                        item["source_solution_id"],
+                        json.dumps(item.get("candidate_json") or {}, ensure_ascii=False, sort_keys=True),
+                        json.dumps(item.get("objective_values") or {}, ensure_ascii=False, sort_keys=True),
+                        json.dumps(item.get("metrics_snapshot") or {}, ensure_ascii=False, sort_keys=True),
+                        json.dumps(item.get("feature_names") or [], ensure_ascii=False),
+                        json.dumps(item.get("scale_json") or {}, ensure_ascii=False, sort_keys=True),
+                        item.get("graph_context_mode"),
+                        int(item.get("sort_order", index)),
+                        now,
+                        now,
+                    ),
+                )
+        return self.get_set(set_id)
+
+    def get_set(self, set_id: str) -> Optional[dict]:
+        with get_db(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM dispatch_strategy_sets WHERE id=?", (set_id,)).fetchone()
+            if row is None:
+                return None
+            strategies = conn.execute(
+                "SELECT * FROM dispatch_strategies WHERE set_id=? ORDER BY sort_order, name",
+                (set_id,),
+            ).fetchall()
+        result = dict(row)
+        result["objective_keys"] = json.loads(result.get("objective_keys") or "[]")
+        result["strategies"] = [self._strategy_to_dict(item) for item in strategies]
+        return result
+
+    def list_sets(self, published_only: bool = True) -> list[dict]:
+        clause = "WHERE status='published'" if published_only else ""
+        with get_db(self.db_path) as conn:
+            rows = conn.execute(
+                f"SELECT id FROM dispatch_strategy_sets {clause} ORDER BY created_at DESC"
+            ).fetchall()
+        return [item for row in rows if (item := self.get_set(row["id"])) is not None]
+
+    def get_strategy(self, strategy_id: str) -> Optional[dict]:
+        with get_db(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT s.*, ss.name AS set_name, ss.status AS set_status,
+                       ss.instance_version, ss.instance_fingerprint
+                FROM dispatch_strategies s
+                JOIN dispatch_strategy_sets ss ON ss.id=s.set_id
+                WHERE s.id=? AND s.status='active' AND ss.status='published'
+                """,
+                (strategy_id,),
+            ).fetchone()
+        return self._strategy_to_dict(row) if row else None
 
 
 class DowntimeStore:

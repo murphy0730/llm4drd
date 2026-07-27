@@ -214,11 +214,22 @@ class ReviewFrontendContractTests(unittest.TestCase):
 
     def test_optimize_cold_start_switch_defaults_to_warm_and_is_submitted(self):
         self.assertIn("coldStart: false", JS)
+        self.assertIn('class="cold-start-control" title=', JS)
         self.assertIn('id="opt-cold-start"', JS)
         self.assertIn('role="switch"', JS)
+        self.assertNotIn(".cold-start-control[hidden]", CSS)
         self.assertIn("cold_start: app.optimizeForm.coldStart", JS)
         self.assertIn('target.matches("#opt-cold-start")', JS)
         self.assertIn("app.optimizeForm.coldStart = target.checked", JS)
+
+    def test_saved_dispatch_strategies_are_available_in_simulation_and_warm_start(self):
+        self.assertIn('getDispatchStrategySets() { return this.json("/dispatch-strategy-sets")', JS)
+        self.assertIn('saveDispatchStrategySet(payload)', JS)
+        self.assertIn('data-action="save-dispatch-strategy-set"', JS)
+        self.assertIn('savedDispatchStrategies().map((strategy)', JS)
+        self.assertIn('id="opt-warm-start-set"', JS)
+        self.assertIn('baseline_strategy_id:', JS)
+        self.assertIn('warm_start_set_id:', JS)
         self.assertIn(".cold-start-control", CSS)
         # 不落 localStorage：刷新页面后必须恢复默认热启动。
         self.assertNotIn("COLD_START", JS)

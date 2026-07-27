@@ -102,6 +102,9 @@ class HybridConfig:
     baseline_seeds_enabled: bool = True
     baseline_db_path: str | None = None  # None → 用 data.db 默认 DB_PATH
     baseline_scale_tolerance: float = 0.20  # 尺度校验阈值：偏差超此比例则跳过该方案
+    baseline_candidate: CandidateParameters | None = None
+    baseline_strategy_name: str | None = None
+    warm_start_candidates: list[CandidateParameters] = field(default_factory=list)
 
 
 @dataclass
@@ -1493,6 +1496,9 @@ class HybridNSGA3ALNSOptimizer:
 
     def _seed_population(self) -> list[CandidateParameters]:
         seeds: list[CandidateParameters] = []
+        # 用户显式选择的方案集必须原样进入种群；投影或混合只用于其他探索种子。
+        explicit_warm_starts = [candidate.clone() for candidate in self.config.warm_start_candidates]
+        seeds.extend(explicit_warm_starts)
         # 基准方案插在最前：去重与截断时优先保留（提案修订后 §4.5）。
         baseline_seeds = self._load_baseline_seeds()
         for candidate in baseline_seeds:
@@ -1510,7 +1516,7 @@ class HybridNSGA3ALNSOptimizer:
             unique.setdefault(seed.signature(), seed)
         # 防截断：有基线时上调 population_size，确保基线与现有种子都进种群、互不挤占。
         # 库空时不触发，population_size 维持不变，行为与改前逐字节一致。
-        if baseline_seeds and len(unique) > self.config.population_size:
+        if (baseline_seeds or explicit_warm_starts) and len(unique) > self.config.population_size:
             self.config.population_size = len(unique)
         population = list(unique.values())[: self.config.population_size]
         while len(population) < self.config.population_size:
@@ -1846,6 +1852,7 @@ class HybridNSGA3ALNSOptimizer:
             "metrics": self._format_metric_payload(solution.metrics),
             "delta_vs_baseline": deltas,
             "candidate": solution.candidate.summary(),
+            "candidate_parameters": solution.candidate.to_dict(),
             "summary": {
                 "completed_operations": analytics.get("completed_operations"),
                 "total_operations": analytics.get("total_operations"),
@@ -1868,7 +1875,7 @@ class HybridNSGA3ALNSOptimizer:
     def _format_baseline_payload(self, solution: OptimizationSolution, schedule_limit: int | None = 120) -> dict:
         return {
             "solution_id": solution.solution_id,
-            "rule_name": self.config.baseline_rule_name,
+            "rule_name": self.config.baseline_strategy_name or self.config.baseline_rule_name,
             "evaluation_mode": solution.metrics.get("evaluation_mode", "exact"),
             "objectives": {spec.key: round(solution.objectives.get(spec.key, 0.0), 4) for spec in self.specs},
             "metrics": self._format_metric_payload(solution.metrics),
@@ -1906,12 +1913,20 @@ class HybridNSGA3ALNSOptimizer:
                 )
 
             baseline_name = self.config.baseline_rule_name if self.config.baseline_rule_name in BUILTIN_RULES else "ATC"
-            baseline_candidate = self._project_candidate_to_graph_space(
-                self._default_candidate(baseline_name),
-                "balanced",
-                blend=0.18,
-            )
+            if self.config.baseline_candidate is not None:
+                baseline_candidate = self.config.baseline_candidate.clone()
+            else:
+                baseline_candidate = self._project_candidate_to_graph_space(
+                    self._default_candidate(baseline_name),
+                    "balanced",
+                    blend=0.18,
+                )
             init_candidates = [baseline_candidate] + self._seed_population()
+            if self.config.warm_start_candidates:
+                self.config.population_size = max(
+                    self.config.population_size,
+                    len({candidate.signature() for candidate in init_candidates}),
+                )
             init_limit = min(len(init_candidates), max(6, self.config.population_size))
             init_candidates = self._filter_candidate_batch(
                 init_candidates[: init_limit * 2], init_limit
@@ -2049,7 +2064,12 @@ class HybridNSGA3ALNSOptimizer:
                 desired_exact_total,
                 "正在执行精确基线评估 0 / 1",
             )
-            self.baseline_solution = self._evaluate_builtin_rule(baseline_name, "baseline", 0)
+            if self.config.baseline_candidate is not None:
+                self.baseline_solution = self._simulate_candidate(
+                    self.config.baseline_candidate.clone(), "baseline", 0
+                )
+            else:
+                self.baseline_solution = self._evaluate_builtin_rule(baseline_name, "baseline", 0)
             self._record_solution(self.baseline_solution)
             scale_map = self._objective_scale_map(self.baseline_solution)
 

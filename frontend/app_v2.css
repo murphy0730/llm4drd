@@ -2147,6 +2147,25 @@ a {
   word-break: break-all;
 }
 
+.strategy-save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.strategy-save-bar h3 { margin: 0 0 4px; }
+.strategy-save-bar p { margin: 0; color: var(--text-soft); font-size: 12px; }
+.strategy-save-modal { width: min(720px, 100%); border-color: var(--line); }
+.strategy-save-modal h3 { color: var(--text); }
+.strategy-save-modal > label,
+.strategy-name-list label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; }
+.strategy-name-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
 /* -- vis-timeline 融入 design-system -- */
 .gantt-canvas { width: 100%; min-height: 220px; }
 .gantt-canvas .vis-timeline {

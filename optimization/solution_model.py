@@ -67,6 +67,31 @@ class CandidateParameters:
             graph_profile=self.graph_profile,
         )
 
+    def to_dict(self) -> dict:
+        """Lossless JSON payload used by persisted dispatch strategies."""
+        return {
+            "feature_weights": {str(key): float(value) for key, value in self.feature_weights.items()},
+            "destroy_weights": {str(key): float(value) for key, value in self.destroy_weights.items()},
+            "repair_weights": {str(key): float(value) for key, value in self.repair_weights.items()},
+            "op_bias": {str(key): float(value) for key, value in self.op_bias.items()},
+            "destroy_fraction": float(self.destroy_fraction),
+            "seed_rule_name": self.seed_rule_name,
+            "graph_profile": self.graph_profile,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CandidateParameters":
+        payload = payload or {}
+        return cls(
+            feature_weights={str(key): float(value) for key, value in (payload.get("feature_weights") or {}).items()},
+            destroy_weights={str(key): float(value) for key, value in (payload.get("destroy_weights") or {}).items()},
+            repair_weights={str(key): float(value) for key, value in (payload.get("repair_weights") or {}).items()},
+            op_bias={str(key): float(value) for key, value in (payload.get("op_bias") or {}).items()},
+            destroy_fraction=float(payload.get("destroy_fraction", 0.18)),
+            seed_rule_name=payload.get("seed_rule_name"),
+            graph_profile=payload.get("graph_profile"),
+        )
+
     def prune_bias(self, max_items: int = 120, epsilon: float = 1e-6) -> None:
         self.op_bias = {
             op_id: bias for op_id, bias in self.op_bias.items() if abs(bias) > epsilon

@@ -19,7 +19,7 @@ from ..ai.evolution import EvolutionEngine, EvolutionConfig, LLMInterface
 from ..optimization.pareto import ParetoOptimizer, OBJECTIVES, NSGA2Optimizer
 from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics, objective_summary_payload
 from ..optimization.hybrid_nsga3_alns import HybridConfig, HybridNSGA3ALNSOptimizer
-from ..optimization.solution_model import schedule_payload_fields
+from ..optimization.solution_model import CandidateParameters, FEATURE_NAMES, schedule_payload_fields
 from ..data.db import (
     init_db,
     get_instance_version,
@@ -29,6 +29,7 @@ from ..data.db import (
     WorkflowProgressStore,
     RuleReferenceCacheStore,
     BaselineSolutionStore,
+    DispatchStrategyStore,
     shifts_to_payload,
 )
 from ..data.graph_artifact_store import GraphArtifactStore
@@ -70,6 +71,7 @@ downtime_store = DowntimeStore()
 workflow_store = WorkflowProgressStore()
 rule_reference_cache_store = RuleReferenceCacheStore()
 baseline_solution_store = BaselineSolutionStore()
+dispatch_strategy_store = DispatchStrategyStore()
 _nsga2_tasks: dict = {}
 _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
@@ -252,6 +254,7 @@ class GenReq(BaseModel):
 
 class SimReq(BaseModel):
     rule_name: str = "ATC"
+    strategy_id: Optional[str] = None
 
 class RunRulePlanningReq(BaseModel):
     rule_name: str = Field(min_length=1, max_length=64)
@@ -304,6 +307,8 @@ class HybridOptimizeReq(BaseModel):
     parallel_workers: int = 0
     seed: int = 42
     baseline_rule_name: str = "ATC"
+    baseline_strategy_id: Optional[str] = None
+    warm_start_set_id: Optional[str] = None
     # false=热启动（加载持久化基准参数）；true=冷启动（仅使用内置/图谱种子）。
     cold_start: bool = False
     # "process": 进程池绕开 GIL（默认）；"thread": 线程池（排查进程池故障时用）。
@@ -330,6 +335,17 @@ class ScenarioCompareReq(BaseModel):
     num_replications: int = 1
     breakdown_prob: float = 0.0
     pt_variance: float = 0.0
+
+
+class DispatchStrategyNameReq(BaseModel):
+    solution_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=80)
+
+
+class DispatchStrategySetCreateReq(BaseModel):
+    task_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=100)
+    solutions: list[DispatchStrategyNameReq]
 
 class NLScheduleReq(BaseModel):
     prompt: str
@@ -2972,7 +2988,39 @@ def _simulate_locked(req: SimReq):
     if current_shop is None:
         raise HTTPException(400, "请先生成实例")
     shop = current_shop
-    func = BUILTIN_RULES.get(req.rule_name, BUILTIN_RULES["ATC"])
+    strategy = None
+    rule_label = req.rule_name
+    if req.strategy_id:
+        strategy = dispatch_strategy_store.get_strategy(req.strategy_id)
+        if strategy is None:
+            raise HTTPException(404, "保存的派工方案不存在或已归档")
+        candidate = _candidate_from_dispatch_strategy(strategy)
+        graph_context_mode = resolve_graph_context_mode()
+        graph_context = None
+        if graph_context_mode != GraphContextMode.LEGACY:
+            graph_context, _ = graph_context_service.get_or_build(
+                current_shop,
+                current_fingerprint_provider=lambda: compute_graph_fingerprint(_active_shop()),
+            )
+        strategy_optimizer = HybridNSGA3ALNSOptimizer(
+            current_shop,
+            HybridConfig(
+                objective_keys=["total_tardiness"],
+                time_limit_s=1,
+                generations=1,
+                population_size=4,
+                parallel_workers=0,
+                baseline_seeds_enabled=False,
+            ),
+            graph_context,
+            graph_context_mode,
+        )
+        func = strategy_optimizer._dispatch_rule(candidate)
+        rule_label = strategy["name"]
+    else:
+        func = BUILTIN_RULES.get(req.rule_name)
+        if func is None:
+            raise HTTPException(422, f"未知派工规则：{req.rule_name}")
     sim = Simulator(current_shop, func, runtime=_cached_sim_runtime(current_shop))
     r = sim.run()
     analytics = build_schedule_analytics(current_shop, r)
@@ -2980,7 +3028,7 @@ def _simulate_locked(req: SimReq):
     logging.info(
         "simulate[%s]: scheduled_entries=%d completed_ops=%d/%d makespan=%.2f "
         "total_tardiness=%.2f avg_net_available_utilization=%.4f feasible=%s events=%d wall=%.0fms",
-        req.rule_name, len(r.schedule), analytics.completed_operations, len(current_shop.operations),
+        rule_label, len(r.schedule), analytics.completed_operations, len(current_shop.operations),
         analytics.objective_values.get("makespan", 0.0),
         analytics.objective_values.get("total_tardiness", 0.0),
         analytics.objective_values.get("avg_net_available_utilization", 0.0),
@@ -2997,9 +3045,9 @@ def _simulate_locked(req: SimReq):
         # 后台打印逐工序根因分类，方便定位具体的不可行原因
         logging.warning(
             "simulate[%s] infeasible:\n%s",
-            req.rule_name, _format_infeasible_detail(diagnosis_detail, req.rule_name),
+            rule_label, _format_infeasible_detail(diagnosis_detail, rule_label),
         )
-    r._rule_name = req.rule_name
+    r._rule_name = rule_label
     last_result = r
     # Enrich gantt with order info
     gantt = []
@@ -3029,7 +3077,8 @@ def _simulate_locked(req: SimReq):
     payload = _json_safe({
         "metrics": metrics,
         "gantt": gantt,
-        "rule": req.rule_name,
+        "rule": rule_label,
+        "strategy_id": strategy["id"] if strategy else None,
         "diagnosis": diagnosis,
         "diagnosis_detail": diagnosis_detail,
     })
@@ -3239,6 +3288,111 @@ async def baseline_active():
     }
 
 
+def _candidate_from_dispatch_strategy(row: dict) -> CandidateParameters:
+    feature_names = list(row.get("feature_names") or [])
+    if feature_names and feature_names != list(FEATURE_NAMES):
+        raise HTTPException(409, f"保存方案 {row.get('name') or row.get('id')} 的特征版本与当前系统不兼容")
+    try:
+        return CandidateParameters.from_dict(row.get("candidate_json") or {})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"保存方案参数损坏：{exc}") from exc
+
+
+def _dispatch_strategy_set_payload(record: dict) -> dict:
+    return {
+        "id": record["id"],
+        "name": record["name"],
+        "source_task_id": record.get("source_task_id"),
+        "source_mode": record.get("source_mode"),
+        "objective_keys": record.get("objective_keys") or [],
+        "instance_version": record.get("instance_version"),
+        "status": record.get("status"),
+        "created_at": record.get("created_at"),
+        "strategies": [
+            {
+                "id": item["id"],
+                "set_id": item["set_id"],
+                "strategy_code": item["strategy_code"],
+                "name": item["name"],
+                "source_solution_id": item["source_solution_id"],
+                "objective_values": item.get("objective_values") or {},
+                "status": item.get("status"),
+                "sort_order": item.get("sort_order", 0),
+            }
+            for item in record.get("strategies") or []
+            if item.get("status") == "active"
+        ],
+    }
+
+
+@app.get("/api/dispatch-strategy-sets")
+async def dispatch_strategy_sets():
+    sets = [_dispatch_strategy_set_payload(item) for item in dispatch_strategy_store.list_sets()]
+    return {"count": len(sets), "sets": sets}
+
+
+@app.post("/api/dispatch-strategy-sets")
+async def create_dispatch_strategy_set(req: DispatchStrategySetCreateReq):
+    task = _hybrid_tasks.get(req.task_id)
+    if task is None:
+        raise HTTPException(404, "优化任务不存在，请重新运行优化后保存")
+    if task.get("status") != "done" or not task.get("result"):
+        raise HTTPException(409, "优化尚未完成，暂时不能保存派工方案")
+    if not req.solutions:
+        raise HTTPException(422, "请至少选择一个 Pareto 方案")
+    if not req.name.strip():
+        raise HTTPException(422, "方案集名称不能为空")
+
+    names = [item.name.strip() for item in req.solutions]
+    if any(not name for name in names):
+        raise HTTPException(422, "方案名称不能为空")
+    if len(set(names)) != len(names):
+        raise HTTPException(422, "同一方案集内的方案名称不能重复")
+
+    available = {
+        item.get("solution_id"): item
+        for item in (task.get("export_result") or task["result"]).get("solutions") or []
+    }
+    context = task.get("strategy_context") or {}
+    rows = []
+    seen_ids: set[str] = set()
+    for index, requested in enumerate(req.solutions):
+        if requested.solution_id in seen_ids:
+            raise HTTPException(422, f"方案 {requested.solution_id} 重复提交")
+        seen_ids.add(requested.solution_id)
+        solution = available.get(requested.solution_id)
+        if solution is None:
+            raise HTTPException(404, f"任务中不存在方案 {requested.solution_id}")
+        candidate_payload = solution.get("candidate_parameters")
+        if not candidate_payload:
+            raise HTTPException(409, "该任务由旧版本生成，缺少完整派工参数，请重新运行优化")
+        rows.append({
+            "name": requested.name.strip(),
+            "source_solution_id": requested.solution_id,
+            "candidate_json": candidate_payload,
+            "objective_values": solution.get("objectives") or {},
+            "metrics_snapshot": solution.get("metrics") or {},
+            "feature_names": context.get("feature_names") or list(FEATURE_NAMES),
+            "scale_json": context.get("scale_json") or {},
+            "graph_context_mode": task.get("graph_context_mode"),
+            "sort_order": index,
+        })
+
+    config = task.get("config") or {}
+    saved = dispatch_strategy_store.save_set(
+        {
+            "name": req.name.strip(),
+            "source_task_id": req.task_id,
+            "source_mode": "cold" if config.get("cold_start") else "warm",
+            "objective_keys": (task["result"].get("objective_keys") or config.get("objective_keys") or []),
+            "instance_version": task.get("instance_version"),
+            "instance_fingerprint": task.get("instance_fingerprint"),
+        },
+        rows,
+    )
+    return _dispatch_strategy_set_payload(saved)
+
+
 # === Exact Reference ===
 @app.get("/api/exact/objectives")
 async def exact_objectives():
@@ -3333,12 +3487,32 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
 
     current_shop = _active_shop()
     graph_context_mode = resolve_graph_context_mode()
+    baseline_strategy = None
+    baseline_candidate = None
+    if req.baseline_strategy_id:
+        baseline_strategy = dispatch_strategy_store.get_strategy(req.baseline_strategy_id)
+        if baseline_strategy is None:
+            raise HTTPException(404, "选择的基线派工方案不存在或已归档")
+        baseline_candidate = _candidate_from_dispatch_strategy(baseline_strategy)
+
+    warm_start_candidates: list[CandidateParameters] = []
+    if req.warm_start_set_id and not req.cold_start:
+        warm_set = dispatch_strategy_store.get_set(req.warm_start_set_id)
+        if warm_set is None or warm_set.get("status") != "published":
+            raise HTTPException(404, "选择的热启动方案集不存在或未发布")
+        for strategy in warm_set.get("strategies") or []:
+            if strategy.get("status") == "active":
+                warm_start_candidates.append(_candidate_from_dispatch_strategy(strategy))
+        if not warm_start_candidates:
+            raise HTTPException(409, "选择的热启动方案集没有可用方案")
+
     task_id = str(uuid.uuid4())[:8]
     _latest_hybrid_task_id = task_id
     created_at = time.time()
     _hybrid_tasks[task_id] = {
         "status": "running",
         "instance_version": get_instance_version(inst_store.db_path),
+        "instance_fingerprint": compute_graph_fingerprint(current_shop).instance_hash,
         "phase": "initializing",
         "message": "正在初始化优化器并校验实例数据",
         "created_at": created_at,
@@ -3354,6 +3528,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
         "phase_total": 1,
         "activity": "正在初始化优化任务",
         "config": req.model_dump(),
+        "warm_start_strategy_count": len(warm_start_candidates),
         "current_generation": 0,
         "archive_size": 0,
         "population_size": req.population_size,
@@ -3401,8 +3576,10 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                 task,
                 f"初始化完成 · 种群 {config.get('population_size', '-')}"
                 f" · {'冷启动' if config.get('cold_start') else '热启动'}"
-                f" · 基线 {config.get('baseline_rule_name', '-')}",
+                f" · 基线 {(baseline_strategy or {}).get('name') or config.get('baseline_rule_name', '-')}",
             )
+            if warm_start_candidates:
+                _log_hybrid_event(task, f"保存方案热启动 · 注入 {len(warm_start_candidates)} 个种子")
             graph_context = None
             graph_context_diagnostics = None
             if graph_context_mode != GraphContextMode.LEGACY:
@@ -3454,6 +3631,9 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                     parallel_workers=req.parallel_workers,
                     seed=req.seed,
                     baseline_rule_name=req.baseline_rule_name,
+                    baseline_candidate=baseline_candidate,
+                    baseline_strategy_name=baseline_strategy.get("name") if baseline_strategy else None,
+                    warm_start_candidates=warm_start_candidates,
                     parallel_backend=req.parallel_backend,
                     baseline_seeds_enabled=not req.cold_start,
                 ),
@@ -3473,6 +3653,16 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                         optimizer.graph_context_diff.group_differences
                     ),
                 }
+
+            _hybrid_tasks[task_id]["strategy_context"] = {
+                "feature_names": list(FEATURE_NAMES),
+                "scale_json": {
+                    "time_scale": getattr(optimizer, "time_scale", None),
+                    "due_scale": getattr(optimizer, "due_scale", None),
+                    "priority_scale": getattr(optimizer, "priority_scale", None),
+                    "busy_scale": getattr(optimizer, "busy_scale", None),
+                },
+            }
 
             task = _hybrid_tasks[task_id]
             task["phase"] = "coarse"

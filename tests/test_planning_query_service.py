@@ -95,14 +95,26 @@ class PlanningQueryServiceTests(unittest.TestCase):
         self.assertEqual(result["archive_size"], 7)
         self.assertEqual(result["baseline_count"], 1)
         self.assertEqual(result["reference_count"], 1)
+        self.assertEqual(result["solutions"][0]["solution_name"], "方案二")
         self.assertEqual(result["solutions"][0]["total_tardiness_hours"], 12.5)
         self.assertEqual(result["solutions"][0]["main_order_tardiness_hours"], 6.25)
+
+    def test_solution_names_match_review_candidate_order(self) -> None:
+        result = self.service.compare_solutions(
+            solution_ids=["BASE", "S-1", "S-2", "REF-1"]
+        )
+
+        self.assertEqual(
+            [item["solution_name"] for item in result["solutions"]],
+            ["方案一", "方案二", "方案三", "方案四"],
+        )
 
     def test_order_planning_uses_full_export_and_computes_order_tardiness(self) -> None:
         result = self.service.get_order_planning("O-1", solution_ids=["S-1"])
 
         self.assertEqual(result["order"]["order_id"], "O-1")
         planning = result["solutions"][0]
+        self.assertEqual(planning["solution_name"], "方案二")
         self.assertEqual(planning["operation_count"], 3)
         self.assertEqual(planning["order_completion_hours"], 45.0)
         self.assertEqual(planning["order_tardiness_hours"], 5.0)
@@ -120,9 +132,11 @@ class PlanningQueryServiceTests(unittest.TestCase):
 
         self.assertEqual(result["operation"]["order_id"], "O-1")
         self.assertEqual(result["placements"][0]["planned"], True)
+        self.assertEqual(result["placements"][0]["solution_name"], "方案二")
         self.assertEqual(result["placements"][0]["machine_id"], "M-A1")
         self.assertEqual(result["placements"][1], {
             "solution_id": "S-2",
+            "solution_name": "方案三",
             "planned": False,
             "reason": "operation_not_present_in_solution",
         })

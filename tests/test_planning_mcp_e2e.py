@@ -18,7 +18,10 @@ class _PlanningHandler(BaseHTTPRequestHandler):
                 "data": {
                     "task_id": "task-e2e",
                     "candidate_count": 2,
-                    "solutions": [],
+                    "solutions": [{
+                        "solution_id": "S-6cf6190f25",
+                        "solution_name": "方案二",
+                    }],
                 },
                 "meta": {"time_unit": "hour"},
             }).encode()
@@ -117,6 +120,10 @@ class PlanningMCPEndToEndTests(unittest.TestCase):
         tool_result = responses[2]["result"]
         self.assertFalse(tool_result["isError"])
         self.assertEqual(tool_result["structuredContent"]["data"]["candidate_count"], 2)
+        self.assertEqual(
+            tool_result["structuredContent"]["data"]["solutions"][0]["solution_name"],
+            "方案二",
+        )
         run_result = responses[3]["result"]
         self.assertFalse(run_result["isError"])
         self.assertEqual(run_result["structuredContent"]["data"]["rule_name"], "ATC")
