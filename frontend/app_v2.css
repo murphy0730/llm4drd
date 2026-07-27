@@ -2147,14 +2147,6 @@ a {
   word-break: break-all;
 }
 
-.strategy-save-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-.strategy-save-bar h3 { margin: 0 0 4px; }
-.strategy-save-bar p { margin: 0; color: var(--text-soft); font-size: 12px; }
 .strategy-save-modal { width: min(720px, 100%); border-color: var(--line); }
 .strategy-save-modal h3 { color: var(--text); }
 .strategy-save-modal > label,
@@ -3047,6 +3039,16 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
 .col-config-item:hover { background: var(--surface-strong); }
 .col-config-item input { min-height: 0; width: 14px; height: 14px; }
 .col-config-item .primary-tag { font-size: 9px; color: var(--primary); font-family: var(--font-mono); }
+/* 方案对比卡片头右侧动作区：与列配置按钮等高 */
+.compare-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.compare-head-btn {
+  padding: 6px 13px; border: 1px solid var(--line-strong); border-radius: 8px;
+  font-size: 12px; line-height: normal; color: var(--text-soft);
+  background: none; cursor: pointer; font-family: inherit; white-space: nowrap;
+}
+.compare-head-btn:hover { color: var(--text); background: var(--surface-strong); }
+.compare-head-btn.primary { color: var(--primary); border-color: rgba(47, 111, 235, 0.4); }
+.strategy-sets-body { margin: 16px 0; max-height: 50vh; overflow-y: auto; }
 /* 操作列三小按钮 */
 .row-ops { display: flex; gap: 5px; }
 .op-btn {

@@ -3622,6 +3622,14 @@ function renderReviewCandidateComparison() {
         ${allKeys.map((key) => `<label class="col-config-item"><input type="checkbox" data-compare-col="${escapeHtml(key)}" ${hidden.has(key) ? "" : "checked"}> ${escapeHtml(getObjectiveLabel(key))}${primaryKeys.includes(key) ? ' <span class="primary-tag">主目标</span>' : ""}</label>`).join("")}
       </div>
     </details>`;
+  const solutionCount = asArray(app.optimizeResult?.solutions).length;
+  const canSave = !!app.optimizeResult?.task_id && solutionCount > 0;
+  const headActions = `
+    <div class="compare-head-actions">
+      ${canSave ? `<button class="compare-head-btn primary" type="button" data-action="save-dispatch-strategy-set" title="将本次 ${formatInt(solutionCount)} 个 Pareto 方案命名后，发布到规则仿真和热启动配置">保存并发布</button>` : ""}
+      <button class="compare-head-btn" type="button" data-action="show-dispatch-strategy-sets" title="查看并删除已发布的派工方案集">已发布方案集（${formatInt(asArray(app.dispatchStrategySets).length)}）</button>
+      ${colConfig}
+    </div>`;
   const primaryLabels = primaryKeys.map((key) => getObjectiveLabel(key)).join(" / ");
   const baselineHint = baseline ? `每个 KPI 与基线方案（${escapeHtml(baseline.name)}）对比，箭头随数值升降，<span style="color:var(--success)">绿=改善</span> / <span style="color:var(--danger)">红=变差</span>，括号内为相对基线百分比。方案较多时表格纵向滚动，表头吸顶。` : "未加载基线方案，暂不显示对比箭头。";
   return `
@@ -3631,7 +3639,7 @@ function renderReviewCandidateComparison() {
           <h3>方案对比</h3>
           <p>默认展示主目标（<span style="color:var(--primary)">${escapeHtml(primaryLabels)}</span>）+ 2 个常用 KPI；更多指标在列配置中勾选。</p>
         </div>
-        ${colConfig}
+        ${headActions}
       </div>
       <div class="tbl-wrap">
         <table class="data-table compare-table">
@@ -3785,7 +3793,7 @@ function renderReviewGantt() {
   });
 }
 
-function renderDispatchStrategySetsTable() {
+function renderDispatchStrategySetsBody() {
   const sets = asArray(app.dispatchStrategySets);
   const rows = sets.map((set) => [
     escapeHtml(set.name),
@@ -3794,27 +3802,17 @@ function renderDispatchStrategySetsTable() {
     escapeHtml(formatDateTime(set.created_at)),
     `<button class="btn btn-danger" type="button" data-action="delete-dispatch-strategy-set" data-set-id="${escapeHtml(set.id)}">删除</button>`,
   ]);
-  return `
-    <article class="surface-card">
-      <div class="card-head"><div><h3>已发布方案集</h3><p>用于规则仿真和优化求解的热启动配置，方案集太多时可在此删除。</p></div></div>
-      ${rows.length ? renderSimpleTable(["方案集名称", "来源", "方案数", "创建时间", "操作"], rows) : renderEmptyState("暂无已发布方案集", "保存并发布优化方案后，会在这里列出，可随时删除。")}
-    </article>
-  `;
+  return rows.length
+    ? renderSimpleTable(["方案集名称", "来源", "方案数", "创建时间", "操作"], rows)
+    : renderEmptyState("暂无已发布方案集", "保存并发布优化方案后，会在这里列出，可随时删除。");
 }
 
 function renderReviewLibraryTab() {
   ensureReviewSelection();
   ensureReferenceSolutions();
   const candidates = getReviewCandidates();
-  const canSave = !!app.optimizeResult?.task_id && asArray(app.optimizeResult?.solutions).length > 0;
   return `
     <div class="stack">
-      ${canSave ? `
-        <article class="surface-card strategy-save-bar">
-          <div><h3>保存为派工方案集</h3><p>将本次 ${formatInt(asArray(app.optimizeResult.solutions).length)} 个 Pareto 方案命名后，发布到规则仿真和热启动配置。</p></div>
-          <button class="btn btn-primary" type="button" data-action="save-dispatch-strategy-set">保存并发布</button>
-        </article>` : ""}
-      ${renderDispatchStrategySetsTable()}
       <div id="review-comparison-region">
         ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
           "暂无方案池",
@@ -3884,6 +3882,28 @@ function showDispatchStrategySaveModal() {
   overlay.querySelector('[name="set_name"]')?.focus();
 }
 
+function showDispatchStrategySetsModal() {
+  document.querySelector(".strategy-sets-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "error-modal-overlay strategy-sets-overlay";
+  overlay.innerHTML = `
+    <div class="error-modal strategy-save-modal">
+      <div class="card-head"><div><h3>已发布方案集</h3><p>用于规则仿真和优化求解的热启动配置，方案集太多时可在此删除。</p></div></div>
+      <div class="strategy-sets-body">${renderDispatchStrategySetsBody()}</div>
+      <div class="form-actions"><button class="btn btn-ghost" type="button" data-strategy-sets-close>关闭</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay || event.target.closest("[data-strategy-sets-close]")) overlay.remove();
+  });
+}
+
+// 删除确认框会触发 renderCurrentPage()，但列表弹框挂在 body 上不会被重绘，需单独刷新
+function refreshDispatchStrategySetsModal() {
+  const body = document.querySelector(".strategy-sets-overlay .strategy-sets-body");
+  if (body) body.innerHTML = renderDispatchStrategySetsBody();
+}
+
 function showDispatchStrategySetDeleteConfirm(set) {
   document.querySelector(".strategy-delete-overlay")?.remove();
   const overlay = document.createElement("div");
@@ -3920,6 +3940,7 @@ function showDispatchStrategySetDeleteConfirm(set) {
       close();
       toast(`已删除方案集：${set.name}`, "success");
       await renderCurrentPage();
+      refreshDispatchStrategySetsModal();
     } catch (error) {
       submit.disabled = false;
       submit.textContent = "确认删除";
@@ -4095,9 +4116,9 @@ function renderReview() {
   ensureReviewSelection();
   const candidates = getReviewCandidates();
   const selected = getSelectedReviewCandidates();
-  const exactCount = candidates.filter((item) => String(item.source || "").includes("exact")).length;
-  const heuristicCount = candidates.filter((item) => String(item.source || "").includes("heuristic") || String(item.source || "").includes("reference") || item.heuristicRuleName).length;
-  const paretoCount = Math.max(0, candidates.length - exactCount - heuristicCount - (candidates.some((item) => item.source === "baseline") ? 1 : 0));
+  const exactCount = candidates.filter((item) => item.source === "exact_reference").length;
+  const heuristicCount = candidates.filter((item) => item.source === "heuristic").length;
+  const paretoCount = candidates.filter((item) => item.source === "pareto").length;
   // 前置检查条
   if (optimizeIsRunning()) {
     renderPrecheck("review-precheck", "warn", `⚠ 优化仍在运行（${optimizeProgress(app.optimizeStatus)}%），当前方案池为中间结果，完成后建议复核<span class="grow"></span><button class="link-btn" type="button" data-nav-jump="optimize">查看优化进度 →</button>`);
@@ -6236,6 +6257,7 @@ async function handleAction(action, target) {
     return renderCurrentPage();
   }
   if (action === "save-dispatch-strategy-set") return showDispatchStrategySaveModal();
+  if (action === "show-dispatch-strategy-sets") return showDispatchStrategySetsModal();
   if (action === "delete-dispatch-strategy-set") {
     const set = asArray(app.dispatchStrategySets).find((item) => item.id === target.dataset.setId);
     if (set) showDispatchStrategySetDeleteConfirm(set);
