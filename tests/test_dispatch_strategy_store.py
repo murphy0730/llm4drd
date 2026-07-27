@@ -57,6 +57,28 @@ class DispatchStrategyStoreTests(unittest.TestCase):
         self.assertEqual(self.store.list_sets()[0]["id"], saved["id"])
         self.assertEqual(get_instance_version(self.db_path), before)
 
+    def test_delete_set_cascades_strategies(self):
+        saved = self.store.save_set(
+            {
+                "name": "待删除方案集",
+                "source_task_id": "task-2",
+                "source_mode": "warm",
+                "objective_keys": ["total_tardiness"],
+                "instance_version": 1,
+            },
+            [{
+                "name": "方案A",
+                "source_solution_id": "S-2",
+                "candidate_json": self._candidate().to_dict(),
+                "feature_names": list(FEATURE_NAMES),
+            }],
+        )
+        strategy_id = saved["strategies"][0]["id"]
+        self.assertTrue(self.store.delete_set(saved["id"]))
+        self.assertIsNone(self.store.get_set(saved["id"]))
+        self.assertIsNone(self.store.get_strategy(strategy_id))
+        self.assertFalse(self.store.delete_set(saved["id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3393,6 +3393,14 @@ async def create_dispatch_strategy_set(req: DispatchStrategySetCreateReq):
     return _dispatch_strategy_set_payload(saved)
 
 
+@app.delete("/api/dispatch-strategy-sets/{set_id}")
+async def delete_dispatch_strategy_set(set_id: str):
+    if dispatch_strategy_store.get_set(set_id) is None:
+        raise HTTPException(404, "方案集不存在或已删除")
+    dispatch_strategy_store.delete_set(set_id)
+    return {"status": "ok", "id": set_id}
+
+
 # === Exact Reference ===
 @app.get("/api/exact/objectives")
 async def exact_objectives():

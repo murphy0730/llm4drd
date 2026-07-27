@@ -382,6 +382,7 @@ const api = {
   },
   getDispatchStrategySets() { return this.json("/dispatch-strategy-sets"); },
   saveDispatchStrategySet(payload) { return this.json("/dispatch-strategy-sets", "POST", payload); },
+  deleteDispatchStrategySet(id) { return this.request(`/dispatch-strategy-sets/${id}`, { method: "DELETE" }); },
   exportSimExcel(payload = null) {
     // 回传前端已持有的排产明细（app.simResult 或某方案的 schedule），后端据此生成 Excel，
     // 避免依赖易失效的后端 last_sim_payload。payload 为空时后端回退到最近一次仿真结果。
@@ -3152,18 +3153,19 @@ function dispatchRuleLabel(value) {
   return strategy?.name || "已保存方案";
 }
 
-function renderBaselineRuleOptions(selected) {
+function renderBaselineRuleOptions(selected, warmStartSetId) {
   const builtins = CONFIG.HEURISTIC_RULES
     .map((rule) => `<option value="${rule}" ${rule === selected ? "selected" : ""}>${rule}</option>`)
     .join("");
-  const saved = asArray(app.dispatchStrategySets).map((set) => `
-    <optgroup label="${escapeHtml(set.name)}">
-      ${asArray(set.strategies).map((strategy) => {
+  const activeSet = asArray(app.dispatchStrategySets).find((set) => set.id === warmStartSetId);
+  const saved = activeSet ? `
+    <optgroup label="${escapeHtml(activeSet.name)}">
+      ${asArray(activeSet.strategies).map((strategy) => {
         const value = `saved:${strategy.id}`;
         return `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(strategy.name)}</option>`;
       }).join("")}
     </optgroup>
-  `).join("");
+  ` : "";
   return `<optgroup label="内置规则">${builtins}</optgroup>${saved}`;
 }
 
@@ -3299,15 +3301,15 @@ function renderOptimizePage() {
           <label><span>前期时间占比</span><input id="opt-coarse-ratio" type="number" min="0.2" max="0.95" step="0.05" value="${app.optimizeForm.coarseTimeRatio}"></label>
           <label><span>精修轮数</span><input id="opt-refine-rounds" type="number" min="1" value="${app.optimizeForm.refineRounds}"></label>
           <label><span>ALNS 强度</span><input id="opt-alns-aggression" type="number" min="0.5" max="3" step="0.1" value="${app.optimizeForm.alnsAggression}"></label>
-          <label><span>基线规则</span>
-            <select id="opt-baseline-rule">
-              ${renderBaselineRuleOptions(app.optimizeForm.baselineRuleName)}
-            </select>
-          </label>
           <label><span>热启动方案集</span>
             <select id="opt-warm-start-set" ${app.optimizeForm.coldStart ? "disabled" : ""}>
               <option value="">仅使用系统基准方案库</option>
               ${asArray(app.dispatchStrategySets).map((set) => `<option value="${escapeHtml(set.id)}" ${set.id === app.optimizeForm.warmStartSetId ? "selected" : ""}>${escapeHtml(set.name)}（${formatInt(asArray(set.strategies).length)} 个）</option>`).join("")}
+            </select>
+          </label>
+          <label><span>基线规则</span>
+            <select id="opt-baseline-rule">
+              ${renderBaselineRuleOptions(app.optimizeForm.baselineRuleName, app.optimizeForm.warmStartSetId)}
             </select>
           </label>
         </div>
@@ -3771,6 +3773,23 @@ function renderReviewGantt() {
   });
 }
 
+function renderDispatchStrategySetsTable() {
+  const sets = asArray(app.dispatchStrategySets);
+  const rows = sets.map((set) => [
+    escapeHtml(set.name),
+    set.source_mode === "cold" ? "冷启动" : "热启动",
+    `${formatInt(asArray(set.strategies).length)} 个`,
+    escapeHtml(formatDateTime(set.created_at)),
+    `<button class="btn btn-danger" type="button" data-action="delete-dispatch-strategy-set" data-set-id="${escapeHtml(set.id)}">删除</button>`,
+  ]);
+  return `
+    <article class="surface-card">
+      <div class="card-head"><div><h3>已发布方案集</h3><p>用于规则仿真和优化求解的热启动配置，方案集太多时可在此删除。</p></div></div>
+      ${rows.length ? renderSimpleTable(["方案集名称", "来源", "方案数", "创建时间", "操作"], rows) : renderEmptyState("暂无已发布方案集", "保存并发布优化方案后，会在这里列出，可随时删除。")}
+    </article>
+  `;
+}
+
 function renderReviewLibraryTab() {
   ensureReviewSelection();
   ensureReferenceSolutions();
@@ -3783,6 +3802,7 @@ function renderReviewLibraryTab() {
           <div><h3>保存为派工方案集</h3><p>将本次 ${formatInt(asArray(app.optimizeResult.solutions).length)} 个 Pareto 方案命名后，发布到规则仿真和热启动配置。</p></div>
           <button class="btn btn-primary" type="button" data-action="save-dispatch-strategy-set">保存并发布</button>
         </article>` : ""}
+      ${renderDispatchStrategySetsTable()}
       <div id="review-comparison-region">
         ${candidates.length ? renderReviewCandidateComparison() : renderEmptyState(
           "暂无方案池",
@@ -3850,6 +3870,50 @@ function showDispatchStrategySaveModal() {
     }
   });
   overlay.querySelector('[name="set_name"]')?.focus();
+}
+
+function showDispatchStrategySetDeleteConfirm(set) {
+  document.querySelector(".strategy-delete-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "error-modal-overlay strategy-delete-overlay";
+  const count = asArray(set.strategies).length;
+  overlay.innerHTML = `
+    <form class="error-modal strategy-save-modal">
+      <div class="card-head"><div><h3>删除方案集「${escapeHtml(set.name)}」？</h3><p>其下 ${formatInt(count)} 个已保存方案将一并删除。若正被「优化求解」页热启动方案集或基线规则引用，需要重新选择。</p></div></div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" type="button" data-strategy-delete-cancel>取消</button>
+        <button class="btn btn-danger" type="submit">确认删除</button>
+      </div>
+    </form>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector("[data-strategy-delete-cancel]")?.addEventListener("click", close);
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+  overlay.querySelector("form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = overlay.querySelector('[type="submit"]');
+    submit.disabled = true;
+    submit.textContent = "正在删除…";
+    try {
+      await api.deleteDispatchStrategySet(set.id);
+      const payload = await api.getDispatchStrategySets();
+      app.dispatchStrategySets = asArray(payload?.sets);
+      if (app.optimizeForm.warmStartSetId === set.id) {
+        app.optimizeForm.warmStartSetId = "";
+        if (String(app.optimizeForm.baselineRuleName).startsWith("saved:")
+          && asArray(set.strategies).some((strategy) => `saved:${strategy.id}` === app.optimizeForm.baselineRuleName)) {
+          app.optimizeForm.baselineRuleName = "ATC";
+        }
+      }
+      close();
+      toast(`已删除方案集：${set.name}`, "success");
+      await renderCurrentPage();
+    } catch (error) {
+      submit.disabled = false;
+      submit.textContent = "确认删除";
+      toast(`删除方案集失败：${error.message}`, "error");
+    }
+  });
 }
 
 // 启发式参照 chips（Tab 条右侧）：基线/计算中/未计算/已纳入 四种状态
@@ -6160,6 +6224,11 @@ async function handleAction(action, target) {
     return renderCurrentPage();
   }
   if (action === "save-dispatch-strategy-set") return showDispatchStrategySaveModal();
+  if (action === "delete-dispatch-strategy-set") {
+    const set = asArray(app.dispatchStrategySets).find((item) => item.id === target.dataset.setId);
+    if (set) showDispatchStrategySetDeleteConfirm(set);
+    return;
+  }
   if (action === "reset-compare-cols") {
     try { localStorage.removeItem(REVIEW_COMPARE_HIDDEN_LS); } catch { /* 忽略 */ }
     app.reviewColConfigOpen = true;
@@ -6515,10 +6584,18 @@ function bindGlobalEvents() {
       persistReviewProgress();
       updateShell();
     }
-    if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression, #opt-baseline-rule, #opt-warm-start-set")) {
+    if (target.matches("#opt-target-count, #opt-population, #opt-generations, #opt-coarse-ratio, #opt-refine-rounds, #opt-alns-aggression, #opt-baseline-rule")) {
       collectOptimizeForm();
       updateOptimizeBudgetHint();
       return;
+    }
+    if (target.matches("#opt-warm-start-set")) {
+      collectOptimizeForm();
+      const activeSet = asArray(app.dispatchStrategySets).find((set) => set.id === app.optimizeForm.warmStartSetId);
+      const stillValid = !String(app.optimizeForm.baselineRuleName).startsWith("saved:")
+        || asArray(activeSet?.strategies).some((strategy) => `saved:${strategy.id}` === app.optimizeForm.baselineRuleName);
+      if (!stillValid) app.optimizeForm.baselineRuleName = "ATC";
+      return renderCurrentPage();
     }
     if (target.matches("#opt-cold-start")) {
       app.optimizeForm.coldStart = target.checked;

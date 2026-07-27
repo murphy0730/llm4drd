@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from fastapi import HTTPException
+
 from llm4drd.api import server
 from llm4drd.data.db import DispatchStrategyStore, InstanceStore, init_db
 from llm4drd.optimization.solution_model import CandidateParameters, FEATURE_NAMES
@@ -87,6 +89,16 @@ class DispatchStrategyApiTests(unittest.TestCase):
         self.assertEqual(result["rule"], "方案一｜均衡型")
         self.assertEqual(result["strategy_id"], strategy_id)
         self.assertGreater(result["metrics"]["completed_operations"], 0)
+
+    def test_delete_dispatch_strategy_set_then_404_on_repeat(self):
+        saved = self._save()
+        deleted = run(server.delete_dispatch_strategy_set(saved["id"]))
+        self.assertEqual(deleted["status"], "ok")
+        listed = run(server.dispatch_strategy_sets())
+        self.assertEqual(listed["count"], 0)
+        with self.assertRaises(HTTPException) as ctx:
+            run(server.delete_dispatch_strategy_set(saved["id"]))
+        self.assertEqual(ctx.exception.status_code, 404)
 
 
 if __name__ == "__main__":

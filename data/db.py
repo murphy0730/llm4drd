@@ -741,6 +741,11 @@ class DispatchStrategyStore:
             ).fetchall()
         return [item for row in rows if (item := self.get_set(row["id"])) is not None]
 
+    def delete_set(self, set_id: str) -> bool:
+        with get_db(self.db_path) as conn:
+            cur = conn.execute("DELETE FROM dispatch_strategy_sets WHERE id=?", (set_id,))
+            return cur.rowcount > 0
+
     def get_strategy(self, strategy_id: str) -> Optional[dict]:
         with get_db(self.db_path) as conn:
             row = conn.execute(
