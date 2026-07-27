@@ -2771,9 +2771,6 @@ a {
 }
 .card-head h3 { font-family: var(--font-display); font-size: 15px; font-weight: 600; margin: 0; }
 .card-head p { color: var(--text-soft); font-size: 12px; margin: 3px 0 0; }
-.state-card { border-left: 3px solid var(--primary); }
-.state-card.success { border-left-color: transparent; }
-.state-card.danger { border-left-color: var(--danger); }
 
 /* ---------- KPI / KV ---------- */
 .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
@@ -2959,9 +2956,9 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
 /* 单列布局下配置卡吸顶会压住下方的状态与日志，故在优化页内取消（.sticky-col 是通用类，不动全局） */
 .opt-layout .sticky-col { position: static; }
 /* 配置卡整宽后，2 列会把每个输入拉得过长，优化页内加密到 4 列（全局 .form-grid 仍是 2 列） */
-.opt-layout .form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.opt-layout .form-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .obj-chip-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.opt-layout .obj-chip-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.opt-layout .obj-chip-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .obj-chip {
   display: flex; align-items: center; gap: 6px; padding: 5px 8px; min-width: 0;
   border: 1.5px solid var(--line); border-radius: 8px; cursor: pointer;
