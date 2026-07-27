@@ -377,11 +377,11 @@ class HybridEventLogTests(unittest.TestCase):
         payload = run(server.optimize_hybrid_status("t-2"))
         self.assertEqual(payload["events"], [])
 
-    def _run_with_optimizer(self, optimizer_cls):
+    def _run_with_optimizer(self, optimizer_cls, **request_overrides):
         async def submit():
             background = BackgroundTasks()
             response = await server.optimize_hybrid(
-                server.HybridOptimizeReq(time_limit_s=30),
+                server.HybridOptimizeReq(time_limit_s=30, **request_overrides),
                 background,
             )
             return response, background
@@ -430,7 +430,7 @@ class HybridEventLogTests(unittest.TestCase):
 
         task_id, task = self._run_with_optimizer(_FakeOptimizer)
         texts = [event["text"] for event in task["events"]]
-        self.assertIn("初始化完成 · 种群 24 · 基线 ATC 注入", texts)
+        self.assertIn("初始化完成 · 种群 24 · 热启动 · 基线 ATC", texts)
         self.assertIn("阶段切换 · 精确评估", texts)
         self.assertIn("发现新非支配解 · 前沿规模 1", texts)
         self.assertIn("发现新非支配解 · 前沿规模 3", texts)
@@ -456,7 +456,32 @@ class HybridEventLogTests(unittest.TestCase):
         texts = [event["text"] for event in task["events"]]
         self.assertIn("优化失败 · boom", texts)
         # 失败前的初始化事件仍然保留
-        self.assertIn("初始化完成 · 种群 24 · 基线 ATC 注入", texts)
+        self.assertIn("初始化完成 · 种群 24 · 热启动 · 基线 ATC", texts)
+
+    def test_cold_start_disables_persisted_baseline_seeds(self):
+        captured = []
+
+        class _CapturingOptimizer:
+            graph_context_diff = None
+
+            def __init__(self, _shop, config, *_args, **_kwargs):
+                captured.append(config.baseline_seeds_enabled)
+
+            def run(self, progress_callback=None):
+                raise RuntimeError("capture complete")
+
+        _, cold_task = self._run_with_optimizer(_CapturingOptimizer, cold_start=True)
+        self.assertEqual(captured, [False])
+        self.assertTrue(cold_task["config"]["cold_start"])
+        self.assertIn(
+            "初始化完成 · 种群 24 · 冷启动 · 基线 ATC",
+            [event["text"] for event in cold_task["events"]],
+        )
+
+        captured.clear()
+        _, warm_task = self._run_with_optimizer(_CapturingOptimizer)
+        self.assertEqual(captured, [True])
+        self.assertFalse(warm_task["config"]["cold_start"])
 
 
 if __name__ == "__main__":

@@ -188,6 +188,7 @@ const app = {
     refineRounds: 1,
     alnsAggression: 1.0,
     baselineRuleName: "ATC",
+    coldStart: false,
   },
   exactForm: {
     mode: "single",
@@ -3262,8 +3263,13 @@ function renderOptimizePage() {
         <div class="budget-hint" id="opt-budget-hint">${app.optimizeForm.timeLimitTouched
           ? `已按当前规模与参数自动推荐 <strong>${recommendedBudget} 秒</strong>。当前保留手动值 ${app.optimizeForm.timeLimitS} 秒，可随时恢复建议值。`
           : `已按当前规模与参数自动推荐 <strong>${recommendedBudget} 秒</strong>，可继续手动修改。`}</div>
-        <div class="mt-16" style="display:flex;gap:9px">
+        <div class="optimize-actions mt-16">
           <button class="btn btn-primary" type="button" data-action="start-hybrid-optimize" ${optimizeIsRunning() ? "disabled aria-busy=\"true\"" : ""}>${optimizeIsRunning() ? "优化运行中…" : "启动优化"}</button>
+          <label class="cold-start-control" title="关闭时优先加载夜间持久化参数；开启后本次求解忽略这些参数">
+            <input id="opt-cold-start" type="checkbox" role="switch" ${app.optimizeForm.coldStart ? "checked" : ""} ${optimizeIsRunning() ? "disabled" : ""}>
+            <span class="cold-start-track" aria-hidden="true"><i></i></span>
+            <span class="cold-start-copy"><strong>冷启动</strong><small>${app.optimizeForm.coldStart ? "本次忽略夜间参数" : "优先使用夜间参数"}</small></span>
+          </label>
           <button class="btn btn-ghost" type="button" data-action="apply-budget-recommendation">采用建议预算</button>
         </div>
       </div>
@@ -5114,6 +5120,7 @@ function collectOptimizeForm() {
   app.optimizeForm.refineRounds = Number(el("opt-refine-rounds")?.value || app.optimizeForm.refineRounds);
   app.optimizeForm.alnsAggression = Number(el("opt-alns-aggression")?.value || app.optimizeForm.alnsAggression);
   app.optimizeForm.baselineRuleName = el("opt-baseline-rule")?.value || app.optimizeForm.baselineRuleName;
+  app.optimizeForm.coldStart = Boolean(el("opt-cold-start")?.checked);
   refreshOptimizeBudgetRecommendation({ preserveManual: true });
   return {
     objective_keys: app.optimizeForm.objectiveKeys,
@@ -5125,6 +5132,7 @@ function collectOptimizeForm() {
     refine_rounds: app.optimizeForm.refineRounds,
     alns_aggression: app.optimizeForm.alnsAggression,
     baseline_rule_name: app.optimizeForm.baselineRuleName,
+    cold_start: app.optimizeForm.coldStart,
   };
 }
 
@@ -6387,6 +6395,10 @@ function bindGlobalEvents() {
       collectOptimizeForm();
       updateOptimizeBudgetHint();
       return;
+    }
+    if (target.matches("#opt-cold-start")) {
+      app.optimizeForm.coldStart = target.checked;
+      return renderCurrentPage();
     }
     if (target.matches("#opt-time-limit")) {
       app.optimizeForm.timeLimitTouched = true;

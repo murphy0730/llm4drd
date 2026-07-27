@@ -212,6 +212,18 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertIn(".opt-layout .sticky-col { position: static; }", CSS)
         self.assertIn("配置上方目标与参数", JS)
 
+    def test_optimize_cold_start_switch_defaults_to_warm_and_is_submitted(self):
+        self.assertIn("coldStart: false", JS)
+        self.assertIn('id="opt-cold-start"', JS)
+        self.assertIn('role="switch"', JS)
+        self.assertIn("cold_start: app.optimizeForm.coldStart", JS)
+        self.assertIn('target.matches("#opt-cold-start")', JS)
+        self.assertIn("app.optimizeForm.coldStart = target.checked", JS)
+        self.assertIn(".cold-start-control", CSS)
+        # 不落 localStorage：刷新页面后必须恢复默认热启动。
+        self.assertNotIn("COLD_START", JS)
+        self.assertNotIn('localStorage.setItem("coldStart"', JS)
+
 
 if __name__ == "__main__":
     unittest.main()

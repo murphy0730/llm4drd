@@ -269,6 +269,10 @@ llm4drd/
 | `LLM4DRD_GRAPH_WARN_EDGES` / `LLM4DRD_GRAPH_MAX_EDGES` | 关系边预警（默认 30 万）/ 安全上限（默认 200 万）|
 | `LLM4DRD_GRAPH_MAX_NODES` | 节点安全上限，默认 10 万 |
 
+夜间基准方案库定时构建通过 `config.json` 的 `baseline_schedule` 配置。默认
+`enabled: false`，不会创建调度线程；后续设置每日时间、时区与搜索预算并改为
+`true` 后，重启服务即可启用。若触发时没有实例或交互式优化正在运行，当次任务会安全跳过。
+
 > ⚠️ 安全提示：`config.json` 请勿写入真实 API Key 后提交——本仓库会自动提交推送到 GitHub，密钥会外泄。建议改用环境变量。
 
 ---

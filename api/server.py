@@ -41,6 +41,7 @@ from ..knowledge.context_service import (
 )
 from ..optimization.exact import ExactSolver, EXACT_OBJECTIVES, exact_objective_catalog_payload
 from ..scheduling.online import OnlineSchedulerV3
+from ..scheduling.baseline_scheduler import DailyBaselineScheduler
 from ..core.time_utils import datetime_to_offset_hours, format_display_datetime
 from .review_read import (
     ReviewReadCache,
@@ -74,6 +75,8 @@ _exact_tasks: dict = {}
 _hybrid_tasks: dict = {}
 _graph_tasks: dict = {}
 _baseline_tasks: dict = {}
+_baseline_build_lock = threading.Lock()
+_baseline_scheduler: DailyBaselineScheduler | None = None
 _latest_hybrid_task_id: Optional[str] = None
 OPTIMIZE_HEARTBEAT_INTERVAL_S = 1.0
 OPTIMIZE_STALL_THRESHOLD_S = 60.0
@@ -205,8 +208,24 @@ def _restore_workflow_progress() -> None:
 
 @app.on_event("startup")
 async def startup():
+    global _baseline_scheduler
     init_db()
     _restore_workflow_progress()
+    schedule_config = get_config().baseline_schedule
+    if schedule_config.enabled:
+        _baseline_scheduler = DailyBaselineScheduler(
+            schedule_config,
+            _trigger_scheduled_baseline_build,
+        )
+        _baseline_scheduler.start()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global _baseline_scheduler
+    if _baseline_scheduler is not None:
+        _baseline_scheduler.stop()
+        _baseline_scheduler = None
 
 @app.get("/")
 async def index():
@@ -285,6 +304,8 @@ class HybridOptimizeReq(BaseModel):
     parallel_workers: int = 0
     seed: int = 42
     baseline_rule_name: str = "ATC"
+    # false=热启动（加载持久化基准参数）；true=冷启动（仅使用内置/图谱种子）。
+    cold_start: bool = False
     # "process": 进程池绕开 GIL（默认）；"thread": 线程池（排查进程池故障时用）。
     parallel_backend: str = "process"
 
@@ -3094,22 +3115,24 @@ class BaselineBuildReq(BaseModel):
     ]
 
 
-@app.post("/api/baseline/build")
-async def baseline_build(req: BaselineBuildReq):
-    """夜间基准方案库构建（后台任务，不阻塞白天 API）。返回 task_id 供轮询。"""
-    if not shop and not inst_store.has_data():
-        raise HTTPException(400, "请先生成实例")
-    current_shop = _active_shop()
-    if current_shop is None:
-        raise HTTPException(400, "当前没有可用实例")
+def _hybrid_optimization_running() -> bool:
+    active = {"submitting", "started", "queued", "running"}
+    return any(str(task.get("status", "")).lower() in active for task in _hybrid_tasks.values())
+
+
+def _launch_baseline_build(current_shop: ShopFloor, config: dict, *, source: str) -> str | None:
+    """Start one baseline build if no other baseline build owns the process lock."""
+    if not _baseline_build_lock.acquire(blocking=False):
+        return None
 
     from ..optimization.baseline_build import build_baseline_library
 
     task_id = str(uuid.uuid4())[:8]
     _baseline_tasks[task_id] = {
         "status": "running",
+        "source": source,
         "created_at": time.time(),
-        "config": req.model_dump(),
+        "config": dict(config),
         "summary": None,
         "error": None,
     }
@@ -3118,13 +3141,14 @@ async def baseline_build(req: BaselineBuildReq):
         try:
             summary = build_baseline_library(
                 current_shop,
-                objective_keys=req.objective_keys,
-                time_limit_s=req.time_limit_s,
-                generations=req.generations,
-                stagnation_generations=req.stagnation_generations,
-                coarse_time_ratio=req.coarse_time_ratio,
-                seed=req.seed,
+                objective_keys=config["objective_keys"],
+                time_limit_s=config["time_limit_s"],
+                generations=config["generations"],
+                stagnation_generations=config["stagnation_generations"],
+                coarse_time_ratio=config["coarse_time_ratio"],
+                seed=config["seed"],
                 store=baseline_solution_store,
+                db_path=baseline_solution_store.db_path,
             )
             _baseline_tasks[task_id].update(
                 status="done",
@@ -3139,8 +3163,51 @@ async def baseline_build(req: BaselineBuildReq):
         except Exception as exc:  # noqa: BLE001
             logging.exception("基准方案库构建失败")
             _baseline_tasks[task_id].update(status="error", error=str(exc))
+        finally:
+            _baseline_build_lock.release()
 
     threading.Thread(target=_run, name=f"baseline-build-{task_id}", daemon=True).start()
+    return task_id
+
+
+def _trigger_scheduled_baseline_build() -> None:
+    schedule = get_config().baseline_schedule
+    if _hybrid_optimization_running():
+        logging.warning("跳过本次夜间基准构建：交互式优化正在运行")
+        return
+    current_shop = _active_shop()
+    if current_shop is None:
+        logging.warning("跳过本次夜间基准构建：当前没有可用实例")
+        return
+    task_id = _launch_baseline_build(
+        current_shop,
+        {
+            "time_limit_s": schedule.time_limit_s,
+            "generations": schedule.generations,
+            "stagnation_generations": schedule.stagnation_generations,
+            "coarse_time_ratio": schedule.coarse_time_ratio,
+            "seed": schedule.seed,
+            "objective_keys": list(schedule.objective_keys),
+        },
+        source="scheduled",
+    )
+    if task_id is None:
+        logging.warning("跳过本次夜间基准构建：已有基准构建正在运行")
+    else:
+        logging.info("夜间基准构建任务已启动：%s", task_id)
+
+
+@app.post("/api/baseline/build")
+async def baseline_build(req: BaselineBuildReq):
+    """夜间基准方案库构建（后台任务，不阻塞白天 API）。返回 task_id 供轮询。"""
+    if not shop and not inst_store.has_data():
+        raise HTTPException(400, "请先生成实例")
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+    task_id = _launch_baseline_build(current_shop, req.model_dump(), source="manual")
+    if task_id is None:
+        raise HTTPException(409, "已有基准方案库构建正在运行")
     return {"task_id": task_id, "status": "running"}
 
 
@@ -3333,7 +3400,8 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
             _log_hybrid_event(
                 task,
                 f"初始化完成 · 种群 {config.get('population_size', '-')}"
-                f" · 基线 {config.get('baseline_rule_name', '-')} 注入",
+                f" · {'冷启动' if config.get('cold_start') else '热启动'}"
+                f" · 基线 {config.get('baseline_rule_name', '-')}",
             )
             graph_context = None
             graph_context_diagnostics = None
@@ -3387,6 +3455,7 @@ async def optimize_hybrid(req: HybridOptimizeReq, bg: BackgroundTasks):
                     seed=req.seed,
                     baseline_rule_name=req.baseline_rule_name,
                     parallel_backend=req.parallel_backend,
+                    baseline_seeds_enabled=not req.cold_start,
                 ),
                 graph_context,
                 graph_context_mode,

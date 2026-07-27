@@ -8,5 +8,20 @@
   },
   "database": {
     "path": "llm4drd.db"
+  },
+  "baseline_schedule": {
+    "enabled": false,
+    "daily_at": "02:00",
+    "timezone": "Asia/Shanghai",
+    "time_limit_s": 10800,
+    "generations": 1440,
+    "stagnation_generations": 5,
+    "coarse_time_ratio": 0.72,
+    "seed": 42,
+    "objective_keys": [
+      "main_order_tardy_ratio",
+      "critical_active_window_utilization",
+      "avg_flowtime"
+    ]
   }
 }
