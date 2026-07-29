@@ -34,7 +34,7 @@ from ..data.db import (
 )
 from ..data.graph_artifact_store import GraphArtifactStore
 from ..data.template_builder import build_instance_template_bytes
-from ..knowledge.canonical import OS_MACHINE_TYPE_ID, compute_graph_fingerprint
+from ..knowledge.canonical import AGGREGATED_MACHINE_TYPES, compute_graph_fingerprint
 from ..knowledge.context_service import (
     GraphContextMode,
     GraphContextService,
@@ -2389,11 +2389,12 @@ def _estimate_graph_size(current_shop: ShopFloor) -> dict:
     personnel_edges = 0
     for op in current_shop.operations.values():
         machine_ids = op.eligible_machine_ids or current_shop._machine_by_type.get(op.process_type, [])
-        # OS 机器在图谱层归一为单个聚合节点，每工序对 OS 只算 1 条边，
+        # OS/ZZ 机器在图谱层各归一为单个聚合节点，每工序对同一聚合节点只算 1 条边，
         # 口径必须与 canonical builder 一致，否则会在预检阶段误触 GRAPH_MAX_EDGES 熔断。
-        non_os = sum(1 for m in machine_ids if current_shop.machines[m].type_id != OS_MACHINE_TYPE_ID)
-        has_os = any(current_shop.machines[m].type_id == OS_MACHINE_TYPE_ID for m in machine_ids)
-        machine_edges += non_os + (1 if has_os else 0)
+        type_ids = [current_shop.machines[m].type_id for m in machine_ids]
+        non_aggregated = sum(1 for t in type_ids if t not in AGGREGATED_MACHINE_TYPES)
+        aggregated_hits = {t for t in type_ids if t in AGGREGATED_MACHINE_TYPES}
+        machine_edges += non_aggregated + len(aggregated_hits)
         tooling_edges += sum(len(current_shop._tooling_by_type.get(type_id, [])) for type_id in op.required_tooling_types)
         personnel_edges += sum(len(current_shop._personnel_by_skill.get(skill_id, [])) for skill_id in op.required_personnel_skills)
     total_edges = structural_edges + machine_edges + tooling_edges + personnel_edges

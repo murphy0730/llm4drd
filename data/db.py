@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..core.time_utils import datetime_to_offset_hours, default_plan_start, ensure_aware, isoformat_or_none
+from ..knowledge.canonical import AGGREGATED_MACHINE_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -1530,7 +1531,7 @@ class GraphStore:
             return {"outgoing": outgoing, "incoming": incoming}
 
     def _build_order_subgraph(self, conn, order_node_id: str) -> dict:
-        """根据订单节点 ID，拉取其任务/工序/资源与相关边；OS_ 开头的机器在 SQL 层直接过滤。"""
+        """根据订单节点 ID，拉取其任务/工序/资源与相关边；OS/ZZ 聚合机器节点在 SQL 层直接过滤。"""
         task_rows = conn.execute(
             "SELECT target FROM graph_edges WHERE source=? AND edge_type='order_has_task'",
             (order_node_id,),
@@ -1551,20 +1552,18 @@ class GraphStore:
         resource_ids = []
         if operation_ids:
             placeholders = ",".join("?" for _ in operation_ids)
-            # 机器：在 SQL 层排除 OS_ 开头的机器（按 entity_id 与 node_id 双判），其余资源不过滤
+            # 机器：在 SQL 层排除 OS/ZZ 聚合节点（图谱里这两类机器已归一，不存在逐台节点），
+            # 其余资源不过滤
+            aggregate_node_ids = [node_id for node_id, _ in AGGREGATED_MACHINE_TYPES.values()]
+            aggregate_placeholders = ",".join("?" for _ in aggregate_node_ids)
             machine_rows = conn.execute(
                 f"""
                 SELECT DISTINCT e.target FROM graph_edges e
                 WHERE e.source IN ({placeholders})
                   AND e.edge_type = 'machine_eligible'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM graph_nodes n
-                    WHERE n.node_id = e.target
-                      AND n.node_type = 'machine'
-                      AND (n.entity_id LIKE 'OS_%' OR n.node_id LIKE 'OS_%')
-                  )
+                  AND e.target NOT IN ({aggregate_placeholders})
                 """,
-                operation_ids,
+                [*operation_ids, *aggregate_node_ids],
             ).fetchall()
             resource_ids += [row["target"] for row in machine_rows]
             other_rows = conn.execute(

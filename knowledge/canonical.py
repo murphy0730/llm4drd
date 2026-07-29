@@ -12,14 +12,24 @@ from ..core.models import ShopFloor
 
 ScalarValue: TypeAlias = str | int | float | bool | None
 GRAPH_SCHEMA_VERSION = 1
-GRAPH_BUILDER_VERSION = "canonical-v2"
+GRAPH_BUILDER_VERSION = "canonical-v3"
 
-# OS（外协/共享）类机器在图谱层归一为单个聚合节点，避免上千台机器把
+# OS（外协/共享）与 ZZ 类机器在图谱层各归一为单个聚合节点，避免上千台机器把
 # machine_eligible 边数撑爆（触发 GRAPH_MAX_EDGES 熔断）并淹没图谱界面。
 # 仿真/优化取可用机器一律走 shop.get_eligible_machines()，不经过图谱边，
 # 故此归一不影响排产产能与结果。
 OS_MACHINE_TYPE_ID = "OS"
 OS_MACHINE_NODE_ID = "M:OS"
+ZZ_MACHINE_TYPE_ID = "ZZ"
+ZZ_MACHINE_NODE_ID = "M:ZZ"
+
+# type_id -> (聚合节点 id, 显示名)；声明顺序即建节点顺序，保证图谱产物可复现。
+AGGREGATED_MACHINE_TYPES: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        OS_MACHINE_TYPE_ID: (OS_MACHINE_NODE_ID, "外协/OS"),
+        ZZ_MACHINE_TYPE_ID: (ZZ_MACHINE_NODE_ID, "ZZ"),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -412,10 +422,12 @@ class CanonicalGraphBuilder:
             if progress_callback:
                 progress_callback(processed, total, len(node_order), len(edge_pairs))
 
-        os_machine_ids: list[str] = []
+        aggregated_members: dict[str, int] = {}
         for machine_id, machine in shop.machines.items():
-            if machine.type_id == OS_MACHINE_TYPE_ID:
-                os_machine_ids.append(machine_id)
+            if machine.type_id in AGGREGATED_MACHINE_TYPES:
+                aggregated_members[machine.type_id] = (
+                    aggregated_members.get(machine.type_id, 0) + 1
+                )
                 continue
             machine_type = shop.machine_types.get(machine.type_id)
             add_node(
@@ -429,18 +441,21 @@ class CanonicalGraphBuilder:
                     "is_critical": machine_type.is_critical if machine_type else False,
                 },
             )
-        if os_machine_ids:
-            os_type = shop.machine_types.get(OS_MACHINE_TYPE_ID)
+        for type_id, (node_id, label) in AGGREGATED_MACHINE_TYPES.items():
+            member_count = aggregated_members.get(type_id, 0)
+            if not member_count:
+                continue
+            machine_type = shop.machine_types.get(type_id)
             add_node(
-                OS_MACHINE_NODE_ID,
+                node_id,
                 "machine",
-                OS_MACHINE_TYPE_ID,
+                type_id,
                 {
-                    "label": "外协/OS",
-                    "type_id": OS_MACHINE_TYPE_ID,
-                    "type_name": os_type.name if os_type else "",
-                    "is_critical": os_type.is_critical if os_type else False,
-                    "member_count": len(os_machine_ids),
+                    "label": label,
+                    "type_id": type_id,
+                    "type_name": machine_type.name if machine_type else "",
+                    "is_critical": machine_type.is_critical if machine_type else False,
+                    "member_count": member_count,
                 },
             )
 
@@ -575,15 +590,21 @@ class CanonicalGraphBuilder:
             eligible_machine_ids = operation.eligible_machine_ids
             if not eligible_machine_ids:
                 eligible_machine_ids = shop._machine_by_type.get(operation.process_type, [])
-            os_linked = False
+            linked_aggregates: set[str] = set()
             for machine_id in eligible_machine_ids:
                 machine = shop.machines.get(machine_id)
-                if machine is not None and machine.type_id == OS_MACHINE_TYPE_ID:
-                    # OS 机器归一到聚合节点，每工序对 M:OS 只连一条边。
-                    if os_linked:
+                aggregate = (
+                    AGGREGATED_MACHINE_TYPES.get(machine.type_id)
+                    if machine is not None
+                    else None
+                )
+                if aggregate is not None:
+                    # OS/ZZ 机器归一到聚合节点，每工序对同一聚合节点只连一条边。
+                    aggregate_node_id = aggregate[0]
+                    if aggregate_node_id in linked_aggregates:
                         continue
-                    os_linked = True
-                    add_edge(f"OP:{operation_id}", OS_MACHINE_NODE_ID, "machine_eligible")
+                    linked_aggregates.add(aggregate_node_id)
+                    add_edge(f"OP:{operation_id}", aggregate_node_id, "machine_eligible")
                     continue
                 add_edge(
                     f"OP:{operation_id}",

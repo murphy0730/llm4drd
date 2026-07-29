@@ -237,9 +237,27 @@ class HeterogeneousGraphTests(unittest.TestCase):
         graph.graph.add_edge("OP:OP-1", machine_node_id, edge_type="machine_eligible")
         return graph
 
-    def test_order_subgraph_filters_os_machines(self):
-        # 机器 entity_id 以 OS_ 开头，子图应在 SQL 层过滤掉该机器及其关联边。
-        graph = self._build_order_with_machine("M:OS_stub", "OS_stub")
+    def test_order_subgraph_filters_aggregated_machines(self):
+        # OS/ZZ 已归一为聚合节点，子图应在 SQL 层过滤掉该节点及其关联边。
+        for machine_node_id, entity_id in [("M:OS", "OS"), ("M:ZZ", "ZZ")]:
+            with self.subTest(machine=machine_node_id):
+                graph = self._build_order_with_machine(machine_node_id, entity_id)
+                with TemporaryDirectory() as directory:
+                    db_path = str(Path(directory) / "graph.db")
+                    init_db(db_path)
+                    store = GraphStore(db_path)
+                    store.save_graph(graph)
+                    result = store.load_order_subgraph("O-1")
+
+                node_ids = {node["node_id"] for node in result["nodes"]}
+                self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1"})
+                self.assertTrue(
+                    all(edge["target"] != machine_node_id for edge in result["edges"])
+                )
+
+    def test_order_subgraph_keeps_machines_sharing_aggregate_prefix(self):
+        # 归一判据是聚合节点 id 精确匹配，"OS"/"ZZ" 开头的普通机器不能被误伤。
+        graph = self._build_order_with_machine("M:OSAKA1", "OSAKA1")
         with TemporaryDirectory() as directory:
             db_path = str(Path(directory) / "graph.db")
             init_db(db_path)
@@ -248,17 +266,16 @@ class HeterogeneousGraphTests(unittest.TestCase):
             result = store.load_order_subgraph("O-1")
 
         node_ids = {node["node_id"] for node in result["nodes"]}
-        self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1"})
-        self.assertTrue(all(edge["target"] != "M:OS_stub" for edge in result["edges"]))
+        self.assertEqual(node_ids, {"O:O-1", "T:T-1", "OP:OP-1", "M:OSAKA1"})
 
-    def test_search_order_subgraph_resolves_and_filters_os_machines(self):
-        graph = self._build_order_with_machine("M:OS_stub", "OS_stub")
+    def test_search_order_subgraph_resolves_and_filters_aggregated_machines(self):
+        graph = self._build_order_with_machine("M:OS", "OS")
         with TemporaryDirectory() as directory:
             db_path = str(Path(directory) / "graph.db")
             init_db(db_path)
             store = GraphStore(db_path)
             store.save_graph(graph)
-            # 精确解析 + 模糊解析都应命中，且 OS_ 机器被过滤。
+            # 精确解析 + 模糊解析都应命中，且 OS 聚合机器被过滤。
             exact = store.search_order_subgraph("O-1")
             fuzzy = store.search_order_subgraph("O")
             missing = store.search_order_subgraph("not-exist")

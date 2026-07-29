@@ -7,7 +7,8 @@ from llm4drd.core.models import (
     Machine, MachineType, Operation, Order, Shift, ShopFloor, Task,
 )
 from llm4drd.knowledge.canonical import (
-    OS_MACHINE_NODE_ID, CanonicalGraphBuilder, compute_graph_fingerprint,
+    OS_MACHINE_NODE_ID, ZZ_MACHINE_NODE_ID, CanonicalGraphBuilder,
+    compute_graph_fingerprint,
 )
 from llm4drd.tests.shop_fixtures import make_graph_context_shop
 
@@ -268,13 +269,17 @@ class CanonicalGraphBuilderTests(unittest.TestCase):
 
 
 def make_os_shop() -> ShopFloor:
-    """两台 OS 机器 + 一台普通机器；OP-A 可上两台 OS，OP-B 只上普通机器。"""
+    """两台 OS + 三台 ZZ + 一台普通机器；OP-D 同时可上 OS/ZZ/普通机器。"""
     shop = ShopFloor()
     shifts = [Shift(day=day, start_hour=0.0, hours=24.0) for day in range(3)]
     shop.machine_types["OS"] = MachineType("OS", "外协", is_critical=False)
+    shop.machine_types["ZZ"] = MachineType("ZZ", "ZZ", is_critical=False)
     shop.machine_types["cut"] = MachineType("cut", "Cut", is_critical=True)
     shop.machines["OS_1"] = Machine("OS_1", "外协1", "OS", shifts=list(shifts))
     shop.machines["OS_2"] = Machine("OS_2", "外协2", "OS", shifts=list(shifts))
+    shop.machines["ZZ_1"] = Machine("ZZ_1", "ZZ1", "ZZ", shifts=list(shifts))
+    shop.machines["ZZ_2"] = Machine("ZZ_2", "ZZ2", "ZZ", shifts=list(shifts))
+    shop.machines["ZZ_3"] = Machine("ZZ_3", "ZZ3", "ZZ", shifts=list(shifts))
     shop.machines["M-C1"] = Machine("M-C1", "Cutter 1", "cut", shifts=list(shifts))
 
     shop.orders["O-1"] = Order("O-1", "Order 1", release_time=0.0, due_date=40.0, priority=1)
@@ -282,7 +287,9 @@ def make_os_shop() -> ShopFloor:
     shop.tasks["T-1"] = task
     op_a = Operation("OP-A", "T-1", "Outsource", "OS", 4.0, eligible_machine_ids=["OS_1", "OS_2"])
     op_b = Operation("OP-B", "T-1", "Cut", "cut", 2.0, predecessor_ops=["OP-A"], eligible_machine_ids=["M-C1"])
-    for operation in (op_a, op_b):
+    op_c = Operation("OP-C", "T-1", "ZZ", "ZZ", 3.0, predecessor_ops=["OP-B"], eligible_machine_ids=["ZZ_1", "ZZ_2", "ZZ_3"])
+    op_d = Operation("OP-D", "T-1", "Mixed", "cut", 1.0, predecessor_ops=["OP-C"], eligible_machine_ids=["OS_1", "ZZ_1", "ZZ_2", "M-C1"])
+    for operation in (op_a, op_b, op_c, op_d):
         task.operations.append(operation)
         shop.operations[operation.id] = operation
     shop.orders["O-1"].task_ids.append("T-1")
@@ -292,27 +299,41 @@ def make_os_shop() -> ShopFloor:
 
 
 class OsMachineAggregationTests(unittest.TestCase):
-    def test_os_machines_collapse_to_single_node(self):
+    def test_aggregated_machines_collapse_to_single_node(self):
         canonical = CanonicalGraphBuilder().build(make_os_shop())
         machine_nodes = [n for n in canonical.nodes if n.node_type == "machine"]
         machine_ids = {n.node_id for n in machine_nodes}
-        # 两台 OS 机器归一为单个聚合节点，普通机器保留。
-        self.assertEqual(machine_ids, {OS_MACHINE_NODE_ID, "M:M-C1"})
+        # OS 与 ZZ 机器各归一为单个聚合节点，普通机器保留。
+        self.assertEqual(
+            machine_ids, {OS_MACHINE_NODE_ID, ZZ_MACHINE_NODE_ID, "M:M-C1"}
+        )
         os_node = next(n for n in machine_nodes if n.node_id == OS_MACHINE_NODE_ID)
         self.assertEqual(os_node.entity_id, "OS")
+        self.assertEqual(os_node.attrs["label"], "外协/OS")
         self.assertEqual(os_node.attrs["member_count"], 2)
+        zz_node = next(n for n in machine_nodes if n.node_id == ZZ_MACHINE_NODE_ID)
+        self.assertEqual(zz_node.entity_id, "ZZ")
+        self.assertEqual(zz_node.attrs["label"], "ZZ")
+        self.assertEqual(zz_node.attrs["member_count"], 3)
 
-    def test_operation_links_os_aggregate_with_single_edge(self):
+    def test_operation_links_each_aggregate_with_single_edge(self):
         canonical = CanonicalGraphBuilder().build(make_os_shop())
         machine_edges = [
             (e.source, e.target)
             for e in canonical.edges
             if e.edge_type == "machine_eligible"
         ]
-        # OP-A 可上两台 OS，但只连一条边到聚合节点；OP-B 不受影响。
+        # 每工序对同一聚合节点只连一条边：OP-A→OS、OP-C→ZZ、OP-D 三类各一条。
         self.assertEqual(
             sorted(machine_edges),
-            [("OP:OP-A", OS_MACHINE_NODE_ID), ("OP:OP-B", "M:M-C1")],
+            [
+                ("OP:OP-A", OS_MACHINE_NODE_ID),
+                ("OP:OP-B", "M:M-C1"),
+                ("OP:OP-C", ZZ_MACHINE_NODE_ID),
+                ("OP:OP-D", "M:M-C1"),
+                ("OP:OP-D", OS_MACHINE_NODE_ID),
+                ("OP:OP-D", ZZ_MACHINE_NODE_ID),
+            ],
         )
 
     def test_estimate_matches_actual_machine_edges(self):
