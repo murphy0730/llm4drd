@@ -12,6 +12,10 @@ from .sim_runtime import SimulationRuntime
 
 PDRFunc = Callable
 
+# 单个资源在 _resource_ready_cache 里保留的时刻数上限。实测大实例(475 机/5495 工序)
+# 单资源峰值 158 条，取 512 使正常实例根本不会触发，只用于兜住陪跑资源的无界累积。
+_READY_CACHE_MAX_PER_RESOURCE = 512
+
 
 @dataclass
 class SimResult:
@@ -90,6 +94,12 @@ class Simulator:
         self._pdr_error_logged = False
         self._op_dispatch_type_ids: dict[str, set[str]] = {}
         self._flow_gate_cache: dict[str, float] = {}
+        # 资源就绪时刻缓存 id(resource) -> {when: ready_at}。派工时一台机器要对
+        # 就绪桶里每道候选工序算一遍辅助资源可用时间，资源集合与 when 高度重叠，
+        # 原先每次 _earliest_feasible_start 都重建缓存，98.7% 的计算是重复的。
+        # 唯一可变输入是 resource.current_finish_time，故在其被改写的两处
+        # (派工占用 / 完工释放) 按资源精确失效即可保证取值与实算一致。
+        self._resource_ready_cache: dict[int, dict[float, float]] = {}
         # 每工序静态特征缓存（due/priority/工时等不随仿真时刻变化的 10 个键）；
         # 动态键（slack/urgency/wait_time/remaining/progress/machine_busy_time）仍每次现算。
         self._static_features: dict[str, dict] = {}
@@ -107,6 +117,7 @@ class Simulator:
         self._dependent_ops_by_op = runtime.dependent_ops_by_op
         self._dependent_ops_by_task = runtime.dependent_ops_by_task
         self._ready_by_machine = {}
+        self._resource_ready_cache = {}
         self._dispatch_scheduled_at = dict.fromkeys(shop.machines, None)
         self._machine_order = {machine_id: index for index, machine_id in enumerate(shop.machines)}
         self._release_checks_scheduled = set()
@@ -154,8 +165,7 @@ class Simulator:
             if op.status == OpStatus.PENDING and self._is_op_ready(op):
                 self._queue_release_or_ready(shop, op, ready_ops, event_queue)
 
-        for machine_id in shop.machines:
-            self._schedule_dispatch(event_queue, machine_id, 0.0)
+        self._schedule_dispatch_batch(event_queue, list(shop.machines), 0.0)
 
         now = 0.0
         while event_queue and event_count < 8_000_000:
@@ -178,127 +188,129 @@ class Simulator:
                         )
 
             elif event.event_type == "dispatch":
-                machine = shop.machines.get(event.data["machine_id"])
-                scheduled = self._dispatch_scheduled_at.get(event.data["machine_id"])
-                if scheduled is None or abs(scheduled - event.time) > 1e-9:
-                    continue
-                self._dispatch_scheduled_at[event.data["machine_id"]] = None
-                if not machine or machine.state != ResourceState.IDLE:
-                    continue
-                if machine.current_finish_time > now:
-                    self._schedule_dispatch(event_queue, machine.id, machine.current_finish_time)
-                    continue
-
-                machine_available = machine.next_available_time(now)
-                if machine_available == float("inf"):
-                    continue
-                if machine_available > now + 1e-9:
-                    self._schedule_dispatch(event_queue, machine.id, machine_available)
-                    continue
-
-                best: tuple[float, float, str, Operation, list, list] | None = None
-                next_dispatch_time = float("inf")
-                # 反向索引：候选 = 本机私有就绪桶（桶内工序必然本机可加工，
-                # 原 eligible 成员判断随之删除）；list() 复制保留，
-                # 因为循环体内仍会 _discard_ready 清理失效条目。
-                candidate_ids = list(self._ready_by_machine.get(machine.id, ()))
-                for op_id in candidate_ids:
-                    op = shop.operations.get(op_id)
-                    if not op or op.status != OpStatus.READY:
-                        self._discard_ready(op_id, machine.type_id, ready_ops)
+                for machine_id in event.data["machine_ids"]:
+                    machine = shop.machines.get(machine_id)
+                    scheduled = self._dispatch_scheduled_at.get(machine_id)
+                    if scheduled is None or abs(scheduled - event.time) > 1e-9:
+                        continue
+                    self._dispatch_scheduled_at[machine_id] = None
+                    if not machine or machine.state != ResourceState.IDLE:
+                        continue
+                    if machine.current_finish_time > now:
+                        self._schedule_dispatch(event_queue, machine.id, machine.current_finish_time)
                         continue
 
-                    start_time, toolings, people = self._earliest_feasible_start(shop, machine, op, now)
-                    if start_time == float("inf"):
+                    machine_available = machine.next_available_time(now)
+                    if machine_available == float("inf"):
                         continue
-                    if start_time > now + 1e-9:
-                        next_dispatch_time = min(next_dispatch_time, start_time)
+                    if machine_available > now + 1e-9:
+                        self._schedule_dispatch(event_queue, machine.id, machine_available)
                         continue
 
-                    task = shop.tasks.get(op.task_id)
-                    order = shop.orders.get(task.order_id) if task else None
-                    features = self._features(op, task, order, machine, shop, now)
-                    try:
-                        score = self.pdr(op, machine, features, shop)
-                        if not isinstance(score, (int, float)) or not math.isfinite(score):
+                    best: tuple[float, float, str, Operation, list, list] | None = None
+                    next_dispatch_time = float("inf")
+                    # 反向索引：候选 = 本机私有就绪桶（桶内工序必然本机可加工，
+                    # 原 eligible 成员判断随之删除）；list() 复制保留，
+                    # 因为循环体内仍会 _discard_ready 清理失效条目。
+                    candidate_ids = list(self._ready_by_machine.get(machine.id, ()))
+                    for op_id in candidate_ids:
+                        op = shop.operations.get(op_id)
+                        if not op or op.status != OpStatus.READY:
+                            self._discard_ready(op_id, machine.type_id, ready_ops)
+                            continue
+
+                        start_time, toolings, people = self._earliest_feasible_start(shop, machine, op, now)
+                        if start_time == float("inf"):
+                            continue
+                        if start_time > now + 1e-9:
+                            next_dispatch_time = min(next_dispatch_time, start_time)
+                            continue
+
+                        task = shop.tasks.get(op.task_id)
+                        order = shop.orders.get(task.order_id) if task else None
+                        features = self._features(op, task, order, machine, shop, now)
+                        try:
+                            score = self.pdr(op, machine, features, shop)
+                            if not isinstance(score, (int, float)) or not math.isfinite(score):
+                                score = 0.0
+                        except Exception as exc:
+                            if not self._pdr_error_logged:
+                                self._pdr_error_logged = True
+                                logging.warning("simulator: dispatch rule raised %s: %s (falling back to score=0)", type(exc).__name__, exc)
                             score = 0.0
-                    except Exception as exc:
-                        if not self._pdr_error_logged:
-                            self._pdr_error_logged = True
-                            logging.warning("simulator: dispatch rule raised %s: %s (falling back to score=0)", type(exc).__name__, exc)
-                        score = 0.0
-                    tie_break = op.work_remaining
-                    candidate = (score, -tie_break, op.id, op, toolings, people)
-                    if best is None or candidate[:3] > best[:3]:
-                        best = candidate
+                        tie_break = op.work_remaining
+                        candidate = (score, -tie_break, op.id, op, toolings, people)
+                        if best is None or candidate[:3] > best[:3]:
+                            best = candidate
 
-                if best is None:
-                    if next_dispatch_time < float("inf"):
-                        self._schedule_dispatch(event_queue, machine.id, next_dispatch_time)
-                    continue
+                    if best is None:
+                        if next_dispatch_time < float("inf"):
+                            self._schedule_dispatch(event_queue, machine.id, next_dispatch_time)
+                        continue
 
-                _, _, _, op, toolings, people = best
-                resources = [machine, *toolings, *people]
-                start_time = _joint_next_available_time(resources, now)
-                productive_duration = op.work_remaining
-                end_time = _joint_compute_effective_end(resources, start_time, productive_duration)
+                    _, _, _, op, toolings, people = best
+                    resources = [machine, *toolings, *people]
+                    start_time = _joint_next_available_time(resources, now)
+                    productive_duration = op.work_remaining
+                    end_time = _joint_compute_effective_end(resources, start_time, productive_duration)
 
-                if not (math.isfinite(start_time) and math.isfinite(end_time)):
-                    # 资源日历在工序完成前耗尽（班次覆盖不到 / 停机吃满），该工序无法排出。
-                    # 绝不能带着 inf 去占用资源——那会把机器/工装/人员永久锁死、并让
-                    # makespan 等指标变成 inf。这里将其挂起（保持 READY 但退出派工池），
-                    # 并立刻重新触发派工评估剩余候选工序。
+                    if not (math.isfinite(start_time) and math.isfinite(end_time)):
+                        # 资源日历在工序完成前耗尽（班次覆盖不到 / 停机吃满），该工序无法排出。
+                        # 绝不能带着 inf 去占用资源——那会把机器/工装/人员永久锁死、并让
+                        # makespan 等指标变成 inf。这里将其挂起（保持 READY 但退出派工池），
+                        # 并立刻重新触发派工评估剩余候选工序。
+                        self._discard_ready(op.id, op.process_type, ready_ops)
+                        if op.id not in self._unschedulable_ops:
+                            self._unschedulable_ops.add(op.id)
+                            logging.warning(
+                                "simulator: op %s cannot finish within resource calendars "
+                                "(start=%s, end=%s), parked as unschedulable",
+                                op.id, start_time, end_time,
+                            )
+                        self._schedule_dispatch(event_queue, machine.id, now)
+                        continue
+
+                    op.status = OpStatus.PROCESSING
+                    op.remaining_processing_time = productive_duration
+                    op.assigned_machine_id = machine.id
+                    op.assigned_tooling_ids = [tool.id for tool in toolings]
+                    op.assigned_personnel_ids = [person.id for person in people]
+                    op.start_time = start_time
+                    op.end_time = end_time
                     self._discard_ready(op.id, op.process_type, ready_ops)
-                    if op.id not in self._unschedulable_ops:
-                        self._unschedulable_ops.add(op.id)
-                        logging.warning(
-                            "simulator: op %s cannot finish within resource calendars "
-                            "(start=%s, end=%s), parked as unschedulable",
-                            op.id, start_time, end_time,
-                        )
-                    self._schedule_dispatch(event_queue, machine.id, now)
-                    continue
 
-                op.status = OpStatus.PROCESSING
-                op.remaining_processing_time = productive_duration
-                op.assigned_machine_id = machine.id
-                op.assigned_tooling_ids = [tool.id for tool in toolings]
-                op.assigned_personnel_ids = [person.id for person in people]
-                op.start_time = start_time
-                op.end_time = end_time
-                self._discard_ready(op.id, op.process_type, ready_ops)
+                    for resource in resources:
+                        resource.state = ResourceState.BUSY
+                        resource.current_op_id = op.id
+                        resource.current_finish_time = end_time
+                    self._invalidate_resource_ready(resources)
 
-                for resource in resources:
-                    resource.state = ResourceState.BUSY
-                    resource.current_op_id = op.id
-                    resource.current_finish_time = end_time
-
-                schedule.append(
-                    {
-                        "op_id": op.id,
-                        "op_name": op.name,
-                        "task_id": op.task_id,
-                        "machine_id": machine.id,
-                        "machine_name": machine.name,
-                        "process_type": op.process_type,
-                        "start": round(start_time, 3),
-                        "end": round(end_time, 3),
-                        "duration": round(productive_duration, 3),
-                        "elapsed_duration": round(end_time - start_time, 3),
-                        "tooling_ids": [tool.id for tool in toolings],
-                        "personnel_ids": [person.id for person in people],
-                    }
-                )
-                self._push(
-                    event_queue,
-                    end_time,
-                    "op_done",
-                    op_id=op.id,
-                    machine_id=machine.id,
-                    tooling_ids=[tool.id for tool in toolings],
-                    personnel_ids=[person.id for person in people],
-                    productive_duration=productive_duration,
-                )
+                    schedule.append(
+                        {
+                            "op_id": op.id,
+                            "op_name": op.name,
+                            "task_id": op.task_id,
+                            "machine_id": machine.id,
+                            "machine_name": machine.name,
+                            "process_type": op.process_type,
+                            "start": round(start_time, 3),
+                            "end": round(end_time, 3),
+                            "duration": round(productive_duration, 3),
+                            "elapsed_duration": round(end_time - start_time, 3),
+                            "tooling_ids": [tool.id for tool in toolings],
+                            "personnel_ids": [person.id for person in people],
+                        }
+                    )
+                    self._push(
+                        event_queue,
+                        end_time,
+                        "op_done",
+                        op_id=op.id,
+                        machine_id=machine.id,
+                        tooling_ids=[tool.id for tool in toolings],
+                        personnel_ids=[person.id for person in people],
+                        productive_duration=productive_duration,
+                    )
 
             elif event.event_type == "op_done":
                 op = shop.operations.get(event.data["op_id"])
@@ -342,6 +354,7 @@ class Simulator:
                     resource.state = ResourceState.IDLE
                     resource.current_op_id = None
                     resource.current_finish_time = 0.0
+                self._invalidate_resource_ready(resources)
 
                 if machine:
                     self._schedule_dispatch(event_queue, machine.id, now)
@@ -462,12 +475,33 @@ class Simulator:
         self._seq += 1
         heapq.heappush(event_queue, Event(when, self._seq, event_type, data))
 
-    def _schedule_dispatch(self, event_queue: list[Event], machine_id: str, when: float) -> None:
+    def _claim_dispatch_slot(self, machine_id: str, when: float) -> bool:
+        """机器已有不晚于 when 的待处理 dispatch 时返回 False（去重），否则占位并返回 True。"""
         existing = self._dispatch_scheduled_at.get(machine_id)
         if existing is not None and existing <= when + 1e-9:
-            return
+            return False
         self._dispatch_scheduled_at[machine_id] = when
-        self._push(event_queue, when, "dispatch", machine_id=machine_id)
+        return True
+
+    def _schedule_dispatch(self, event_queue: list[Event], machine_id: str, when: float) -> None:
+        if self._claim_dispatch_slot(machine_id, when):
+            self._push(event_queue, when, "dispatch", machine_ids=[machine_id])
+
+    def _schedule_dispatch_batch(
+        self, event_queue: list[Event], machine_ids: list[str], when: float
+    ) -> None:
+        """同刻唤醒一批机器，合并为单个 dispatch 事件。
+
+        原先逐台 _schedule_dispatch 推入的 N 个事件 seq 连续、时刻相同，必然被
+        连续弹出（Event 按 (time, seq) 排序），中间插不进任何其它事件——因此把
+        它们并成一个携带机器列表的事件，处理顺序与派工结果完全不变，事件计数却
+        从 N 降到 1。机器数一多，这批空转唤醒正是事件量的主要来源。
+
+        machine_ids 必须已按全局机器序排好（见 _machine_sort_key），顺序即等价性前提。
+        """
+        claimed = [mid for mid in machine_ids if self._claim_dispatch_slot(mid, when)]
+        if claimed:
+            self._push(event_queue, when, "dispatch", machine_ids=claimed)
 
     def _mark_ready(self, op: Operation, ready_ops: set[str]) -> None:
         op.status = OpStatus.READY
@@ -543,10 +577,11 @@ class Simulator:
             machines.sort(key=self._machine_sort_key)
         else:
             machines = shop.machines.values()
-        for machine in machines:
-            if machine.state != ResourceState.IDLE:
-                continue
-            self._schedule_dispatch(event_queue, machine.id, now)
+        self._schedule_dispatch_batch(
+            event_queue,
+            [machine.id for machine in machines if machine.state == ResourceState.IDLE],
+            now,
+        )
 
     def _machine_sort_key(self, machine) -> int:
         return self._machine_order.get(machine.id, 1 << 30)
@@ -555,14 +590,51 @@ class Simulator:
         base = max(now, getattr(resource, "current_finish_time", 0.0))
         return resource.next_available_time(base)
 
-    def _resource_ready_at(self, resource, when: float, cache: dict[tuple[str, float], float]) -> float:
-        key = (getattr(resource, "id", str(id(resource))), when)
-        if key not in cache:
-            cache[key] = self._next_resource_ready_time(resource, when)
-        return cache[key]
+    def _resource_ready_at(self, resource, when: float) -> float:
+        """resource 在 when 之后的最早可用时刻，跨 _earliest_feasible_start 调用缓存。
 
-    def _select_aux_resources(self, shop: ShopFloor, op: Operation, when: float, ready_cache: dict[tuple[str, float], float] | None = None):
-        ready_cache = ready_cache or {}
+        _next_resource_ready_time 的函数体在此内联——该函数在大实例上被调用两千万
+        次，一层调用开销本身就是可观的成本。
+        """
+        cache = self._resource_ready_cache
+        # 键用对象身份而非 resource.id：机器/工装/人员的 ID 来自数据库三张独立的表
+        # (data/db.py 的 machine_id/tooling_id/personnel_id)，ID 空间互不相干，跨类型
+        # 重名完全合法——用 resource.id 会让工装的就绪时刻被同名人员命中，把工序排到
+        # 错误时刻。不用 (类型, id) 元组是因为这里每轮要执行两千万次，元组构造与字符串
+        # 哈希的开销会吃掉缓存本身带来的收益。
+        # id() 作键的前提：仿真期间 shop.machines/toolings/personnel 持有全部资源的强
+        # 引用，对象不会被回收，地址不会被复用；缓存又在 _bind_runtime 每轮清空，故与
+        # runtime.reset() 是否重建资源对象无关。改动此处务必保住这两条前提。
+        key = id(resource)
+        try:
+            # 命中率约 88%，走最短路径：两次 __getitem__，不构造元组键也不查 .get。
+            return cache[key][when]
+        except KeyError:
+            pass
+        by_when = cache.get(key)
+        if by_when is None:
+            by_when = cache[key] = {}
+        elif len(by_when) >= _READY_CACHE_MAX_PER_RESOURCE:
+            # 只有被占用/释放过的资源才会走 _invalidate_resource_ready，从不被选中的
+            # 陪跑资源不会失效，其时刻条目只增不减。仿真时刻单调推进，旧时刻此后几乎
+            # 不会再命中，整桶丢弃即可，把最坏情况从无界压到「资源数 × 上界」。
+            by_when.clear()
+        base = when if when > resource.current_finish_time else resource.current_finish_time
+        value = by_when[when] = resource.next_available_time(base)
+        return value
+
+    def _invalidate_resource_ready(self, resources) -> None:
+        """资源的 current_finish_time 被改写后，其缓存条目必须作废。
+
+        缓存值 = next_available_time(max(when, current_finish_time))，日历在仿真期间
+        不变，故这是唯一的失效条件；按资源 pop 而非整表 clear，避免一次派工把其余
+        几百个资源的有效缓存一并丢掉。
+        """
+        cache = self._resource_ready_cache
+        for resource in resources:
+            cache.pop(id(resource), None)
+
+    def _select_aux_resources(self, shop: ShopFloor, op: Operation, when: float):
         selected_toolings = []
         used_toolings: set[str] = set()
         for tooling_type in op.required_tooling_types:
@@ -573,7 +645,7 @@ class Simulator:
                     continue
                 if tooling.current_finish_time > when + 1e-9:
                     continue
-                ready_at = self._resource_ready_at(tooling, when, ready_cache)
+                ready_at = self._resource_ready_at(tooling, when)
                 if ready_at > when + 1e-9:
                     continue
                 candidate_key = (tooling.total_busy_time, tooling.id)
@@ -595,7 +667,7 @@ class Simulator:
                     continue
                 if person.current_finish_time > when + 1e-9:
                     continue
-                ready_at = self._resource_ready_at(person, when, ready_cache)
+                ready_at = self._resource_ready_at(person, when)
                 if ready_at > when + 1e-9:
                     continue
                 candidate_key = (person.total_busy_time, person.id)
@@ -609,8 +681,7 @@ class Simulator:
 
         return selected_toolings, selected_people
 
-    def _next_requirement_ready_time(self, shop: ShopFloor, op: Operation, when: float, ready_cache: dict[tuple[str, float], float] | None = None) -> float:
-        ready_cache = ready_cache or {}
+    def _next_requirement_ready_time(self, shop: ShopFloor, op: Operation, when: float) -> float:
         required_times = [when]
         used_toolings: set[str] = set()
         for tooling_type in op.required_tooling_types:
@@ -619,7 +690,7 @@ class Simulator:
             for tooling in self._tooling_candidates.get(op.id, {}).get(tooling_type, []):
                 if tooling.id in used_toolings:
                     continue
-                ready_at = self._resource_ready_at(tooling, when, ready_cache)
+                ready_at = self._resource_ready_at(tooling, when)
                 candidate_key = (ready_at, tooling.id)
                 if selected is None or candidate_key < (selected_ready, selected.id):
                     selected = tooling
@@ -636,7 +707,7 @@ class Simulator:
             for person in self._personnel_candidates.get(op.id, {}).get(skill_id, []):
                 if person.id in used_people:
                     continue
-                ready_at = self._resource_ready_at(person, when, ready_cache)
+                ready_at = self._resource_ready_at(person, when)
                 candidate_key = (ready_at, person.id)
                 if selected is None or candidate_key < (selected_ready, selected.id):
                     selected = person
@@ -653,12 +724,11 @@ class Simulator:
         if not op.required_tooling_types and not op.required_personnel_skills:
             # 无辅助资源需求时只受机器日历约束，跳过选配/联合推进循环。
             return machine.next_available_time(probe), [], []
-        ready_cache: dict[tuple[str, float], float] = {}
         for _ in range(1000):
             machine_ready = machine.next_available_time(probe)
             if machine_ready == float("inf"):
                 return float("inf"), [], []
-            assignment = self._select_aux_resources(shop, op, machine_ready, ready_cache)
+            assignment = self._select_aux_resources(shop, op, machine_ready)
             if assignment is not None:
                 toolings, people = assignment
                 joint_start = _joint_next_available_time([machine, *toolings, *people], machine_ready)
@@ -666,7 +736,7 @@ class Simulator:
                     return machine_ready, toolings, people
                 probe = joint_start
                 continue
-            next_aux_ready = self._next_requirement_ready_time(shop, op, machine_ready, ready_cache)
+            next_aux_ready = self._next_requirement_ready_time(shop, op, machine_ready)
             if next_aux_ready == float("inf"):
                 return float("inf"), [], []
             if next_aux_ready <= probe + 1e-9:

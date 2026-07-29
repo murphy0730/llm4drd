@@ -7,6 +7,8 @@
 4. build_schedule_analytics 对 None/inf 排程条目的容错
 5. ExactSolver 对无交期任务（due_date=inf）不崩溃
 6. 调度规则抛异常 / 返回非有限分数时的兜底
+7. 资源就绪缓存按对象身份而非 id 归档（机器/工装/人员的 ID 空间互相独立，
+   同名资源不得共用缓存条目）
 """
 import math
 import unittest
@@ -17,9 +19,12 @@ from llm4drd.core.models import (
     MachineType,
     Operation,
     Order,
+    Personnel,
     Shift,
     ShopFloor,
     Task,
+    Tooling,
+    ToolingType,
 )
 from llm4drd.core.rules import BUILTIN_RULES
 from llm4drd.core.simulator import SimResult, Simulator
@@ -288,6 +293,66 @@ class InitialWipFallbackTests(unittest.TestCase):
         self.assertAlmostEqual(entry["end"], 6.0, places=3)
         self.assertTrue(result.feasible)
         self.assertTrue(math.isfinite(result.makespan))
+
+
+class DuplicateResourceIdTests(unittest.TestCase):
+    """机器/工装/人员的 ID 来自三张独立的表，跨类型重名合法，不得共用就绪缓存。
+
+    构造：工装与人员同为 "R1"，但工装第 0 天 2 点才上班、人员全天可用。若缓存按
+    resource.id 归档，先被评估的工装会把「2 点才可用」写进 R1 的条目，随后只需人员
+    的工序命中它、被凭空推迟到 2 点。
+    """
+
+    DUP_ID = "R1"
+
+    def _build_shop(self) -> ShopFloor:
+        operations, tasks = {}, {}
+        # opT 走 P1、opP 走 P2：机器序决定 opT 先被评估，从而先写入缓存条目
+        for op_id, process_type, toolings, skills in (
+            ("opT", "P1", ["TT1"], []),
+            ("opP", "P2", [], ["S1"]),
+        ):
+            task = Task(id=f"T_{op_id}", order_id="O1", name=op_id, due_date=100.0, operations=[])
+            op = Operation(
+                id=op_id, task_id=task.id, name=op_id, process_type=process_type,
+                processing_time=1.0, required_tooling_types=list(toolings),
+                required_personnel_skills=list(skills),
+            )
+            operations[op_id] = op
+            task.operations.append(op)
+            tasks[task.id] = task
+
+        full = _full_calendar(3)
+        late = [Shift(day=0, start_hour=2.0, hours=22.0)] + [
+            Shift(day=day, start_hour=0.0, hours=24.0) for day in (1, 2)
+        ]
+        shop = ShopFloor(
+            machine_types={
+                "P1": MachineType(id="P1", name="P1"),
+                "P2": MachineType(id="P2", name="P2"),
+            },
+            machines={
+                "M1": Machine(id="M1", name="M1", type_id="P1", shifts=full),
+                "M2": Machine(id="M2", name="M2", type_id="P2", shifts=full),
+            },
+            tooling_types={"TT1": ToolingType(id="TT1", name="TT1")},
+            toolings={self.DUP_ID: Tooling(id=self.DUP_ID, name="tool", type_id="TT1", shifts=late)},
+            personnel={self.DUP_ID: Personnel(id=self.DUP_ID, name="person", skills=["S1"], shifts=full)},
+            orders={"O1": Order(id="O1", name="O1", due_date=100.0,
+                                task_ids=list(tasks), main_task_id="T_opP")},
+            tasks=tasks, operations=operations,
+            plan_start_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        )
+        shop.build_indexes()
+        return shop
+
+    def test_same_id_across_resource_types_does_not_share_cache(self):
+        result = Simulator(self._build_shop(), BUILTIN_RULES["ATC"]).run()
+        window = {entry["op_id"]: (entry["start"], entry["end"]) for entry in result.schedule}
+        # 人员 R1 全天可用，不得被同名工装的班次带偏
+        self.assertEqual(window["opP"], (0.0, 1.0))
+        self.assertEqual(window["opT"], (2.0, 3.0))
+        self.assertAlmostEqual(result.makespan, 3.0, places=3)
 
 
 if __name__ == "__main__":
