@@ -258,7 +258,11 @@ def _summary(payload: dict) -> str:
     if isinstance(data, dict) and "rule_name" in data and "operation_count" in data:
         return f"已使用 {data['rule_name']} 完成排产，共排入 {data['operation_count']} 道工序"
     if isinstance(data, dict) and "candidate_count" in data:
-        return f"查询到 {data['candidate_count']} 个候选排产方案"
+        total = data.get("solution_count", data["candidate_count"])
+        return (
+            f"查询到 {total} 个排产方案（基线 {data.get('baseline_count', 0)} 个、"
+            f"优化候选 {data['candidate_count']} 个、参考 {data.get('reference_count', 0)} 个）"
+        )
     summary = _whatif_summary(data)
     if summary is not None:
         return summary[:1000]

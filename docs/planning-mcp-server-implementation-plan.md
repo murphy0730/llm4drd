@@ -133,6 +133,7 @@ task["export_result"]
 - `candidate_count = len(result.solutions)`。
 - `archive_size = result.archive_size`。
 - 两者分别返回，不混用。
+- `solution_count`：概览 `solutions` 列出的方案总数（基线 + 候选 + 参考），与评审页候选列表一致。
 
 ### 5.4 指标口径
 
@@ -174,14 +175,30 @@ GET /api/query/planning/overview?task_id=<optional>
     "instance_version": 4,
     "task_id": "d7c3e797",
     "status": "done",
+    "solution_count": 2,
     "candidate_count": 1,
     "archive_size": 1,
     "baseline_count": 1,
     "reference_count": 0,
     "solutions": [
       {
+        "solution_id": "S-2f0b1c9a44",
+        "solution_name": "方案一",
+        "category": "baseline",
+        "category_label": "基线方案",
+        "rule_name": "ATC",
+        "source": "baseline",
+        "feasible": true,
+        "total_tardiness_hours": 18.25,
+        "main_order_tardiness_hours": 6.0,
+        "makespan_hours": 160.02
+      },
+      {
         "solution_id": "S-6cf6190f25",
         "solution_name": "方案二",
+        "category": "pareto",
+        "category_label": "优化候选方案",
+        "rule_name": null,
         "source": "hybrid",
         "feasible": true,
         "total_tardiness_hours": 0.0,

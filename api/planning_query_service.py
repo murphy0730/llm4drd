@@ -10,6 +10,21 @@ MAX_SOLUTIONS = 4
 MAX_SEARCH_RESULTS = 50
 MAX_ORDER_OPERATIONS = 200
 CHINESE_NUMERALS = ("零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+SOLUTION_CATEGORY_LABELS = {
+    "baseline": "基线方案",
+    "pareto": "优化候选方案",
+    "exact_reference": "精确参考方案",
+    "heuristic": "启发式参考方案",
+}
+
+
+@dataclass
+class SolutionCatalog:
+    """一次查询里的全部可选方案，顺序与评审页候选列表一致（基线 → 优化候选 → 参考方案）。"""
+
+    solutions: dict[str, dict]
+    names: dict[str, str]
+    categories: dict[str, str]
 
 
 @dataclass
@@ -48,19 +63,20 @@ class PlanningQueryService:
 
     def get_overview(self, task_id: str | None = None) -> dict:
         resolved_id, task, payload = self._resolve_task(task_id)
-        candidates = list(payload.get("solutions") or [])
-        solution_names = self._solution_names(task, payload)
+        catalog = self._solution_catalog(task, payload)
         return {
             "instance_version": self._instance_version,
             "task_id": resolved_id,
             "status": task.get("status", "done"),
-            "candidate_count": len(candidates),
+            # solutions 列出全部可选方案；candidate_count 仍只数优化候选，与优化页口径一致。
+            "solution_count": len(catalog.solutions),
+            "candidate_count": len(payload.get("solutions") or []),
             "archive_size": int(payload.get("archive_size", 0) or 0),
             "baseline_count": 1 if (payload.get("baseline") or {}).get("solution_id") else 0,
             "reference_count": len(self._reference_solutions(task, payload)),
             "solutions": [
-                self._solution_summary(solution, solution_names)
-                for solution in candidates
+                self._solution_summary(solution, catalog)
+                for solution in catalog.solutions.values()
             ],
         }
 
@@ -71,8 +87,8 @@ class PlanningQueryService:
         metric_keys: list[str] | None = None,
     ) -> dict:
         resolved_id, task, payload = self._resolve_task(task_id)
-        solutions, truncated = self._select_solutions(task, payload, solution_ids)
-        solution_names = self._solution_names(task, payload)
+        catalog = self._solution_catalog(task, payload)
+        solutions, truncated = self._select_solutions(catalog, solution_ids)
         keys = metric_keys or [
             "total_tardiness",
             "main_order_tardy_total_time",
@@ -85,7 +101,7 @@ class PlanningQueryService:
                 for key in keys
             }
             rows.append({
-                **self._solution_summary(solution, solution_names),
+                **self._solution_summary(solution, catalog),
                 "metric_values": metrics,
             })
         return {
@@ -132,8 +148,8 @@ class PlanningQueryService:
                 self.search_orders(order_id, 10),
             )
         resolved_id, task, payload = self._resolve_task(task_id)
-        solutions, solutions_truncated = self._select_solutions(task, payload, solution_ids)
-        solution_names = self._solution_names(task, payload)
+        catalog = self._solution_catalog(task, payload)
+        solutions, solutions_truncated = self._select_solutions(catalog, solution_ids)
         operation_limit = max(1, min(int(max_operations), MAX_ORDER_OPERATIONS))
         planning_rows = []
         for solution in solutions:
@@ -159,8 +175,8 @@ class PlanningQueryService:
             )
             planning_rows.append({
                 "solution_id": solution.get("solution_id"),
-                "solution_name": self._solution_name(solution, solution_names),
-                "feasible": bool(solution.get("feasible", False)),
+                "solution_name": self._solution_name(solution, catalog),
+                "feasible": self._feasible(solution),
                 "planned": bool(entries),
                 "operation_count": len(entries),
                 "truncated": len(entries) > operation_limit,
@@ -230,8 +246,8 @@ class PlanningQueryService:
                 self.search_operations(operation_id, limit=10),
             )
         resolved_id, task, payload = self._resolve_task(task_id)
-        solutions, truncated = self._select_solutions(task, payload, solution_ids)
-        solution_names = self._solution_names(task, payload)
+        catalog = self._solution_catalog(task, payload)
+        solutions, truncated = self._select_solutions(catalog, solution_ids)
         placements = []
         for solution in solutions:
             entry = next(
@@ -244,14 +260,14 @@ class PlanningQueryService:
             if entry is None:
                 placements.append({
                     "solution_id": solution.get("solution_id"),
-                    "solution_name": self._solution_name(solution, solution_names),
+                    "solution_name": self._solution_name(solution, catalog),
                     "planned": False,
                     "reason": "operation_not_present_in_solution",
                 })
                 continue
             placements.append({
                 "solution_id": solution.get("solution_id"),
-                "solution_name": self._solution_name(solution, solution_names),
+                "solution_name": self._solution_name(solution, catalog),
                 "planned": True,
                 **self._operation_entry(entry, include_identity=False),
             })
@@ -298,11 +314,10 @@ class PlanningQueryService:
 
     def _select_solutions(
         self,
-        task: dict,
-        payload: dict,
+        catalog: SolutionCatalog,
         solution_ids: list[str] | None,
     ) -> tuple[list[dict], bool]:
-        available = self._solution_index(task, payload)
+        available = catalog.solutions
         if solution_ids:
             requested = list(dict.fromkeys(str(item) for item in solution_ids if item))
             if len(requested) > MAX_SOLUTIONS:
@@ -312,34 +327,56 @@ class PlanningQueryService:
                 )
             missing = [item for item in requested if item not in available]
             if missing:
-                solution_names = self._solution_names(task, payload)
                 raise PlanningQueryError(
                     "SOLUTION_NOT_FOUND",
                     f"未找到方案: {', '.join(missing)}",
                     [
                         {
                             "solution_id": key,
-                            "solution_name": solution_names.get(key, key),
+                            "solution_name": catalog.names.get(key, key),
                         }
                         for key in available
                     ],
                 )
             return [available[item] for item in requested], False
-        candidates = list(payload.get("solutions") or [])
-        return candidates[:MAX_SOLUTIONS], len(candidates) > MAX_SOLUTIONS
+        # 不指定方案时按评审页顺序取前几个，基线方案排在最前，作为其余方案的对照。
+        values = list(available.values())
+        return values[:MAX_SOLUTIONS], len(values) > MAX_SOLUTIONS
 
-    def _solution_index(self, task: dict, payload: dict) -> dict[str, dict]:
-        values: list[dict] = []
+    def _solution_catalog(self, task: dict, payload: dict) -> SolutionCatalog:
+        entries: list[tuple[str, dict, str]] = []
         baseline = payload.get("baseline")
-        if isinstance(baseline, dict):
-            values.append(baseline)
-        values.extend(payload.get("solutions") or [])
-        values.extend(self._reference_solutions(task, payload))
-        return {
-            str(item.get("solution_id")): item
-            for item in values
-            if isinstance(item, dict) and item.get("solution_id")
+        if isinstance(baseline, dict) and baseline.get("solution_id"):
+            entries.append((str(baseline["solution_id"]), baseline, "baseline"))
+        for item in payload.get("solutions") or []:
+            if isinstance(item, dict) and item.get("solution_id"):
+                entries.append((str(item["solution_id"]), item, self._category(item, "pareto")))
+        for item in self._reference_solutions(task, payload):
+            entries.append((str(item["solution_id"]), item, self._category(item, "heuristic")))
+        solutions: dict[str, dict] = {}
+        categories: dict[str, str] = {}
+        for solution_id, item, category in entries:
+            if solution_id in solutions:
+                continue
+            solutions[solution_id] = item
+            categories[solution_id] = category
+        names = {
+            solution_id: self._scheme_display_name(index)
+            for index, solution_id in enumerate(solutions)
         }
+        return SolutionCatalog(solutions=solutions, names=names, categories=categories)
+
+    @staticmethod
+    def _category(solution: dict, fallback: str) -> str:
+        """与前端 candidateCategory 同口径：source 是算法内部标记，只有这几个值有业务语义。"""
+        source = str(solution.get("source") or "")
+        if source == "baseline":
+            return "baseline"
+        if source.startswith("exact_reference"):
+            return "exact_reference"
+        if source == "heuristic_rule":
+            return "heuristic"
+        return fallback
 
     @staticmethod
     def _reference_solutions(task: dict, payload: dict) -> list[dict]:
@@ -353,17 +390,10 @@ class PlanningQueryService:
                     merged[str(item["solution_id"])] = item
         return list(merged.values())
 
-    def _solution_names(self, task: dict, payload: dict) -> dict[str, str]:
-        ordered = self._solution_index(task, payload)
-        return {
-            solution_id: self._scheme_display_name(index)
-            for index, solution_id in enumerate(ordered)
-        }
-
     @staticmethod
-    def _solution_name(solution: dict, solution_names: dict[str, str]) -> str:
+    def _solution_name(solution: dict, catalog: SolutionCatalog) -> str:
         solution_id = str(solution.get("solution_id") or "")
-        return solution_names.get(solution_id, solution_id)
+        return catalog.names.get(solution_id, solution_id)
 
     @staticmethod
     def _scheme_display_name(index: int) -> str:
@@ -380,13 +410,19 @@ class PlanningQueryService:
     def _solution_summary(
         self,
         solution: dict,
-        solution_names: dict[str, str],
+        catalog: SolutionCatalog,
     ) -> dict:
+        solution_id = str(solution.get("solution_id") or "")
+        category = catalog.categories.get(solution_id, "pareto")
         return {
             "solution_id": solution.get("solution_id"),
-            "solution_name": self._solution_name(solution, solution_names),
-            "source": solution.get("source", "hybrid"),
-            "feasible": bool(solution.get("feasible", False)),
+            "solution_name": self._solution_name(solution, catalog),
+            "category": category,
+            "category_label": SOLUTION_CATEGORY_LABELS[category],
+            # 基线方案与启发式参考方案带规则名（如 ATC），Pareto 方案没有。
+            "rule_name": solution.get("rule_name"),
+            "source": solution.get("source") or category,
+            "feasible": self._feasible(solution),
             "total_tardiness_hours": self._rounded(
                 self._metric_value(solution, "total_tardiness")
             ),
@@ -397,6 +433,14 @@ class PlanningQueryService:
                 self._metric_value(solution, "makespan")
             ),
         }
+
+    @staticmethod
+    def _feasible(solution: dict) -> bool:
+        # 基线方案的 payload 没有顶层 feasible 字段，可行性只记在 metrics 里。
+        value = solution.get("feasible")
+        if value is None:
+            value = (solution.get("metrics") or {}).get("feasible")
+        return bool(value)
 
     @staticmethod
     def _metric_value(solution: dict, key: str) -> float | int | None:

@@ -7,7 +7,7 @@ _SOLUTION_IDS = {
     "items": {"type": "string"},
     "maxItems": 4,
     "uniqueItems": True,
-    "description": "要比较的方案 ID；省略时使用候选方案，最多 4 个",
+    "description": "要比较的方案 ID；省略时按评审页顺序取前 4 个（含基线方案）",
 }
 _BUILTIN_RULE_NAMES = [
     "EDD", "SPT", "LPT", "CR", "ATC", "FIFO", "MST", "PRIORITY",
@@ -51,9 +51,11 @@ TOOL_DEFINITIONS = [
     {
         "name": "get_planning_overview",
         "description": (
-            "查询排产概览、候选方案数量、Pareto Archive 规模及各方案的总延误和完工跨度。"
-            "返回的 solution_name 与方案评审界面一致；solution_id 仅作为后续查询标识。"
-            "适用于：有多少候选方案、各方案总延误分别是多少。"
+            "查询排产概览与全部可选方案：基线方案、优化求解出的候选方案、以及参考方案"
+            "（精确求解 / 启发式规则），并给出各方案的总延误和完工跨度。"
+            "每个方案的 category 标明它属于哪一类；返回的 solution_name 与方案评审界面一致，"
+            "solution_id 仅作为后续查询标识。"
+            "适用于：现在有哪些方案、有多少候选方案、各方案总延误分别是多少。"
         ),
         "inputSchema": {
             "type": "object",
@@ -64,7 +66,8 @@ TOOL_DEFINITIONS = [
     {
         "name": "compare_planning_solutions",
         "description": (
-            "比较一个或多个候选排产方案的指定指标，最多比较 4 个方案。"
+            "比较一个或多个排产方案的指定指标，最多比较 4 个方案。"
+            "省略 solution_ids 时按评审页顺序取前 4 个（基线方案在最前，作为对照）。"
             "面向用户展示时使用返回的 solution_name，不使用内部 solution_id 作为方案名。"
         ),
         "inputSchema": {

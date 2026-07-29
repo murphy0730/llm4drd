@@ -91,13 +91,45 @@ class PlanningQueryServiceTests(unittest.TestCase):
 
         self.assertEqual(result["task_id"], "task-1")
         self.assertEqual(result["instance_version"], 4)
+        self.assertEqual(result["solution_count"], 4)
         self.assertEqual(result["candidate_count"], 2)
         self.assertEqual(result["archive_size"], 7)
         self.assertEqual(result["baseline_count"], 1)
         self.assertEqual(result["reference_count"], 1)
-        self.assertEqual(result["solutions"][0]["solution_name"], "方案二")
-        self.assertEqual(result["solutions"][0]["total_tardiness_hours"], 12.5)
-        self.assertEqual(result["solutions"][0]["main_order_tardiness_hours"], 6.25)
+        self.assertEqual(result["solutions"][1]["solution_name"], "方案二")
+        self.assertEqual(result["solutions"][1]["total_tardiness_hours"], 12.5)
+        self.assertEqual(result["solutions"][1]["main_order_tardiness_hours"], 6.25)
+
+    def test_overview_lists_baseline_and_reference_next_to_candidates(self) -> None:
+        result = self.service.get_overview()
+
+        self.assertEqual(
+            [(item["solution_id"], item["solution_name"], item["category"])
+             for item in result["solutions"]],
+            [
+                ("BASE", "方案一", "baseline"),
+                ("S-1", "方案二", "pareto"),
+                ("S-2", "方案三", "pareto"),
+                ("REF-1", "方案四", "heuristic"),
+            ],
+        )
+        self.assertEqual(result["solutions"][0]["category_label"], "基线方案")
+
+    def test_baseline_feasibility_falls_back_to_metrics(self) -> None:
+        self.task["export_result"]["baseline"]["metrics"] = {"feasible": True}
+
+        result = self.service.get_overview()
+
+        self.assertTrue(result["solutions"][0]["feasible"])
+
+    def test_compare_without_ids_starts_from_the_baseline(self) -> None:
+        result = self.service.compare_solutions()
+
+        self.assertEqual(
+            [item["solution_name"] for item in result["solutions"]],
+            ["方案一", "方案二", "方案三", "方案四"],
+        )
+        self.assertFalse(result["truncated"])
 
     def test_solution_names_match_review_candidate_order(self) -> None:
         result = self.service.compare_solutions(
