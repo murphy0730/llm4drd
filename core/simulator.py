@@ -158,7 +158,7 @@ class Simulator:
             self._schedule_dispatch(event_queue, machine_id, 0.0)
 
         now = 0.0
-        while event_queue and event_count < 5_000_000:
+        while event_queue and event_count < 8_000_000:
             event = heapq.heappop(event_queue)
             if event.time > max_time:
                 break
