@@ -573,6 +573,8 @@ def _rule_reference_solution(
         "tardy_order_ids": analytics.tardy_order_ids,
         "tardy_task_ids": analytics.tardy_task_ids,
         "bottleneck_machine_ids": analytics.bottleneck_machine_ids,
+        # 全量逐机利用率：查询层据此按调用方要的条数排瓶颈，不受上面 top5 限制。
+        "machine_utilization": analytics.machine_utilization,
         "avg_utilization": round(float(analytics.objective_values.get("avg_utilization", metrics.get("avg_utilization", 0.0))), 4),
         "critical_utilization": round(float(analytics.objective_values.get("critical_utilization", metrics.get("critical_utilization", 0.0))), 4),
         "avg_active_window_utilization": round(float(analytics.objective_values.get("avg_active_window_utilization", 0.0)), 4),
@@ -812,6 +814,8 @@ def _build_exact_reference_fallback(
         "tardy_order_ids": analytics.tardy_order_ids,
         "tardy_task_ids": analytics.tardy_task_ids,
         "bottleneck_machine_ids": analytics.bottleneck_machine_ids,
+        # 全量逐机利用率：查询层据此按调用方要的条数排瓶颈，不受上面 top5 限制。
+        "machine_utilization": analytics.machine_utilization,
         "avg_utilization": round(float(analytics.objective_values.get("avg_utilization", 0.0)), 4),
         "critical_utilization": round(float(analytics.objective_values.get("critical_utilization", 0.0)), 4),
         "tooling_utilization": round(float(analytics.objective_values.get("tooling_utilization", 0.0)), 4),
@@ -881,6 +885,8 @@ def _build_exact_reference_solution(
         "tardy_order_ids": analytics.tardy_order_ids,
         "tardy_task_ids": analytics.tardy_task_ids,
         "bottleneck_machine_ids": analytics.bottleneck_machine_ids,
+        # 全量逐机利用率：查询层据此按调用方要的条数排瓶颈，不受上面 top5 限制。
+        "machine_utilization": analytics.machine_utilization,
         "avg_utilization": round(float(analytics.objective_values.get("avg_utilization", 0.0)), 4),
         "critical_utilization": round(float(analytics.objective_values.get("critical_utilization", 0.0)), 4),
         "tooling_utilization": round(float(analytics.objective_values.get("tooling_utilization", 0.0)), 4),
@@ -6156,12 +6162,14 @@ def planning_solutions(
     task_id: Optional[str] = None,
     solution_ids: Optional[str] = None,
     metric_keys: Optional[str] = None,
+    bottleneck_limit: Optional[int] = None,
 ):
     try:
         data = _planning_query_service().compare_solutions(
             task_id,
             _planning_csv(solution_ids),
             _planning_csv(metric_keys),
+            bottleneck_limit,
         )
     except PlanningQueryError as error:
         raise _planning_error(error) from error
@@ -6410,20 +6418,27 @@ def whatif_list_runs():
 
 
 @app.get("/api/whatif/runs/compare")
-def whatif_compare_runs(run_ids: str = "", metric_keys: Optional[str] = None):
+def whatif_compare_runs(
+    run_ids: str = "",
+    metric_keys: Optional[str] = None,
+    bottleneck_limit: Optional[int] = None,
+):
     try:
         return _planning_response(whatif_service.compare_runs(
             _planning_csv(run_ids) or [],
             _planning_csv(metric_keys),
+            bottleneck_limit,
         ))
     except WhatIfError as error:
         raise _whatif_error(error) from error
 
 
 @app.get("/api/whatif/runs/{run_id}")
-def whatif_get_run(run_id: str):
+def whatif_get_run(run_id: str, bottleneck_limit: Optional[int] = None):
     try:
-        return _planning_response(whatif_service.get_run(run_id).to_dict())
+        return _planning_response(
+            whatif_service.get_run(run_id).to_dict(bottleneck_limit=bottleneck_limit)
+        )
     except WhatIfError as error:
         raise _whatif_error(error) from error
 

@@ -4,6 +4,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from ..core.models import Operation, Order, ShopFloor
+from ..optimization.objectives import bounded_bottleneck_limit, rank_bottleneck_machines
 
 
 MAX_SOLUTIONS = 4
@@ -85,6 +86,7 @@ class PlanningQueryService:
         task_id: str | None = None,
         solution_ids: list[str] | None = None,
         metric_keys: list[str] | None = None,
+        bottleneck_limit: int | None = None,
     ) -> dict:
         resolved_id, task, payload = self._resolve_task(task_id)
         catalog = self._solution_catalog(task, payload)
@@ -94,23 +96,56 @@ class PlanningQueryService:
             "main_order_tardy_total_time",
             "makespan",
         ]
+        limit = bounded_bottleneck_limit(bottleneck_limit)
         rows = []
+        sources = set()
         for solution in solutions:
             metrics = {
                 key: self._metric_value(solution, key)
                 for key in keys
             }
+            machines, source = self._bottleneck_machines(solution, limit)
+            sources.add(source)
             rows.append({
                 **self._solution_summary(solution, catalog),
                 "metric_values": metrics,
+                "bottleneck_machines": machines,
             })
         return {
             "task_id": resolved_id,
             "solution_count": len(rows),
             "truncated": truncated,
             "metric_keys": list(keys),
+            "bottleneck_limit": limit,
+            # 任一方案降级就标 legacy_top5，提醒调用方这批数据的排名不完整。
+            "bottleneck_source": "legacy_top5" if "legacy_top5" in sources else "utilization_ranking",
             "solutions": rows,
         }
+
+    def _bottleneck_machines(self, solution: dict, limit: int) -> tuple[list[dict], str]:
+        """方案里利用率最高的若干台机器。
+
+        返回 (列表, 数据来源)。老任务的 payload 没有逐机利用率，只能退回 summary 里那
+        份 top5 的 id——它没有利用率数值，也排不满调用方要的条数，用 legacy_top5 标出来。
+        """
+        summary = solution.get("summary") or {}
+        utilization = summary.get("machine_utilization")
+        if isinstance(utilization, dict) and utilization:
+            return rank_bottleneck_machines(utilization, self._shop, limit), "utilization_ranking"
+        legacy_ids = [str(item) for item in (summary.get("bottleneck_machine_ids") or [])][:limit]
+        items = []
+        for machine_id in legacy_ids:
+            machine = self._shop.machines.get(machine_id)
+            machine_type = self._shop.machine_types.get(machine.type_id) if machine else None
+            items.append({
+                "machine_id": machine_id,
+                "machine_name": machine.name if machine else "",
+                "type_id": machine.type_id if machine else "",
+                "type_name": machine_type.name if machine_type else "",
+                "is_critical": bool(machine_type.is_critical) if machine_type else False,
+                "utilization": None,
+            })
+        return items, "legacy_top5"
 
     def search_orders(self, query: str, limit: int = 20) -> list[dict]:
         needle = str(query or "").strip().lower()

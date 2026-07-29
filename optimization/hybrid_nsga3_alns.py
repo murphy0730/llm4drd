@@ -1859,6 +1859,8 @@ class HybridNSGA3ALNSOptimizer:
                 "tardy_order_ids": analytics.get("tardy_order_ids", []),
                 "tardy_task_ids": analytics.get("tardy_task_ids", []),
                 "bottleneck_machine_ids": analytics.get("bottleneck_machine_ids", []),
+                # 全量逐机利用率：查询层据此按调用方要的条数排瓶颈，不受上面 top5 限制。
+                "machine_utilization": analytics.get("machine_utilization", {}),
                 "avg_utilization": round(solution.metrics.get("avg_utilization", 0.0), 4),
                 "critical_utilization": round(solution.metrics.get("critical_utilization", 0.0), 4),
                 "avg_active_window_utilization": round(solution.metrics.get("avg_active_window_utilization", 0.0), 4),

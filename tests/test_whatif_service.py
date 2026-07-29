@@ -423,5 +423,65 @@ class RowsAdapterTests(WhatIfServiceTestCase):
         self.assertIsNotNone(args["plan_start_at"])
 
 
+class BottleneckMachineTests(WhatIfServiceTestCase):
+    def test_results_rank_machines_by_utilization_with_names(self):
+        run = self.run_scenario(self.service.create_scenario("现状"), ["ATC"])
+
+        machines = run.results[0]["bottleneck_machines"]
+        self.assertTrue(machines)
+        utilizations = [item["utilization"] for item in machines]
+        self.assertEqual(utilizations, sorted(utilizations, reverse=True))
+        self.assertTrue(all(item["machine_name"] for item in machines))
+        cutter = next(item for item in machines if item["machine_id"] == "M-C1")
+        self.assertEqual(cutter["machine_name"], "Cutter 1")
+        self.assertTrue(cutter["is_critical"])
+
+    def test_machine_added_by_a_patch_shows_up_with_its_name(self):
+        """新增机器只存在于 patch 后的临时实例里，名字必须在仿真现场就补好。"""
+        scenario = self.service.create_scenario("加一台车床")
+        self.service.add_patches(scenario, [
+            {"op": "add", "entity": "machine", "values": {
+                "machine_id": "M-C3", "machine_name": "Cutter 3", "type_id": "cut",
+                "shifts": "0/0/24"}},
+        ])
+        run = self.run_scenario(self.service.require_scenario(scenario.scenario_id), ["ATC"])
+
+        added = next(
+            item for item in run.results[0]["bottleneck_machines"]
+            if item["machine_id"] == "M-C3"
+        )
+        self.assertEqual(added["machine_name"], "Cutter 3")
+        self.assertEqual(added["type_id"], "cut")
+        self.assertTrue(added["is_critical"])
+
+    def test_to_dict_truncates_to_the_requested_limit(self):
+        run = self.run_scenario(self.service.create_scenario("截断"), ["ATC"])
+        stored = len(run.results[0]["bottleneck_machines"])
+        self.assertGreater(stored, 1)
+
+        payload = run.to_dict(bottleneck_limit=1)
+
+        self.assertEqual(payload["bottleneck_limit"], 1)
+        self.assertEqual(len(payload["results"][0]["bottleneck_machines"]), 1)
+        # 截断只发生在输出上，原始结果仍是全量，换个 limit 还能再取。
+        self.assertEqual(len(run.results[0]["bottleneck_machines"]), stored)
+
+    def test_to_dict_defaults_to_twenty(self):
+        run = self.run_scenario(self.service.create_scenario("默认"), ["ATC"])
+
+        self.assertEqual(run.to_dict()["bottleneck_limit"], 20)
+
+    def test_compare_runs_carries_bottleneck_machines(self):
+        run = self.run_scenario(self.service.create_scenario("对比"), ["ATC"])
+
+        payload = self.service.compare_runs([run.run_id], ["makespan"], bottleneck_limit=2)
+
+        self.assertEqual(payload["bottleneck_limit"], 2)
+        self.assertEqual(len(payload["entries"][0]["bottleneck_machines"]), 2)
+        # 瓶颈是逐机明细，不能混进标量 KPI 的对比口径。
+        self.assertNotIn("bottleneck_machines", payload["entries"][0]["values"])
+        self.assertNotIn("bottleneck_machines", payload["entries"][0]["deltas"])
+
+
 if __name__ == "__main__":
     unittest.main()

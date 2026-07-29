@@ -19,7 +19,12 @@ from ..core.rules import BUILTIN_RULES, get_all_rule_names
 from ..core.simulator import Simulator
 from ..core.sim_runtime import SimulationRuntime
 from ..data.db import DowntimeStore, InstanceStore, get_instance_version
-from ..optimization.objectives import OBJECTIVE_SPECS, build_schedule_analytics
+from ..optimization.objectives import (
+    OBJECTIVE_SPECS,
+    bounded_bottleneck_limit,
+    build_schedule_analytics,
+    rank_bottleneck_machines,
+)
 from ..core.time_utils import ensure_aware
 from .whatif_scenario import (
     PatchError,
@@ -56,7 +61,7 @@ class WhatIfRun:
     error: dict | None = None
     warnings: list[dict] = field(default_factory=list)
 
-    def to_dict(self, *, include_results: bool = True) -> dict:
+    def to_dict(self, *, include_results: bool = True, bottleneck_limit: int | None = None) -> dict:
         payload = {
             "run_id": self.run_id,
             "scenario_id": self.scenario_id,
@@ -70,7 +75,13 @@ class WhatIfRun:
             "error": self.error,
         }
         if include_results:
-            payload["results"] = list(self.results)
+            # results 里存的是全量瓶颈排名，按调用方要的条数裁一份，别改动原始结果。
+            limit = bounded_bottleneck_limit(bottleneck_limit)
+            payload["bottleneck_limit"] = limit
+            payload["results"] = [
+                {**item, "bottleneck_machines": list(item.get("bottleneck_machines") or [])[:limit]}
+                for item in self.results
+            ]
         return payload
 
 
@@ -341,6 +352,9 @@ class WhatIfService:
                 "label": label,
                 "metrics": metrics,
                 "scheduled_operations": len(result.schedule or []),
+                # 必须在这里补机器名：shop 是 patch 后的临时实例，读取时早已释放，
+                # 而 patch 新增的机器在正式实例里根本查不到。存全量，条数留给读取方定。
+                "bottleneck_machines": rank_bottleneck_machines(analytics.machine_utilization, shop),
             })
             logger.info(
                 "whatif[%s/%s] variant=%s rule=%s total_tardiness=%.2f makespan=%.2f feasible=%s",
@@ -374,7 +388,12 @@ class WhatIfService:
 
     # --- 对比 -----------------------------------------------------------------
 
-    def compare_runs(self, run_ids: list[str], metric_keys: list[str] | None = None) -> dict:
+    def compare_runs(
+        self,
+        run_ids: list[str],
+        metric_keys: list[str] | None = None,
+        bottleneck_limit: int | None = None,
+    ) -> dict:
         if not run_ids:
             raise WhatIfError("INVALID_ARGUMENT", "run_ids 不能为空")
         runs = [self.get_run(run_id) for run_id in dict.fromkeys(run_ids)]
@@ -397,6 +416,7 @@ class WhatIfService:
                  for spec in OBJECTIVE_SPECS.values()],
             )
 
+        limit = bounded_bottleneck_limit(bottleneck_limit)
         entries = []
         for run in runs:
             for item in run.results:
@@ -408,6 +428,8 @@ class WhatIfService:
                     "variant": variant,
                     "rule_name": item["rule_name"],
                     "values": {key: item["metrics"].get(key) for key in keys},
+                    # 瓶颈是逐机明细，不是标量 KPI，所以不进 values/deltas。
+                    "bottleneck_machines": list(item.get("bottleneck_machines") or [])[:limit],
                 })
         if not entries:
             raise WhatIfError("WHATIF_RUN_NOT_READY", "所选推演里没有任何结果")
@@ -435,6 +457,7 @@ class WhatIfService:
                 {"key": key, "label": OBJECTIVE_SPECS[key].label, "direction": OBJECTIVE_SPECS[key].direction}
                 for key in keys
             ],
+            "bottleneck_limit": limit,
             "entries": entries,
         }
 

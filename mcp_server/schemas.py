@@ -9,6 +9,15 @@ _SOLUTION_IDS = {
     "uniqueItems": True,
     "description": "要比较的方案 ID；省略时按评审页顺序取前 4 个（含基线方案）",
 }
+_BOTTLENECK_LIMIT = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 50,
+    "description": (
+        "返回几台瓶颈机器（按利用率降序）；省略时取前 20 台。"
+        "返回的 bottleneck_machines 每项含机器名、所属类型、是否关键类型和利用率。"
+    ),
+}
 _BUILTIN_RULE_NAMES = [
     "EDD", "SPT", "LPT", "CR", "ATC", "FIFO", "MST", "PRIORITY",
     "KIT_AWARE", "BOTTLENECK", "COMPOSITE",
@@ -69,6 +78,8 @@ TOOL_DEFINITIONS = [
             "比较一个或多个排产方案的指定指标，最多比较 4 个方案。"
             "省略 solution_ids 时按评审页顺序取前 4 个（基线方案在最前，作为对照）。"
             "面向用户展示时使用返回的 solution_name，不使用内部 solution_id 作为方案名。"
+            "每个方案同时返回 bottleneck_machines（按利用率降序的瓶颈机器），"
+            "回答「哪台机器是瓶颈」用它，不要用 metric_keys。"
         ),
         "inputSchema": {
             "type": "object",
@@ -80,6 +91,7 @@ TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "uniqueItems": True,
                 },
+                "bottleneck_limit": _BOTTLENECK_LIMIT,
             },
             "additionalProperties": False,
         },
@@ -270,10 +282,16 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "get_whatif_run",
-        "description": "查询一次 what-if 推演的状态与结果，用于 run_whatif_planning 返回 running 时轮询。",
+        "description": (
+            "查询一次 what-if 推演的状态与结果，用于 run_whatif_planning 返回 running 时轮询。"
+            "每条结果带 bottleneck_machines（按利用率降序的瓶颈机器，含改动后新增的机器）。"
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"run_id": {"type": "string", "minLength": 1}},
+            "properties": {
+                "run_id": {"type": "string", "minLength": 1},
+                "bottleneck_limit": _BOTTLENECK_LIMIT,
+            },
             "required": ["run_id"],
             "additionalProperties": False,
         },
@@ -284,6 +302,7 @@ TOOL_DEFINITIONS = [
             "对比多次 what-if 推演的 KPI，可跨场景、跨规则。第一个 run 作为基准，"
             "其余给出绝对差、百分比差，以及 better 字段（已按该指标是越小越好还是越大越好判定）。"
             "面向用户叙述时请用 better 而不是自己猜方向。"
+            "每条结果还带 bottleneck_machines，用它看改动后瓶颈转移到了哪台机器。"
         ),
         "inputSchema": {
             "type": "object",
@@ -301,6 +320,7 @@ TOOL_DEFINITIONS = [
                     "uniqueItems": True,
                     "description": "要比的指标；省略时用 总延迟 / Makespan / 主订单延误时长",
                 },
+                "bottleneck_limit": _BOTTLENECK_LIMIT,
             },
             "required": ["run_ids"],
             "additionalProperties": False,

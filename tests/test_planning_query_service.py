@@ -248,5 +248,98 @@ class PlanningQueryServiceTests(unittest.TestCase):
         self.assertIsNone(planning["total_tardiness_hours"])
 
 
+class BottleneckMachineTests(unittest.TestCase):
+    """compare_solutions 里的瓶颈机器排名。"""
+
+    def setUp(self) -> None:
+        self.shop = make_graph_context_shop()
+        self.solution = {
+            "solution_id": "S-1",
+            "source": "hybrid",
+            "feasible": True,
+            "objectives": {"total_tardiness": 3.0, "makespan": 40.0},
+            "metrics": {},
+            "schedule": [],
+            "summary": {
+                "machine_utilization": {"M-A1": 0.42, "M-C1": 0.91, "M-C2": 0.77},
+            },
+        }
+        self.task = {
+            "status": "done",
+            "result": {"solutions": [self.solution]},
+            "export_result": {"solutions": [self.solution]},
+        }
+
+    def _service(self) -> PlanningQueryService:
+        return PlanningQueryService(
+            shop=self.shop,
+            tasks={"task-1": self.task},
+            latest_task_id="task-1",
+            instance_version=4,
+        )
+
+    def test_ranks_machines_by_utilization_with_names_and_critical_flag(self) -> None:
+        result = self._service().compare_solutions()
+
+        machines = result["solutions"][0]["bottleneck_machines"]
+        self.assertEqual(
+            [(item["machine_id"], item["utilization"]) for item in machines],
+            [("M-C1", 0.91), ("M-C2", 0.77), ("M-A1", 0.42)],
+        )
+        self.assertEqual(machines[0]["machine_name"], "Cutter 1")
+        self.assertTrue(machines[0]["is_critical"])
+        self.assertFalse(machines[2]["is_critical"])
+        self.assertEqual(result["bottleneck_source"], "utilization_ranking")
+
+    def test_defaults_to_twenty_machines(self) -> None:
+        result = self._service().compare_solutions()
+
+        # 车间只有 3 台机器，默认 20 条时应当全量返回而不是报错或补空位。
+        self.assertEqual(result["bottleneck_limit"], 20)
+        self.assertEqual(len(result["solutions"][0]["bottleneck_machines"]), 3)
+
+    def test_honours_an_explicit_limit(self) -> None:
+        result = self._service().compare_solutions(bottleneck_limit=2)
+
+        self.assertEqual(result["bottleneck_limit"], 2)
+        self.assertEqual(
+            [item["machine_id"] for item in result["solutions"][0]["bottleneck_machines"]],
+            ["M-C1", "M-C2"],
+        )
+
+    def test_clamps_an_out_of_range_limit(self) -> None:
+        self.assertEqual(self._service().compare_solutions(bottleneck_limit=0)["bottleneck_limit"], 1)
+        self.assertEqual(self._service().compare_solutions(bottleneck_limit=999)["bottleneck_limit"], 50)
+
+    def test_falls_back_to_the_legacy_top5_ids_on_old_payloads(self) -> None:
+        # 改这次功能之前跑的任务：payload 里只有 id，没有逐机利用率。
+        self.solution["summary"] = {"bottleneck_machine_ids": ["M-C1", "M-A1"]}
+
+        result = self._service().compare_solutions()
+
+        machines = result["solutions"][0]["bottleneck_machines"]
+        self.assertEqual(result["bottleneck_source"], "legacy_top5")
+        self.assertEqual([item["machine_id"] for item in machines], ["M-C1", "M-A1"])
+        self.assertEqual(machines[0]["machine_name"], "Cutter 1")
+        self.assertIsNone(machines[0]["utilization"])
+
+    def test_survives_a_payload_without_any_bottleneck_data(self) -> None:
+        self.solution["summary"] = {}
+
+        result = self._service().compare_solutions()
+
+        self.assertEqual(result["solutions"][0]["bottleneck_machines"], [])
+
+    def test_keeps_unknown_machine_ids_instead_of_dropping_them(self) -> None:
+        # 实例改过之后，历史方案里可能留着已被删掉的机器；宁可给个空名字也别静默丢行。
+        self.solution["summary"]["machine_utilization"]["M-GONE"] = 0.99
+
+        machines = self._service().compare_solutions()["solutions"][0]["bottleneck_machines"]
+
+        self.assertEqual(machines[0]["machine_id"], "M-GONE")
+        self.assertEqual(machines[0]["machine_name"], "")
+        self.assertFalse(machines[0]["is_critical"])
+
+
 if __name__ == "__main__":
     unittest.main()

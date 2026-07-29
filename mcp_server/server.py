@@ -37,6 +37,7 @@ def handle_tool_call(name: str, arguments: dict, client: PlanningAPIClient) -> d
                 arguments.get("task_id"),
                 arguments.get("solution_ids"),
                 arguments.get("metric_keys"),
+                _optional_bottleneck_limit(arguments),
             )
         elif name == "search_planning_entities":
             payload = _search_entities(arguments, client)
@@ -70,11 +71,15 @@ def handle_tool_call(name: str, arguments: dict, client: PlanningAPIClient) -> d
                 bool(arguments.get("include_baseline", True)),
             )
         elif name == "get_whatif_run":
-            payload = client.get_whatif_run(_required_text(arguments, "run_id"))
+            payload = client.get_whatif_run(
+                _required_text(arguments, "run_id"),
+                _optional_bottleneck_limit(arguments),
+            )
         elif name == "compare_whatif_runs":
             payload = client.compare_whatif_runs(
                 _required_id_list(arguments, "run_ids"),
                 arguments.get("metric_keys"),
+                _optional_bottleneck_limit(arguments),
             )
         elif name == "apply_whatif_to_instance":
             payload = client.apply_whatif_to_instance(
@@ -178,6 +183,20 @@ def _bounded_limit(value: object) -> int:
     return result
 
 
+def _optional_bottleneck_limit(arguments: dict) -> int | None:
+    """省略时返回 None，让后端用它自己的默认值（20），别在两处各写一份默认。"""
+    value = arguments.get("bottleneck_limit")
+    if value is None:
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("bottleneck_limit 必须是整数") from error
+    if not 1 <= result <= 50:
+        raise ValueError("bottleneck_limit 必须在 1 到 50 之间")
+    return result
+
+
 def _bounded_count(value: object) -> int:
     try:
         result = int(value)
@@ -263,12 +282,36 @@ def _summary(payload: dict) -> str:
             f"查询到 {total} 个排产方案（基线 {data.get('baseline_count', 0)} 个、"
             f"优化候选 {data['candidate_count']} 个、参考 {data.get('reference_count', 0)} 个）"
         )
+    if isinstance(data, dict) and "metric_keys" in data and "solutions" in data:
+        rows = data.get("solutions") or []
+        parts = [f"已对比 {len(rows)} 个方案"]
+        top = _top_bottleneck(rows[0] if rows else None)
+        if top:
+            parts.append(f"首个方案{top}")
+        if data.get("bottleneck_source") == "legacy_top5":
+            parts.append("（该任务是旧数据，瓶颈只有 top5 且无利用率，需重跑优化才完整）")
+        return "，".join(parts)[:1000]
     summary = _whatif_summary(data)
     if summary is not None:
         return summary[:1000]
     if isinstance(data, list):
         return f"查询到 {len(data)} 条结果"
     return "排产查询完成"
+
+
+def _top_bottleneck(entry: object) -> str | None:
+    """把一行结果里利用率最高的机器压成一句话，省得 Agent 展开 structuredContent。"""
+    if not isinstance(entry, dict):
+        return None
+    machines = entry.get("bottleneck_machines") or []
+    if not machines or not isinstance(machines[0], dict):
+        return None
+    top = machines[0]
+    name = top.get("machine_name") or top.get("machine_id") or "未知机器"
+    utilization = top.get("utilization")
+    if isinstance(utilization, (int, float)):
+        return f"利用率最高的是 {name}（{utilization * 100:.0f}%）"
+    return f"利用率最高的是 {name}"
 
 
 def _whatif_summary(data: object) -> str | None:
@@ -287,19 +330,24 @@ def _whatif_summary(data: object) -> str | None:
             best = results[0]
             metrics = best.get("metrics") or {}
             note = "（已含现状对照）" if data.get("include_baseline") else ""
+            top = _top_bottleneck(best)
             return (
                 f"场景「{data.get('scenario_name')}」跑出 {len(results)} 组结果{note}，"
                 f"最优：{best.get('label') or data.get('scenario_name')} + {best.get('rule_name')}"
                 f"，总延迟 {metrics.get('total_tardiness')}、Makespan {metrics.get('makespan')}"
+                + (f"；{top}" if top else "")
             )
         if status == "failed":
             return f"推演失败：{(data.get('error') or {}).get('message') or '未知原因'}"
         return f"推演进行中（run_id={data.get('run_id')}），请用 get_whatif_run 轮询"
     if "entries" in data and "baseline" in data:
         baseline = data.get("baseline") or {}
+        entries = data.get("entries") or []
+        top = _top_bottleneck(entries[0] if entries else None)
         return (
-            f"已对比 {len(data.get('entries') or [])} 组结果，"
+            f"已对比 {len(entries)} 组结果，"
             f"基准为「{baseline.get('scenario_name')}」+ {baseline.get('rule_name')}"
+            + (f"；首条结果{top}" if top else "")
         )
     if "scenario_count" in data:
         return f"当前有 {data['scenario_count']} 个 what-if 场景"

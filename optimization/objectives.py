@@ -175,6 +175,50 @@ OBJECTIVE_SPECS: dict[str, ObjectiveSpec] = {
 }
 
 
+BOTTLENECK_LIMIT_DEFAULT = 20
+BOTTLENECK_LIMIT_MAX = 50
+
+
+def rank_bottleneck_machines(
+    machine_utilization: dict[str, float],
+    shop: ShopFloor,
+    limit: int | None = None,
+) -> list[dict]:
+    """按利用率降序列出机器，附带名称与是否关键类型。
+
+    Agent 问「哪台机器是瓶颈」时，光给 bottleneck_machine_ids 那串 id 判断不了紧张
+    程度；这里把利用率数值和关键类型一并带出。同利用率时按 id 兜底排序，保证同一份
+    数据每次返回的顺序一致。
+    """
+    ranked = sorted(machine_utilization.items(), key=lambda item: (-float(item[1]), item[0]))
+    if limit is not None:
+        ranked = ranked[:limit]
+    items = []
+    for machine_id, utilization in ranked:
+        machine = shop.machines.get(machine_id)
+        machine_type = shop.machine_types.get(machine.type_id) if machine else None
+        items.append({
+            "machine_id": machine_id,
+            "machine_name": machine.name if machine else "",
+            "type_id": machine.type_id if machine else "",
+            "type_name": machine_type.name if machine_type else "",
+            "is_critical": bool(machine_type.is_critical) if machine_type else False,
+            "utilization": round(float(utilization), 4),
+        })
+    return items
+
+
+def bounded_bottleneck_limit(value: object) -> int:
+    """把调用方给的条数钳到 1..50，缺省或非法值回落到 20。"""
+    if value is None:
+        return BOTTLENECK_LIMIT_DEFAULT
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return BOTTLENECK_LIMIT_DEFAULT
+    return max(1, min(parsed, BOTTLENECK_LIMIT_MAX))
+
+
 def list_objectives(available_only: bool = True) -> list[ObjectiveSpec]:
     values = list(OBJECTIVE_SPECS.values())
     if available_only:

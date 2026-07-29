@@ -69,13 +69,13 @@ class FakeWhatIfClient:
             "results": [{"rule_name": "ATC", "metrics": {"total_tardiness": 8.1, "makespan": 40.0}}],
         }}
 
-    def get_whatif_run(self, run_id):
-        self.calls.append(("get_run", run_id))
+    def get_whatif_run(self, run_id, bottleneck_limit=None):
+        self.calls.append(("get_run", run_id, bottleneck_limit))
         return {"ok": True, "data": {"run_id": run_id, "scenario_name": "x", "rule_names": ["ATC"],
                                      "status": "running", "results": []}}
 
-    def compare_whatif_runs(self, run_ids, metric_keys=None):
-        self.calls.append(("compare_runs", run_ids, metric_keys))
+    def compare_whatif_runs(self, run_ids, metric_keys=None, bottleneck_limit=None):
+        self.calls.append(("compare_runs", run_ids, metric_keys, bottleneck_limit))
         return {"ok": True, "data": {
             "baseline": {"run_id": run_ids[0], "scenario_name": "现状", "rule_name": "ATC"},
             "metrics": [], "entries": [{}, {}],
@@ -159,7 +159,7 @@ class WhatIfDispatchTests(unittest.TestCase):
 
     def test_compare_dedups_run_ids(self):
         self.call("compare_whatif_runs", {"run_ids": ["wr-1", "wr-1", "wr-2"], "metric_keys": ["makespan"]})
-        self.assertEqual(self.client.calls[0], ("compare_runs", ["wr-1", "wr-2"], ["makespan"]))
+        self.assertEqual(self.client.calls[0], ("compare_runs", ["wr-1", "wr-2"], ["makespan"], None))
 
     def test_apply_requires_confirm_token(self):
         result = self.call("apply_whatif_to_instance", {"scenario_id": "wf-1"})

@@ -39,6 +39,7 @@ class PlanningAPIClient:
         task_id: str | None = None,
         solution_ids: list[str] | None = None,
         metric_keys: list[str] | None = None,
+        bottleneck_limit: int | None = None,
     ) -> dict:
         return self._get(
             "/api/query/planning/solutions",
@@ -46,6 +47,7 @@ class PlanningAPIClient:
                 task_id=task_id,
                 solution_ids=self._csv(solution_ids),
                 metric_keys=self._csv(metric_keys),
+                bottleneck_limit=bottleneck_limit,
             ),
         )
 
@@ -140,13 +142,25 @@ class PlanningAPIClient:
             "wait_seconds": max(0.0, round(budget, 1)),
         })
 
-    def get_whatif_run(self, run_id: str) -> dict:
-        return self._get(f"/api/whatif/runs/{self._path_segment(run_id)}", {})
+    def get_whatif_run(self, run_id: str, bottleneck_limit: int | None = None) -> dict:
+        return self._get(
+            f"/api/whatif/runs/{self._path_segment(run_id)}",
+            self._optional(bottleneck_limit=bottleneck_limit),
+        )
 
-    def compare_whatif_runs(self, run_ids: list[str], metric_keys: list[str] | None = None) -> dict:
+    def compare_whatif_runs(
+        self,
+        run_ids: list[str],
+        metric_keys: list[str] | None = None,
+        bottleneck_limit: int | None = None,
+    ) -> dict:
         return self._get(
             "/api/whatif/runs/compare",
-            self._optional(run_ids=self._csv(run_ids), metric_keys=self._csv(metric_keys)),
+            self._optional(
+                run_ids=self._csv(run_ids),
+                metric_keys=self._csv(metric_keys),
+                bottleneck_limit=bottleneck_limit,
+            ),
         )
 
     def apply_whatif_to_instance(self, scenario_id: str, confirm_token: str) -> dict:

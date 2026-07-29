@@ -24,9 +24,43 @@ class FakePlanningClient:
         self.calls.append(("overview", task_id))
         return {"ok": True, "data": {"candidate_count": 2}}
 
-    def compare_solutions(self, task_id=None, solution_ids=None, metric_keys=None):
-        self.calls.append(("compare", task_id, solution_ids, metric_keys))
-        return {"ok": True, "data": {"solution_count": 2}}
+    def compare_solutions(self, task_id=None, solution_ids=None, metric_keys=None, bottleneck_limit=None):
+        self.calls.append(("compare", task_id, solution_ids, metric_keys, bottleneck_limit))
+        return {
+            "ok": True,
+            "data": {
+                "solution_count": 1,
+                "metric_keys": ["total_tardiness"],
+                "bottleneck_limit": bottleneck_limit or 20,
+                "bottleneck_source": "utilization_ranking",
+                "solutions": [{
+                    "solution_id": "S-1",
+                    "bottleneck_machines": [
+                        {"machine_id": "M-C1", "machine_name": "车床1", "utilization": 0.92},
+                        {"machine_id": "M-C2", "machine_name": "车床2", "utilization": 0.71},
+                    ],
+                }],
+            },
+        }
+
+    def get_whatif_run(self, run_id, bottleneck_limit=None):
+        self.calls.append(("whatif_run", run_id, bottleneck_limit))
+        return {"ok": True, "data": {"run_id": run_id, "status": "running"}}
+
+    def compare_whatif_runs(self, run_ids, metric_keys=None, bottleneck_limit=None):
+        self.calls.append(("whatif_compare", run_ids, metric_keys, bottleneck_limit))
+        return {
+            "ok": True,
+            "data": {
+                "baseline": {"scenario_name": "现状（基线）", "rule_name": "ATC"},
+                "entries": [{
+                    "rule_name": "ATC",
+                    "bottleneck_machines": [
+                        {"machine_id": "M-C1", "machine_name": "车床1", "utilization": 0.88},
+                    ],
+                }],
+            },
+        }
 
     def search_orders(self, query, limit=20):
         self.calls.append(("search_orders", query, limit))
@@ -171,6 +205,45 @@ class PlanningMCPServerTests(unittest.TestCase):
 
         self.assertFalse(result["isError"])
         self.assertEqual(result["structuredContent"]["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_passes_bottleneck_limit_through_to_the_planning_api(self) -> None:
+        client = FakePlanningClient()
+
+        handle_tool_call("compare_planning_solutions", {"bottleneck_limit": 3}, client)
+        handle_tool_call("get_whatif_run", {"run_id": "R-1", "bottleneck_limit": 3}, client)
+        handle_tool_call("compare_whatif_runs", {"run_ids": ["R-1"], "bottleneck_limit": 3}, client)
+
+        self.assertEqual([call[-1] for call in client.calls], [3, 3, 3])
+
+    def test_omitting_bottleneck_limit_leaves_the_default_to_the_backend(self) -> None:
+        client = FakePlanningClient()
+
+        handle_tool_call("compare_planning_solutions", {}, client)
+
+        # 传 None 而不是 20：默认值只在后端定义一处，避免两边各写一份后漂移。
+        self.assertIsNone(client.calls[0][-1])
+
+    def test_rejects_out_of_range_bottleneck_limit(self) -> None:
+        result = handle_tool_call(
+            "compare_planning_solutions",
+            {"bottleneck_limit": 99},
+            FakePlanningClient(),
+        )
+
+        self.assertEqual(result["structuredContent"]["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_summarises_the_top_bottleneck_machine(self) -> None:
+        result = handle_tool_call("compare_planning_solutions", {}, FakePlanningClient())
+
+        self.assertIn("车床1", result["content"][0]["text"])
+        self.assertIn("92%", result["content"][0]["text"])
+
+    def test_summarises_the_top_bottleneck_machine_for_whatif_compare(self) -> None:
+        result = handle_tool_call(
+            "compare_whatif_runs", {"run_ids": ["R-1"]}, FakePlanningClient()
+        )
+
+        self.assertIn("车床1", result["content"][0]["text"])
 
 
 if __name__ == "__main__":
