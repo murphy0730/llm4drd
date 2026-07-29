@@ -116,7 +116,10 @@ class PlanningMCPEndToEndTests(unittest.TestCase):
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertEqual([item["id"] for item in responses], [1, 2, 3, 4])
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2024-11-05")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 7)
+        published = {item["name"] for item in responses[1]["result"]["tools"]}
+        self.assertEqual(len(published), len(responses[1]["result"]["tools"]))
+        self.assertIn("run_rule_planning", published)
+        self.assertIn("run_whatif_planning", published)
         tool_result = responses[2]["result"]
         self.assertFalse(tool_result["isError"])
         self.assertEqual(tool_result["structuredContent"]["data"]["candidate_count"], 2)

@@ -70,10 +70,11 @@ class FakePlanningClient:
 
 
 class PlanningMCPServerTests(unittest.TestCase):
-    def test_publishes_the_seven_planning_tools(self) -> None:
+    def test_publishes_the_planning_and_whatif_tools(self) -> None:
         self.assertEqual(
             {item["name"] for item in TOOL_DEFINITIONS},
             {
+                # 只读排产查询 + 执行
                 "get_planning_overview",
                 "compare_planning_solutions",
                 "search_planning_entities",
@@ -81,6 +82,15 @@ class PlanningMCPServerTests(unittest.TestCase):
                 "get_operation_planning",
                 "list_planning_rules",
                 "run_rule_planning",
+                # what-if 场景推演
+                "create_whatif_scenario",
+                "apply_whatif_patch",
+                "describe_whatif_scenario",
+                "revert_whatif_patch",
+                "run_whatif_planning",
+                "get_whatif_run",
+                "compare_whatif_runs",
+                "apply_whatif_to_instance",
             },
         )
         self.assertTrue(all(item["inputSchema"]["type"] == "object" for item in TOOL_DEFINITIONS))

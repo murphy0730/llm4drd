@@ -50,6 +50,7 @@ from .review_read import (
     search_order_facets,
 )
 from .planning_query_service import PlanningQueryError, PlanningQueryService
+from .whatif_service import WhatIfError, WhatIfService
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="LLM4DRD智能调度平台", version="3.0")
@@ -92,6 +93,8 @@ _sim_runtime_cache: Optional[tuple[str, SimulationRuntime]] = None
 # (实例版本号, ShopFloor)，见 _active_shop()。
 _active_shop_cache: Optional[tuple[int, ShopFloor]] = None
 review_read_cache = ReviewReadCache(max_entries=24)
+# What-if 推演：场景/推演结果只活在这个对象里，不落库、不碰上面的全局 shop 与缓存。
+whatif_service = WhatIfService(inst_store, downtime_store)
 
 
 def _sim_runtime_cache_key(current_shop: ShopFloor) -> str:
@@ -6272,3 +6275,257 @@ def run_rule_planning(req: RunRulePlanningReq):
         "latest_simulation_updated": True,
     }
     return _planning_response(data)
+
+
+# === What-if 场景推演 API（改内存数据 → 跑规则 → 比 KPI，全程只读数据库） ===
+
+
+class WhatIfScenarioCreateReq(BaseModel):
+    name: str = Field(default="未命名场景", max_length=80)
+
+
+class WhatIfPatchReq(BaseModel):
+    patches: list[dict] = Field(min_length=1, max_length=200)
+
+
+class WhatIfRevertReq(BaseModel):
+    count: int = Field(default=1, ge=1, le=200)
+
+
+class WhatIfRunReq(BaseModel):
+    scenario_id: str = Field(min_length=1, max_length=64)
+    rule_names: list[str] = Field(default_factory=lambda: ["ATC"], max_length=11)
+    include_baseline: bool = False
+    wait_seconds: float = Field(default=8.0, ge=0.0, le=45.0)
+
+
+class WhatIfApplyReq(BaseModel):
+    confirm_token: str = Field(min_length=1, max_length=128)
+
+
+def _whatif_error(error: WhatIfError) -> HTTPException:
+    status_codes = {
+        "WHATIF_SCENARIO_NOT_FOUND": 404,
+        "WHATIF_RUN_NOT_FOUND": 404,
+        "WHATIF_INSTANCE_NOT_FOUND": 400,
+        "WHATIF_BASE_STALE": 409,
+        "WHATIF_RUN_NOT_READY": 409,
+        "WHATIF_CONFIRM_REQUIRED": 409,
+        "WHATIF_VALIDATION_FAILED": 422,
+        "PLANNING_RULE_NOT_FOUND": 422,
+        "INVALID_ARGUMENT": 422,
+        # PatchError 系列：语法合法但语义不可处理
+        "INVALID_PATCH": 422,
+        "UNKNOWN_ENTITY": 422,
+        "UNKNOWN_FIELD": 422,
+        "INVALID_FIELD_VALUE": 422,
+        "DUPLICATE_ID": 422,
+        "TARGET_NOT_FOUND": 422,
+    }
+    return HTTPException(
+        status_codes.get(error.code, 400),
+        detail={
+            "ok": False,
+            "error": {
+                "code": error.code,
+                "message": error.message,
+                "suggestions": error.suggestions,
+            },
+        },
+    )
+
+
+@app.post("/api/whatif/scenarios")
+def whatif_create_scenario(req: WhatIfScenarioCreateReq):
+    try:
+        scenario = whatif_service.create_scenario(req.name)
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+    return _planning_response(whatif_service.describe(scenario))
+
+
+@app.get("/api/whatif/scenarios")
+def whatif_list_scenarios():
+    scenarios = [item.to_dict() for item in whatif_service.scenarios.list()]
+    return _planning_response({
+        "scenario_count": len(scenarios),
+        "scenarios": scenarios,
+        "current_instance_version": whatif_service.current_instance_version(),
+    })
+
+
+@app.get("/api/whatif/scenarios/{scenario_id}")
+def whatif_get_scenario(scenario_id: str):
+    try:
+        scenario = whatif_service.require_scenario(scenario_id)
+        return _planning_response(whatif_service.describe(scenario))
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+
+
+@app.delete("/api/whatif/scenarios/{scenario_id}")
+def whatif_delete_scenario(scenario_id: str):
+    deleted = whatif_service.scenarios.delete(scenario_id)
+    return _planning_response({"scenario_id": scenario_id, "deleted": deleted})
+
+
+@app.post("/api/whatif/scenarios/{scenario_id}/patches")
+def whatif_add_patches(scenario_id: str, req: WhatIfPatchReq):
+    try:
+        scenario = whatif_service.require_scenario(scenario_id)
+        result = whatif_service.add_patches(scenario, req.patches)
+        return _planning_response({
+            **result,
+            "detail": whatif_service.describe(whatif_service.require_scenario(scenario_id)),
+        })
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+
+
+@app.delete("/api/whatif/scenarios/{scenario_id}/patches")
+def whatif_revert_patches(scenario_id: str, count: int = 1):
+    try:
+        scenario = whatif_service.require_scenario(scenario_id)
+        return _planning_response(whatif_service.revert_patches(scenario, count))
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+
+
+@app.post("/api/whatif/runs")
+def whatif_submit_run(req: WhatIfRunReq):
+    # def 端点走 FastAPI 线程池：wait_seconds 内联等待不能占住事件循环。
+    try:
+        scenario = whatif_service.require_scenario(req.scenario_id)
+        run = whatif_service.submit_run(scenario, req.rule_names, req.include_baseline)
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+    whatif_service.wait_for(run.run_id, req.wait_seconds)
+    return _planning_response(whatif_service.get_run(run.run_id).to_dict())
+
+
+@app.get("/api/whatif/runs")
+def whatif_list_runs():
+    runs = [run.to_dict(include_results=False) for run in whatif_service.list_runs()]
+    return _planning_response({"run_count": len(runs), "runs": runs})
+
+
+@app.get("/api/whatif/runs/compare")
+def whatif_compare_runs(run_ids: str = "", metric_keys: Optional[str] = None):
+    try:
+        return _planning_response(whatif_service.compare_runs(
+            _planning_csv(run_ids) or [],
+            _planning_csv(metric_keys),
+        ))
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+
+
+@app.get("/api/whatif/runs/{run_id}")
+def whatif_get_run(run_id: str):
+    try:
+        return _planning_response(whatif_service.get_run(run_id).to_dict())
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+
+
+@app.post("/api/whatif/scenarios/{scenario_id}/apply")
+def whatif_apply_scenario(scenario_id: str, req: WhatIfApplyReq):
+    """高危：把场景改动真正写进 inst_* 表。会 bump inst_version、作废四步流程快照。"""
+    try:
+        scenario = whatif_service.require_scenario(scenario_id)
+        result = whatif_service.apply_to_instance(scenario, req.confirm_token)
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
+    # 实例已被覆盖：主流程的实例缓存与图谱投影必须一起失效。
+    _invalidate_graph_context("whatif-apply")
+    return _planning_response(result)
+
+
+@app.get("/api/query/planning/resources/search")
+def planning_resources_search(entity_type: str = "machine", q: str = "", limit: int = 20):
+    """资源侧只读检索（机器 / 机器类型 / 工装 / 人员）。
+
+    Agent 要写出合法的 what-if patch，必须先拿到现有资源的 id、类型和班次模板——
+    订单/工序检索（planning_orders_search 等）覆盖不到这一层。
+    """
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, detail={
+            "ok": False,
+            "error": {"code": "PLANNING_INSTANCE_NOT_FOUND", "message": "当前没有可用的排产实例", "suggestions": []},
+        })
+    bounded = max(1, min(int(limit or 20), 50))
+    keyword = (q or "").strip().lower()
+
+    def matches(*fields) -> bool:
+        return not keyword or any(keyword in str(field or "").lower() for field in fields)
+
+    if entity_type == "machine":
+        items = [
+            {"machine_id": m.id, "machine_name": m.name, "type_id": m.type_id,
+             "type_name": (current_shop.machine_types.get(m.type_id).name
+                           if current_shop.machine_types.get(m.type_id) else ""),
+             **_shift_summary(m), "downtime_count": len(m.downtimes or [])}
+            for m in current_shop.machines.values() if matches(m.id, m.name, m.type_id)
+        ]
+    elif entity_type == "machine_type":
+        items = [
+            {"type_id": t.id, "type_name": t.name, "is_critical": bool(t.is_critical),
+             "machine_count": len(current_shop.get_machines_for_type(t.id))}
+            for t in current_shop.machine_types.values() if matches(t.id, t.name)
+        ]
+    elif entity_type == "tooling":
+        items = [
+            {"tooling_id": t.id, "tooling_name": t.name, "type_id": t.type_id,
+             **_shift_summary(t)}
+            for t in current_shop.toolings.values() if matches(t.id, t.name, t.type_id)
+        ]
+    elif entity_type == "personnel":
+        items = [
+            {"personnel_id": p.id, "personnel_name": p.name, "skills": ";".join(p.skills or []),
+             **_shift_summary(p)}
+            for p in current_shop.personnel.values() if matches(p.id, p.name, *(p.skills or []))
+        ]
+    else:
+        raise HTTPException(422, detail={
+            "ok": False,
+            "error": {
+                "code": "INVALID_ARGUMENT",
+                "message": f"不支持的资源类型: {entity_type}",
+                "suggestions": [{"entity_type": name} for name in ("machine", "machine_type", "tooling", "personnel")],
+            },
+        })
+    return _planning_response({
+        "entity_type": entity_type,
+        "total": len(items),
+        "truncated": len(items) > bounded,
+        "items": items[:bounded],
+    })
+
+
+def _shift_summary(resource) -> dict:
+    """把资源的班次日历压成「可直接抄进 patch 的一天模式」+ 覆盖天数。
+
+    _active_shop() 返回的是 ensure_calendar_capacity 铺开后的日历（几百天 × 每天数班），
+    整串回给 Agent 既没用又会把响应撑到被 MCP 宿主转成 artifact；而写 patch 只需要
+    一天的模式——build_shopfloor 会自动把它按天铺开。
+    """
+    shifts = list(resource.shifts or [])
+    if not shifts:
+        return {"shift_pattern": "", "shift_days": 0, "shifts_per_day": 0, "calendar_uniform": True}
+    by_day: dict[int, list] = {}
+    for shift in shifts:
+        by_day.setdefault(shift.day, []).append(shift)
+    first_day = min(by_day)
+    pattern = sorted((s.start_hour, s.hours) for s in by_day[first_day])
+    uniform = all(
+        sorted((s.start_hour, s.hours) for s in day_shifts) == pattern
+        for day_shifts in by_day.values()
+    )
+    return {
+        "shift_pattern": ";".join(f"0/{start}/{hours}" for start, hours in pattern),
+        "shift_days": len(by_day),
+        "shifts_per_day": len(pattern),
+        # 各天班次不一致时，shift_pattern 只代表第一天，照抄会抹平差异。
+        "calendar_uniform": uniform,
+    }

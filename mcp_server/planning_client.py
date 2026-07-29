@@ -8,6 +8,9 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from .errors import PlanningAPIError
 
+# 与 api/server.py 的 WhatIfRunReq.wait_seconds 上限保持一致；超过会被请求体校验打回 422。
+MAX_SERVER_WAIT_SECONDS = 45.0
+
 
 class PlanningAPIClient:
     def __init__(self, base_url: str, timeout_seconds: float = 10.0) -> None:
@@ -85,6 +88,73 @@ class PlanningAPIClient:
             self._optional(task_id=task_id, solution_ids=self._csv(solution_ids)),
         )
 
+    def search_resources(self, entity_type: str, query: str = "", limit: int = 20) -> dict:
+        return self._get(
+            "/api/query/planning/resources/search",
+            {"entity_type": entity_type, "q": query, "limit": limit},
+        )
+
+    # --- What-if 场景推演 ---
+
+    def create_whatif_scenario(self, name: str | None = None) -> dict:
+        return self._post("/api/whatif/scenarios", {"name": name or "未命名场景"})
+
+    def list_whatif_scenarios(self) -> dict:
+        return self._get("/api/whatif/scenarios", {})
+
+    def describe_whatif_scenario(self, scenario_id: str) -> dict:
+        return self._get(f"/api/whatif/scenarios/{self._path_segment(scenario_id)}", {})
+
+    def apply_whatif_patch(self, scenario_id: str, patches: list[dict]) -> dict:
+        return self._post(
+            f"/api/whatif/scenarios/{self._path_segment(scenario_id)}/patches",
+            {"patches": patches},
+        )
+
+    def revert_whatif_patch(self, scenario_id: str, count: int = 1) -> dict:
+        return self._delete(
+            f"/api/whatif/scenarios/{self._path_segment(scenario_id)}/patches",
+            {"count": count},
+        )
+
+    def run_whatif_planning(
+        self,
+        scenario_id: str,
+        rule_names: list[str] | None = None,
+        include_baseline: bool = False,
+        wait_seconds: float | None = None,
+    ) -> dict:
+        # 内联等待要同时受两个上限约束：
+        #   1. 必须早于本端 HTTP 超时结束（留 2s 余量），否则连 run_id 都拿不到，
+        #      已经在跑的推演就再也查不到了；
+        #   2. 不能超过服务端 /api/whatif/runs 对 wait_seconds 的上限，否则直接被
+        #      请求体校验打回 422（客户端超时配到 50s 时就会踩到）。
+        budget = self._timeout - 2.0
+        if wait_seconds is not None:
+            budget = min(budget, float(wait_seconds))
+        budget = min(budget, MAX_SERVER_WAIT_SECONDS)
+        return self._post("/api/whatif/runs", {
+            "scenario_id": scenario_id,
+            "rule_names": rule_names or ["ATC"],
+            "include_baseline": bool(include_baseline),
+            "wait_seconds": max(0.0, round(budget, 1)),
+        })
+
+    def get_whatif_run(self, run_id: str) -> dict:
+        return self._get(f"/api/whatif/runs/{self._path_segment(run_id)}", {})
+
+    def compare_whatif_runs(self, run_ids: list[str], metric_keys: list[str] | None = None) -> dict:
+        return self._get(
+            "/api/whatif/runs/compare",
+            self._optional(run_ids=self._csv(run_ids), metric_keys=self._csv(metric_keys)),
+        )
+
+    def apply_whatif_to_instance(self, scenario_id: str, confirm_token: str) -> dict:
+        return self._post(
+            f"/api/whatif/scenarios/{self._path_segment(scenario_id)}/apply",
+            {"confirm_token": confirm_token},
+        )
+
     def _get(self, path: str, params: dict) -> dict:
         query = urlencode(params)
         url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
@@ -96,6 +166,14 @@ class PlanningAPIClient:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
+        )
+        return self._open(request)
+
+    def _delete(self, path: str, params: dict) -> dict:
+        query = urlencode(params)
+        request = Request(
+            f"{self._base_url}{path}" + (f"?{query}" if query else ""),
+            method="DELETE",
         )
         return self._open(request)
 

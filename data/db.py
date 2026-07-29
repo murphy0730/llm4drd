@@ -1130,9 +1130,17 @@ class InstanceStore:
             _bump_instance_version(conn)
 
     def build_shopfloor(self):
+        return self.build_shopfloor_from_rows(self.load_all())
+
+    def build_shopfloor_from_rows(self, data: dict, downtimes_by_machine: dict | None = None):
+        """由 rows（load_all() 的返回形状）构建 ShopFloor。
+
+        与 build_shopfloor() 共用同一段构建逻辑，唯一区别是数据来源：传入的 rows 可以是
+        what-if 推演改过的内存副本，从而在完全不写数据库、不 bump inst_version 的前提下
+        跑排产。downtimes_by_machine 为 None 时照旧从库里读停机。
+        """
         from ..core.models import Machine, MachineType, Operation, Order, Personnel, ShopFloor, Task, Tooling, ToolingType
 
-        data = self.load_all()
         plan_start_at = ensure_aware(datetime.fromisoformat(data["planning_context"]["plan_start_at"].replace("Z", "+00:00")))
         shop = ShopFloor(plan_start_at=plan_start_at)
         for row in data["machine_types"]:
@@ -1166,14 +1174,15 @@ class InstanceStore:
             shop.operations[op.id] = op
             if op.task_id in shop.tasks:
                 shop.tasks[op.task_id].operations.append(op)
-        self._load_downtimes_into_shop(shop)
+        self._load_downtimes_into_shop(shop, downtimes_by_machine)
         shop.build_indexes()
         shop.ensure_calendar_capacity(min_days=max(shop.calendar_days(), 14), safety_factor=1.45, max_days=720)
         _apply_initial_operation_states(shop)
         return shop
 
-    def _load_downtimes_into_shop(self, shop):
-        downtimes_by_machine = DowntimeStore(self.db_path).load_all_as_downtimes()
+    def _load_downtimes_into_shop(self, shop, downtimes_by_machine: dict | None = None):
+        if downtimes_by_machine is None:
+            downtimes_by_machine = DowntimeStore(self.db_path).load_all_as_downtimes()
         for machine_id, machine in shop.machines.items():
             machine.downtimes = downtimes_by_machine.get(machine_id, [])
 
