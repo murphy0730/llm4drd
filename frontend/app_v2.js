@@ -3187,6 +3187,8 @@ function renderSimulatePage() {
   const simMetrics = app.simResult?.metrics || {};
   const completed = formatInt(simMetrics.completed_operations || 0);
   const total = formatInt(simMetrics.total_operations || 0);
+  const tardyMainOrders = formatInt(simMetrics.main_order_tardy_count || 0);
+  const totalMainOrders = formatInt(simMetrics.total_main_orders || 0);
   const infeasible = !!app.simResult && simMetrics.feasible === false;
   const simRuleLabel = dispatchRuleLabel(app.simRule);
   // 前置检查条
@@ -3223,9 +3225,9 @@ function renderSimulatePage() {
   `;
   const kpiCards = app.simResult ? `
     <div class="grid-4">
-      <div class="kpi-card"><span>总延误</span><strong>${formatDurationHours(simMetrics.total_tardiness)}</strong><small>相对基线规则的参考值</small></div>
-      <div class="kpi-card"><span>总周期 (Makespan)</span><strong>${formatDurationHours(simMetrics.makespan)}</strong><small>完整排产周期</small></div>
-      <div class="kpi-card"><span>净可用利用率</span><strong>${formatPercent(simMetrics.avg_net_available_utilization)}</strong><small>机器加权平均</small></div>
+      <div class="kpi-card"><span>主订单延误率</span><strong>${formatPercent(simMetrics.main_order_tardy_ratio)}</strong><small>${tardyMainOrders} / ${totalMainOrders}<br>主订单延误数 / 核心订单数（is_main=Y）</small></div>
+      <div class="kpi-card"><span>关键资源活跃窗口利用率</span><strong>${formatPercent(simMetrics.critical_active_window_utilization)}</strong><small>关键资源平均</small></div>
+      <div class="kpi-card"><span>平均流程时间</span><strong>${formatDurationHours(simMetrics.avg_flowtime)}</strong><small>任务从释放到完成的平均时长</small></div>
       <div class="kpi-card"><span>完成工序</span><strong>${completed} / ${total}</strong><small style="color:${infeasible ? "var(--danger)" : "var(--success)"}">${infeasible ? "存在未排产工序" : "全部排产成功"}</small></div>
     </div>
   ` : "";
