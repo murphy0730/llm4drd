@@ -2022,37 +2022,29 @@ def _validate_instance(current_shop: ShopFloor) -> dict:
         if task.is_main:
             main_tasks_by_order.setdefault(task.order_id, []).append(task)
 
+    # 理想最早时刻只考虑释放时间与显式依赖，不考虑机器/工装/人员竞争、班次和停机。
+    # 分支汇合取最晚前驱，因此可作为“即使资源无限也无法更早完成”的关键路径下界。
+    current_shop.derive_internal_targets()
+
     for order_id, order in current_shop.orders.items():
         if not order.task_ids:
             for main_task in main_tasks_by_order.get(order_id, []):
                 warn_main("数据完整性", main_task.id, "订单下没有任何任务", sheet="orders / tasks")
-        if math.isfinite(order.due_date) and order.due_date < order.release_time:
-            for main_task in main_tasks_by_order.get(order_id, []):
-                warn_main("约束条件", main_task.id, f"交期（{order.due_date:.1f}h）早于释放时间（{order.release_time:.1f}h），必然延误", sheet="orders")
-
-    total_duration_by_order: dict[str, float] = {}
-    for op in current_shop.operations.values():
-        task = current_shop.tasks.get(op.task_id)
-        if task is None:
-            continue
-        processing_time = float(op.processing_time) if op.processing_time is not None else 0.0
-        turnover_time = float(op.turnover_time) if op.turnover_time is not None else 0.0
-        if math.isfinite(processing_time):
-            total_duration_by_order[task.order_id] = total_duration_by_order.get(task.order_id, 0.0) + processing_time
-        if math.isfinite(turnover_time):
-            total_duration_by_order[task.order_id] = total_duration_by_order.get(task.order_id, 0.0) + turnover_time
 
     for main_tasks in main_tasks_by_order.values():
         for main_task in main_tasks:
-            due_date = float(main_task.due_date)
-            if due_date == 0:
-                warn_main("约束条件", main_task.id, "交期为 0h，表示排产开始时间已经超过交期，必然延误", sheet="tasks")
-            total_duration = total_duration_by_order.get(main_task.order_id, 0.0)
-            if math.isfinite(due_date) and total_duration > due_date:
+            order = current_shop.orders.get(main_task.order_id)
+            due_date = float(order.due_date if order is not None else main_task.due_date)
+            if math.isfinite(due_date) and due_date <= 0:
+                warn_main("约束条件", main_task.id, f"交期（{due_date:.1f}h）不晚于排产开始时间，主订单已经超期", sheet="orders / tasks")
+                continue
+
+            earliest_finish = float(main_task.earliest_finish_time)
+            if math.isfinite(due_date) and math.isfinite(earliest_finish) and earliest_finish > due_date + 1e-9:
                 warn_main(
                     "约束条件",
                     main_task.id,
-                    f"主订单及其子订单的加工与转运总时长（{total_duration:.1f}h）大于交期（{due_date:.1f}h），必然延误",
+                    f"关键路径理想最早完工（{earliest_finish:.1f}h）晚于交期（{due_date:.1f}h），即使不考虑资源竞争、班次和停机也必然延误（最少延误 {earliest_finish - due_date:.1f}h）",
                     sheet="tasks / operations",
                 )
 
