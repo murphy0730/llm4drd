@@ -224,6 +224,10 @@ const app = {
   reviewSchemeCache: {},
   // 评审：某方案每日机器分类利用率缓存 schemeId -> { loading, error, days, types }
   reviewDailyUtilCache: {},
+  // 机器分类利用率的观察维度："day" | "week" | "month"
+  reviewUtilDimension: "day",
+  // 机器分类利用率面板折叠态（默认展开）
+  reviewUtilCollapsed: false,
   // 方案每日利用率趋势详情：当前展开的方案 id（null = 未展开）
   // 甘特图机器筛选与分页：canvasId -> { type, downtimeOnly, query, page }
   ganttMachineFilter: {},
@@ -3674,65 +3678,117 @@ function ensureReviewDailyUtil(schemeId) {
   return app.reviewDailyUtilCache[schemeId];
 }
 
+const UTIL_DIMENSIONS = [
+  { key: "day", label: "按天", step: 1 },
+  { key: "week", label: "按周", step: 7 },
+  { key: "month", label: "按月", step: 30 },
+];
+
+// 时间桶以排产起点（第 0 天）为锚点向后切分：近7天 / 7–14天 / …，末尾不足一整桶照常显示。
+function buildUtilBuckets(dayCount, dimension) {
+  const step = UTIL_DIMENSIONS.find((d) => d.key === dimension)?.step || 1;
+  const buckets = [];
+  for (let from = 0, i = 0; from < dayCount; from += step, i += 1) {
+    const to = Math.min(from + step, dayCount);
+    if (step === 1) {
+      buckets.push({ label: `D${to}`, sub: "", from, to });
+      continue;
+    }
+    const unit = step === 7 ? "天" : "月";
+    const span = step === 7 ? step : 1;
+    const label = i === 0 ? `近${span}${unit}` : `${i * span}–${(i + 1) * span}${unit}`;
+    buckets.push({ label, sub: from + 1 === to ? `D${to}` : `D${from + 1}–D${to}`, from, to });
+  }
+  return buckets;
+}
+
+// 日维度直接取后端比率（保留 null → "-"）；周/月按 Σ占用 ÷ Σ可用 加权，空闲天分子 0 但分母照算。
+function bucketUtil(type, bucket, dimension) {
+  if (dimension === "day") {
+    const value = asArray(type.per_day)[bucket.from];
+    return value === undefined ? null : value;
+  }
+  const busyHours = asArray(type.busy_hours);
+  const availableHours = asArray(type.available_hours);
+  let busy = 0, available = 0;
+  for (let day = bucket.from; day < bucket.to; day += 1) {
+    busy += Number(busyHours[day] || 0);
+    available += Number(availableHours[day] || 0);
+  }
+  if (available <= 1e-9) return busy > 0 ? 1.0 : null;
+  return Math.round(Math.min(1, busy / available) * 10000) / 10000;
+}
+
 function renderReviewTypeUtilization() {
   ensureReviewGanttSchemeSelection();
   const candidates = getReviewCandidates();
   const schemeId = app.reviewGanttSchemeId;
   const schemeName = candidates.find((c) => c.id === schemeId)?.name || schemeId || "";
+  const dimension = app.reviewUtilDimension || "day";
+  const collapsed = !!app.reviewUtilCollapsed;
   const legend = `
     <div class="util-legend">
       <span><i style="background:rgba(220,38,38,0.55)"></i>≥90% 过载</span>
       <span><i style="background:rgba(180,83,9,0.45)"></i>&lt;60% 偏低</span>
       <span><i style="background:rgba(18,161,80,0.5)"></i>行内最佳</span>
     </div>`;
+  const dimSwitch = `
+    <div class="filter-chip-row">
+      ${UTIL_DIMENSIONS.map((item) => `
+        <button class="filter-chip ${item.key === dimension ? "active" : ""}" type="button" data-action="set-review-util-dim" data-dim="${item.key}">${item.label}</button>
+      `).join("")}
+    </div>`;
   const head = `
     <div class="card-head" style="align-items:center">
       <div><h3>机器分类利用率对比 · 当前方案 <span style="color:var(--primary)">${escapeHtml(String(schemeName))}</span></h3>
-      <p>日利用率 = 该类型当日排产占用时长 ÷ 当日已排产机器的可用工时（班次扣除停机）；分母只统计本方案实际用到的机器，与下方甘特图机器行口径一致。点击对比表「◎ 详情」可切换方案。</p></div>
-      ${legend}
+      <p>日利用率 = 该类型当日排产占用时长 ÷ 当日已排产机器的可用工时（班次扣除停机）；分母只统计本方案实际用到的机器，与下方甘特图机器行口径一致。周/月 = 区间内占用工时 ÷ 区间内可用工时，该类型空闲但机器可用的日子按 0 计入。点击对比表「◎ 详情」可切换方案。</p></div>
+      <div class="util-head-tools">${legend}${dimSwitch}</div>
+      ${renderCollapseButton("toggle-review-util-collapse", collapsed, "机器分类利用率对比")}
     </div>`;
+  const card = (body) => `<article class="surface-card ${collapsed ? "is-collapsed" : ""}">${head}<div class="collapsible-body">${body}</div></article>`;
   if (!candidates.length || !schemeId) {
-    return `<article class="surface-card">${head}<div class="empty-state"><p>请先运行优化或加载参照方案。</p></div></article>`;
+    return card(`<div class="empty-state"><p>请先运行优化或加载参照方案。</p></div>`);
   }
   if (!app.optimizeResult?.task_id) {
-    return `<article class="surface-card">${head}<div class="empty-state"><p>运行混合优化后，可查看每日机器分类利用率。</p></div></article>`;
+    return card(`<div class="empty-state"><p>运行混合优化后，可查看每日机器分类利用率。</p></div>`);
   }
   const st = ensureReviewDailyUtil(schemeId);
-  let inner;
   if (st.loading) {
-    inner = `<div class="empty-state"><p>正在计算每日机器分类利用率…</p></div>`;
-  } else if (st.error) {
-    inner = `<div class="empty-state"><p>加载失败：${escapeHtml(st.error)}</p><button class="btn btn-ghost btn-xs" type="button" data-action="retry-daily-util">重试</button></div>`;
-  } else if (!asArray(st.types).length) {
-    inner = `<div class="empty-state"><p>该方案的排程未覆盖任何机台类型。</p></div>`;
-  } else {
-    const days = asArray(st.days);
-    const rows = st.types.map((type) => {
-      const vals = asArray(type.per_day).filter((v) => v !== null && v !== undefined);
-      const best = vals.length ? Math.max(...vals) : null;
-      const cells = asArray(type.per_day).map((v) => {
-        if (v === null || v === undefined) return "<td class=\"pct\">-</td>";
-        const isBest = best !== null && v === best;
-        // ≥90% 过载红、<60% 偏低黄、行内最佳绿加粗（行内最佳优先于过载/偏低配色）
-        const cls = isBest ? "pct is-best" : v >= 0.9 ? "pct hi" : v < 0.6 ? "pct lo" : "pct";
-        return `<td class="${cls}">${formatPercent(v)}</td>`;
-      }).join("");
-      const used = type.machines_used, total = type.machines_total;
-      const scale = (used !== undefined && total !== undefined)
-        ? `<br><small class="muted">${escapeHtml(String(used))}/${escapeHtml(String(total))} 台</small>`
-        : "";
-      return `<tr><td><strong>${escapeHtml(type.type_name)}</strong>${scale}</td>${cells}</tr>`;
-    }).join("");
-    inner = `
-      <div class="tbl-wrap util-table-wrap">
-        <table class="util-day-table">
-          <thead><tr><th>机器类型</th>${days.map((d) => `<th>D${escapeHtml(String(d))}</th>`).join("")}</tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    `;
+    return card(`<div class="empty-state"><p>正在计算每日机器分类利用率…</p></div>`);
   }
-  return `<article class="surface-card">${head}${inner}</article>`;
+  if (st.error) {
+    return card(`<div class="empty-state"><p>加载失败：${escapeHtml(st.error)}</p><button class="btn btn-ghost btn-xs" type="button" data-action="retry-daily-util">重试</button></div>`);
+  }
+  if (!asArray(st.types).length) {
+    return card(`<div class="empty-state"><p>该方案的排程未覆盖任何机台类型。</p></div>`);
+  }
+  const buckets = buildUtilBuckets(asArray(st.days).length, dimension);
+  const rows = st.types.map((type) => {
+    const values = buckets.map((bucket) => bucketUtil(type, bucket, dimension));
+    const present = values.filter((v) => v !== null && v !== undefined);
+    // 只有一列时「行内最佳」没有比较意义（按月常见），不标绿
+    const best = present.length > 1 ? Math.max(...present) : null;
+    const cells = values.map((v) => {
+      if (v === null || v === undefined) return "<td class=\"pct\">-</td>";
+      const isBest = best !== null && v === best;
+      // ≥90% 过载红、<60% 偏低黄、行内最佳绿加粗（行内最佳优先于过载/偏低配色）
+      const cls = isBest ? "pct is-best" : v >= 0.9 ? "pct hi" : v < 0.6 ? "pct lo" : "pct";
+      return `<td class="${cls}">${formatPercent(v)}</td>`;
+    }).join("");
+    const used = type.machines_used, total = type.machines_total;
+    const scale = (used !== undefined && total !== undefined)
+      ? `<br><small class="muted">${escapeHtml(String(used))}/${escapeHtml(String(total))} 台</small>`
+      : "";
+    return `<tr><td><strong>${escapeHtml(type.type_name)}</strong>${scale}</td>${cells}</tr>`;
+  }).join("");
+  return card(`
+    <div class="tbl-wrap util-table-wrap">
+      <table class="util-day-table ${dimension === "day" ? "" : "is-coarse"}">
+        <thead><tr><th>机器类型</th>${buckets.map((b) => `<th>${escapeHtml(b.label)}${b.sub ? `<small>${escapeHtml(b.sub)}</small>` : ""}</th>`).join("")}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `);
 }
 
 // 评审方案排产甘特图：单方案 + 订单多选，复用统一甘特（renderTimeline，按机器分组 + 4 天默认窗口）。
@@ -4087,6 +4143,12 @@ function clearReviewTimeline() {
   entry.items.clear();
   entry.groups.clear();
   try { entry.timeline.removeCustomTime("sched-now"); } catch (_) {}
+}
+
+// 只重绘利用率面板：切维度/折叠不该连带重建甘特（renderTimeline 的挂载成本高）。
+function refreshReviewUtilizationRegion() {
+  const region = el("review-utilization-region");
+  if (region) region.innerHTML = getReviewCandidates().length ? renderReviewTypeUtilization() : "";
 }
 
 function refreshReviewDynamicRegions() {
@@ -6433,6 +6495,16 @@ async function handleAction(action, target) {
   if (action === "retry-daily-util") {
     const id = app.reviewGanttSchemeId;
     if (id) { delete app.reviewDailyUtilCache[id]; refreshReviewDynamicRegions(); }
+    return;
+  }
+  if (action === "set-review-util-dim") {
+    app.reviewUtilDimension = target.dataset.dim || "day";
+    refreshReviewUtilizationRegion();
+    return;
+  }
+  if (action === "toggle-review-util-collapse") {
+    app.reviewUtilCollapsed = !app.reviewUtilCollapsed;
+    refreshReviewUtilizationRegion();
     return;
   }
   if (action === "send-candidate-to-ai") {

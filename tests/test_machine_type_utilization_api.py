@@ -76,6 +76,22 @@ class MachineTypeDailyUtilizationTests(unittest.TestCase):
         self.assertEqual(payload["days"], [1, 2, 3])
         self.assertEqual(row["per_day"], [0.25, None, 0.25])
 
+    def test_busy_and_available_hours_cover_all_days(self):
+        """周/月聚合的分子分母：空闲天分子为 0、分母照算，per_day 显示口径不变。"""
+        shop = make_graph_context_shop()
+        row, _ = self._cut_row(shop, [_entry("M-C1", 0.0, 6.0), _entry("M-C1", 48.0, 54.0)])
+        self.assertEqual(row["busy_hours"], [6.0, 0.0, 6.0])
+        self.assertEqual(row["available_hours"], [24.0, 24.0, 24.0])
+        self.assertEqual(row["per_day"], [0.25, None, 0.25])
+
+    def test_available_hours_follow_shift_calendar(self):
+        shop = make_graph_context_shop()
+        shop.machines["M-C1"] = Machine("M-C1", "Cutter 1", "cut", shifts=[Shift(day=0, start_hour=8.0, hours=8.0)])
+        shop.build_indexes()
+        row, _ = self._cut_row(shop, [_entry("M-C1", 8.0, 16.0)])
+        self.assertEqual(row["available_hours"], [8.0])
+        self.assertEqual(row["busy_hours"], [8.0])
+
 
 class MachineTypeUtilizationApiTests(unittest.TestCase):
     def setUp(self):

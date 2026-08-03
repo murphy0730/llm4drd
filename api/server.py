@@ -4087,7 +4087,10 @@ def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict
     单机类型日利用率 = 该类型当日占用时长（墙钟 end-start，跨天按天切分）
                     /（该类型「本方案已排产机器」当日可用工时之和，班次窗口已扣除停机）。
     分母只统计本方案实际用到的机器，且按班次日历折算，与甘特图机器行/背景遮罩口径一致。
-    返回 {days:[1..n], types:[{type_id,type_name,is_critical,machines_used,machines_total,per_day:[util|null]}]}。
+    返回 {days:[1..n], types:[{type_id,type_name,is_critical,machines_used,machines_total,
+    per_day:[util|null],busy_hours:[float],available_hours:[float]}]}。
+    busy_hours/available_hours 是每天的分子分母原值（无排产的天分子为 0，分母照算），
+    供前端按周/月区间做 Σ占用÷Σ可用 的加权聚合——比率数组本身无法正确再聚合。
     """
     max_day = -1
     busy: dict[str, dict[int, float]] = {}  # type_id -> {day -> busy hours}
@@ -4121,15 +4124,16 @@ def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict
             continue
         machine_ids = sorted(used_machines.get(type_id, set()))
         machines = [current_shop.machines[machine_id] for machine_id in machine_ids]
-        per_day = []
+        per_day, busy_hours, available_hours = [], [], []
         for day in range(day_count):
             hours = day_bucket.get(day)
-            if hours is None:
-                per_day.append(None)
-                continue
             day_lo, day_hi = day * day_hours, (day + 1) * day_hours
             available = sum(machine.available_time_between(day_lo, day_hi) for machine in machines)
-            if available <= 1e-9:
+            busy_hours.append(hours or 0.0)
+            available_hours.append(available)
+            if hours is None:
+                per_day.append(None)
+            elif available <= 1e-9:
                 # 当日无可用工时却有排产（数据异常）：按满负荷处理
                 per_day.append(1.0)
             else:
@@ -4141,6 +4145,8 @@ def _machine_type_daily_utilization(current_shop: ShopFloor, schedule: list[dict
             "machines_used": len(machine_ids),
             "machines_total": len(current_shop.get_machines_for_type(type_id)),
             "per_day": per_day,
+            "busy_hours": busy_hours,
+            "available_hours": available_hours,
         })
     return {"days": list(range(1, day_count + 1)), "types": types}
 
