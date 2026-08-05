@@ -10,6 +10,8 @@
 """
 
 import argparse
+import hashlib
+import math
 import re
 import sys
 from datetime import datetime, timedelta
@@ -31,6 +33,8 @@ OS_PRED_TURNOVER_HRS = 24    # 委外类工序的前置工序(非委外类)的�
 OS_TO_OS_TURNOVER_HRS = 0    # 委外类工序之间的周转时间
 TIME_DECIMALS = 3
 SOURCE_FILE_PATTERN = r'^(\d{8})\.xlsx$'
+SPLIT_TIME_THRESHOLD_1 = 25
+SPLIT_TIME_THRESHOLD_2 = 50
 
 COL_ORDER_TIME = '接单时间'
 COL_CRAFT_TIME = '工艺排配时间'   # release_time 基准: 工艺排配时间 + 5 天
@@ -44,6 +48,7 @@ COL_REMAIN = '剩余工时'
 COL_MES_DUE = '【Mes+】交期*'
 COL_QUALIFY_CHAIN = '齐套需求工序'
 COL_PART = '零件编号'
+COL_PART_QTY = '零件数量'
 
 COL_TYPE_ID = 'type_id'
 COL_TYPE_NAME = 'type_name'
@@ -227,6 +232,66 @@ def norm_str(v):
     if v is None or pd.isna(v):
         return ""
     return str(v).strip()
+
+def parse_positive_int(v):
+    if v is None or pd.isna(v):
+        return None
+    try:
+        number = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0 or not number.is_integer():
+        return None
+    return int(number)
+
+def split_id_tokens(v):
+    """将分号/逗号分隔的 ID 拆成去重列表, 保持首次出现顺序。"""
+    result, seen = [], set()
+    for token in re.split(r'[;,，；]', norm_str(v)):
+        token = token.strip()
+        if token and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
+
+def join_id_tokens(values):
+    result, seen = [], set()
+    for value in values:
+        value = norm_str(value)
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return ";".join(result)
+
+def _stable_index_order(key, count):
+    """基于稳定哈希生成可复现的伪随机子批顺序。"""
+    return sorted(
+        range(count),
+        key=lambda i: hashlib.sha256(f"{key}|{i}".encode("utf-8")).digest(),
+    )
+
+def allocate_split_quantities(total_quantity, split_count, key):
+    base, remainder = divmod(total_quantity, split_count)
+    quantities = [base] * split_count
+    for index in _stable_index_order(key, split_count)[:remainder]:
+        quantities[index] += 1
+    return quantities
+
+def allocate_split_hours(total_hours, quantities, key):
+    """按数量比例分配到0.01小时, 并保证子工时之和严格等于原工时。"""
+    total_units = int(round(float(total_hours) * 100))
+    total_quantity = sum(quantities)
+    numerators = [total_units * quantity for quantity in quantities]
+    units = [value // total_quantity for value in numerators]
+    remainder_units = total_units - sum(units)
+    tie_rank = {index: rank for rank, index in enumerate(_stable_index_order(key, len(quantities)))}
+    order = sorted(
+        range(len(quantities)),
+        key=lambda i: (-(numerators[i] % total_quantity), tie_rank[i]),
+    )
+    for index in order[:remainder_units]:
+        units[index] += 1
+    return [round(value / 100.0, 2) for value in units]
 
 def match_process_type(proc):
     for pt in _PROCESS_TYPES_SORTED:
@@ -505,6 +570,16 @@ def merge_continuous_ops(ops_rows, init_rows, merge_report=None):
             keep, drop = seg[0], seg[1:]
             merged_name = f"{pref}{seg_idx[0]}-{seg_idx[-1]}-{suf}"
             merged_time = _sum_hours([r["processing_time_hrs"] for r in seg])
+            quantities = [r.get("_part_qty") for r in seg]
+            if any(quantity is None for quantity in quantities):
+                keep["_part_qty"] = None
+                keep["_part_qty_issue"] = "合并段存在无效零件数量"
+            elif len(set(quantities)) > 1:
+                keep["_part_qty"] = None
+                keep["_part_qty_issue"] = "合并段零件数量不一致"
+            else:
+                keep["_part_qty"] = quantities[0]
+                keep["_part_qty_issue"] = ""
 
             for k, r in enumerate(seg):
                 merge_report.append({
@@ -584,8 +659,192 @@ def merge_continuous_ops(ops_rows, init_rows, merge_report=None):
     return ops_rows, init_rows
 
 
+def _split_limit(processing_time_hrs):
+    if processing_time_hrs <= SPLIT_TIME_THRESHOLD_1:
+        return 1
+    if processing_time_hrs <= SPLIT_TIME_THRESHOLD_2:
+        return 2
+    return 3
+
+
+def split_large_ops(ops_rows, init_rows, valid_machine_ids, split_report=None):
+    """将大工时 CNC/WEDM 工序拆为同一 task_id 下的并行 operations。
+
+    实际拆分数 = min(工时档位上限, 基表中实际存在的可用机台数, 零件数量)。
+    先生成全部子工序, 再全表重写 predecessor_ops, 以支持相邻大工序
+    连续拆分时的“前组全部完成后后组才可开始”语义。
+    """
+    if split_report is None:
+        split_report = []
+
+    init_by_op = {r["op_id"]: r for r in init_rows}
+    valid_machine_ids = set(valid_machine_ids or [])
+    existing_ids = {r["op_id"] for r in ops_rows}
+    split_map = {}
+    new_ops, new_inits = [], []
+    copied_init_ids = set()
+    split_segments = 0
+
+    def append_original(row):
+        new_ops.append(row)
+        init = init_by_op.get(row["op_id"])
+        if init is not None:
+            new_inits.append(init)
+            copied_init_ids.add(row["op_id"])
+
+    def report_not_split(row, hours, quantity, machine_count, reason):
+        split_report.append({
+            "类型": "未拆分",
+            "task_id": row["task_id"],
+            "拆分前op_id": row["op_id"],
+            "拆分前op_name": row["op_name"],
+            "子op_id": "",
+            "子op_name": "",
+            "process_type": row["process_type"],
+            "WORK编号": row.get("_work_num", ""),
+            "拆分序号": "",
+            "拆分数量": "",
+            "原零件数量": quantity if quantity is not None else "",
+            "子批零件数量": "",
+            "原processing_time_hrs": hours,
+            "子processing_time_hrs": "",
+            "有效机台数": machine_count,
+            "eligible_machine_ids": row["eligible_machine_ids"],
+            "最终predecessor_ops": row.get("predecessor_ops", ""),
+            "最终turnover_time_hrs": row.get("turnover_time_hrs", ""),
+            "未拆分原因": reason,
+        })
+
+    for row in ops_rows:
+        process_type = norm_str(row.get("process_type", ""))
+        if not process_type.startswith(("CNC", "WEDM")):
+            append_original(row)
+            continue
+
+        try:
+            hours = float(row.get("processing_time_hrs", ""))
+        except (TypeError, ValueError):
+            append_original(row)
+            continue
+        if not math.isfinite(hours) or hours <= SPLIT_TIME_THRESHOLD_1:
+            append_original(row)
+            continue
+
+        quantity = parse_positive_int(row.get("_part_qty"))
+        eligible_ids = split_id_tokens(row.get("eligible_machine_ids", ""))
+        actual_eligible_ids = [machine_id for machine_id in eligible_ids
+                               if machine_id in valid_machine_ids]
+        machine_count = len(actual_eligible_ids)
+
+        if quantity is None:
+            reason = row.get("_part_qty_issue") or "零件数量为空、0、负数或非整数"
+            report_not_split(row, hours, quantity, machine_count, reason)
+            append_original(row)
+            continue
+
+        split_count = min(_split_limit(hours), machine_count, quantity)
+        if split_count < 2:
+            if machine_count < 2:
+                reason = f"有效可用机台不足2台({machine_count})"
+            else:
+                reason = f"零件数量不足2件({quantity})"
+            report_not_split(row, hours, quantity, machine_count, reason)
+            append_original(row)
+            continue
+
+        original_id = row["op_id"]
+        child_ids = [f"{original_id}__S{index:02d}"
+                     for index in range(1, split_count + 1)]
+        if any(child_id in existing_ids for child_id in child_ids):
+            report_not_split(row, hours, quantity, machine_count, "生成的子工序ID与现有op_id冲突")
+            append_original(row)
+            continue
+        original_init = init_by_op.get(original_id)
+        if original_init is None:
+            report_not_split(row, hours, quantity, machine_count, "initial_state缺少对应op_id")
+            append_original(row)
+            continue
+
+        quantities = allocate_split_quantities(quantity, split_count, original_id)
+        child_hours = allocate_split_hours(hours, quantities, original_id)
+        split_map[original_id] = child_ids
+        existing_ids.update(child_ids)
+
+        for index, (child_id, child_quantity, processing_hours) in enumerate(
+                zip(child_ids, quantities, child_hours), start=1):
+            child = dict(row)
+            child["op_id"] = child_id
+            child["op_name"] = f"{row['op_name']}[拆{index}/{split_count}]"
+            child["processing_time_hrs"] = processing_hours
+            child["_part_qty"] = child_quantity
+            child["_part_qty_issue"] = ""
+            child["_split_parent_op_id"] = original_id
+            child["_split_index"] = index
+            child["_split_count"] = split_count
+            new_ops.append(child)
+
+            child_init = dict(original_init)
+            child_init["op_id"] = child_id
+            child_init["initial_remaining_processing_time"] = processing_hours
+            new_inits.append(child_init)
+
+            split_report.append({
+                "类型": "已拆分",
+                "task_id": row["task_id"],
+                "拆分前op_id": original_id,
+                "拆分前op_name": row["op_name"],
+                "子op_id": child_id,
+                "子op_name": child["op_name"],
+                "process_type": row["process_type"],
+                "WORK编号": row.get("_work_num", ""),
+                "拆分序号": index,
+                "拆分数量": split_count,
+                "原零件数量": quantity,
+                "子批零件数量": child_quantity,
+                "原processing_time_hrs": hours,
+                "子processing_time_hrs": processing_hours,
+                "有效机台数": machine_count,
+                "eligible_machine_ids": row["eligible_machine_ids"],
+                "最终predecessor_ops": child.get("predecessor_ops", ""),
+                "最终turnover_time_hrs": child.get("turnover_time_hrs", ""),
+                "未拆分原因": "",
+            })
+        split_segments += 1
+
+    for init in init_rows:
+        if init["op_id"] not in copied_init_ids and init["op_id"] not in split_map:
+            new_inits.append(init)
+
+    for row in new_ops:
+        expanded = []
+        for predecessor_id in split_id_tokens(row.get("predecessor_ops", "")):
+            expanded.extend(split_map.get(predecessor_id, [predecessor_id]))
+        row["predecessor_ops"] = join_id_tokens(
+            predecessor_id for predecessor_id in expanded
+            if predecessor_id != row["op_id"]
+        )
+
+    if split_segments:
+        print(f"[拆分] 共拆分 {split_segments} 道 CNC/WEDM 大工序, "
+              f"operations {len(ops_rows)} -> {len(new_ops)} 行")
+    else:
+        print("[拆分] 未发现满足数量与机台条件的 CNC/WEDM 大工序")
+    return new_ops, new_inits
+
+
+def finalize_split_report(split_report, ops_rows):
+    by_id = {row["op_id"]: row for row in ops_rows}
+    for item in split_report:
+        child = by_id.get(norm_str(item.get("子op_id", "")))
+        if child is None:
+            continue
+        item["最终predecessor_ops"] = child.get("predecessor_ops", "")
+        item["最终turnover_time_hrs"] = child.get("turnover_time_hrs", "")
+    return split_report
+
+
 def apply_os_pred_turnover(ops_rows):
-    """依据后继工序类型调整前置工序的 turnover_time_hrs。必须在工序合并之后执行
+    """依据后继工序类型调整前置工序的 turnover_time_hrs。必须在工序合并、拆分之后执行
     (合并会重置段首的 turnover, 且 predecessor_ops 此时已完成重定向)。
 
     规则(按优先级):
@@ -596,53 +855,78 @@ def apply_os_pred_turnover(ops_rows):
     by_id = {r["op_id"]: r for r in ops_rows}
     n24 = n0 = 0
     for r in ops_rows:
-        pred_id = norm_str(r.get("predecessor_ops", ""))
-        if not pred_id:
-            continue
-        pred = by_id.get(pred_id)
-        if pred is None:
-            continue
-        # 规则1: 委外 -> 委外, 周转 0
-        if is_os_process(r["op_name"]) and is_os_process(pred["op_name"]):
-            if pred["turnover_time_hrs"] != OS_TO_OS_TURNOVER_HRS:
-                pred["turnover_time_hrs"] = OS_TO_OS_TURNOVER_HRS
-                n0 += 1
-            continue
-        # 规则2: 委外(或BP) 的前置若非同类, 周转 24
-        if triggers_pred_turnover_24(r["op_name"]) and \
-                not triggers_pred_turnover_24(pred["op_name"]):
-            if pred["turnover_time_hrs"] != OS_PRED_TURNOVER_HRS:
-                pred["turnover_time_hrs"] = OS_PRED_TURNOVER_HRS
-                n24 += 1
+        for pred_id in split_id_tokens(r.get("predecessor_ops", "")):
+            pred = by_id.get(pred_id)
+            if pred is None:
+                continue
+            # 规则1: 委外 -> 委外, 周转 0
+            if is_os_process(r["op_name"]) and is_os_process(pred["op_name"]):
+                if pred["turnover_time_hrs"] != OS_TO_OS_TURNOVER_HRS:
+                    pred["turnover_time_hrs"] = OS_TO_OS_TURNOVER_HRS
+                    n0 += 1
+                continue
+            # 规则2: 委外(或BP) 的前置若非同类, 周转 24
+            if triggers_pred_turnover_24(r["op_name"]) and \
+                    not triggers_pred_turnover_24(pred["op_name"]):
+                if pred["turnover_time_hrs"] != OS_PRED_TURNOVER_HRS:
+                    pred["turnover_time_hrs"] = OS_PRED_TURNOVER_HRS
+                    n24 += 1
     if n24 or n0:
         print(f"[周转] 调整 {n24} 道工序为 {OS_PRED_TURNOVER_HRS} 小时(后接委外工序), "
               f"{n0} 道为 {OS_TO_OS_TURNOVER_HRS} 小时(委外之间)")
     return ops_rows
 
 
-def write_merge_report(merge_report, report_path):
-    columns = ["类型", "task_id", "合并后op_id", "合并后op_name",
-               "原op_id", "原op_name", "process_type", "WORK编号",
-               "原processing_time_hrs", "原turnover_time_hrs",
-               "原initial_assigned_machine_id",
-               "合并后processing_time_hrs", "合并后turnover_time_hrs",
-               "未合并原因"]
+def write_merge_report(merge_report, report_path, split_report=None):
+    merge_columns = ["类型", "task_id", "合并后op_id", "合并后op_name",
+                     "原op_id", "原op_name", "process_type", "WORK编号",
+                     "原processing_time_hrs", "原turnover_time_hrs",
+                     "原initial_assigned_machine_id",
+                     "合并后processing_time_hrs", "合并后turnover_time_hrs",
+                     "未合并原因"]
+    split_columns = ["类型", "task_id", "拆分前op_id", "拆分前op_name",
+                     "子op_id", "子op_name", "process_type", "WORK编号",
+                     "拆分序号", "拆分数量", "原零件数量", "子批零件数量",
+                     "原processing_time_hrs", "子processing_time_hrs",
+                     "有效机台数", "eligible_machine_ids",
+                     "最终predecessor_ops", "最终turnover_time_hrs", "未拆分原因"]
     if not merge_report:
-        df = pd.DataFrame(columns=columns)
+        merge_df = pd.DataFrame(columns=merge_columns)
     else:
-        df = pd.DataFrame(merge_report, columns=columns)
-        df = df.sort_values(by=["类型", "task_id", "合并后op_id", "WORK编号"],
-                            ascending=[False, True, True, True],
-                            kind="mergesort").reset_index(drop=True)
-    df.to_excel(report_path, index=False, sheet_name="合并清单")
-    merged_n = int((df["类型"] == "已合并").sum()) if len(df) else 0
-    blocked_n = int((df["类型"] == "未合并").sum()) if len(df) else 0
-    print(f"[清单] 已输出合并工序清单: {report_path} "
-          f"(已合并 {merged_n} 行, 未合并 {blocked_n} 行)")
+        merge_df = pd.DataFrame(merge_report, columns=merge_columns)
+        merge_df = merge_df.sort_values(
+            by=["类型", "task_id", "合并后op_id", "WORK编号"],
+            ascending=[False, True, True, True], kind="mergesort",
+        ).reset_index(drop=True)
+    if not split_report:
+        split_df = pd.DataFrame(columns=split_columns)
+    else:
+        split_df = pd.DataFrame(split_report, columns=split_columns)
+        split_df = split_df.sort_values(
+            by=["类型", "task_id", "拆分前op_id"],
+            ascending=[False, True, True], kind="mergesort",
+        ).reset_index(drop=True)
 
-def build_all(source_path, base_path, merge_report=None):
+    with pd.ExcelWriter(report_path, engine="openpyxl") as writer:
+        merge_df.to_excel(writer, index=False, sheet_name="合并清单")
+        split_df.to_excel(writer, index=False, sheet_name="拆分清单")
+
+    merged_n = int((merge_df["类型"] == "已合并").sum()) if len(merge_df) else 0
+    merge_blocked_n = int((merge_df["类型"] == "未合并").sum()) if len(merge_df) else 0
+    split_n = (
+        int(split_df.loc[split_df["类型"] == "已拆分", "拆分前op_id"].nunique())
+        if len(split_df) else 0
+    )
+    split_blocked_n = int((split_df["类型"] == "未拆分").sum()) if len(split_df) else 0
+    print(f"[清单] 已输出合并/拆分工序清单: {report_path} "
+          f"(已合并 {merged_n} 行, 未合并 {merge_blocked_n} 行; "
+          f"已拆分 {split_n} 道, 未拆分 {split_blocked_n} 道)")
+
+def build_all(source_path, base_path, merge_report=None, split_report=None):
     if merge_report is None:
         merge_report = []
+    if split_report is None:
+        split_report = []
     src = pd.read_excel(source_path)
     src.columns = [norm_str(c) for c in src.columns]
     base = read_base_table(base_path)
@@ -654,6 +938,10 @@ def build_all(source_path, base_path, merge_report=None):
     for col in (COL_TYPE_ID, COL_TYPE_NAME, COL_CRIT, COL_MACHINE_ID, COL_MACHINE_NAME):
         if col not in base.columns:
             sys.exit(f"[错误] 固定基表缺少列: {col}\n实际列: {list(base.columns)}")
+
+    has_part_quantity = COL_PART_QTY in src.columns
+    if not has_part_quantity:
+        print(f"[警告] 源表缺少列 {COL_PART_QTY}, 所有大工时工序将保持不拆分")
 
     src = src[src[COL_PLAN].apply(plan_no_ok)]
     src = src[src[COL_TASK].apply(task_len_ok)].copy()
@@ -704,6 +992,7 @@ def build_all(source_path, base_path, merge_report=None):
         wn = row['work_num']
         op_id = op_id_map[(t, wn)]
         proc = row[COL_PROC]
+        part_quantity = parse_positive_int(row[COL_PART_QTY]) if has_part_quantity else None
         ops_rows.append({
             "op_id": op_id,
             "task_id": t,
@@ -715,6 +1004,11 @@ def build_all(source_path, base_path, merge_report=None):
             "eligible_machine_ids": eligible_machines(proc, os_pool, zz_pool, unmatched_procs),
             "turnover_time_hrs": TURNOVER_TIME_HRS,
             "_work_num": int(wn),
+            "_part_qty": part_quantity,
+            "_part_qty_issue": "" if part_quantity is not None else (
+                "零件数量为空、0、负数或非整数"
+                if has_part_quantity else "源表缺少零件数量列"
+            ),
         })
         init_rows.append({
             "op_id": op_id,
@@ -802,10 +1096,21 @@ def build_all(source_path, base_path, merge_report=None):
 
     # ---------- 工序合并 (连续 CNC / LC / LF) ----------
     ops_rows, init_rows = merge_continuous_ops(ops_rows, init_rows, merge_report)
-    # ---------- OS 工序前置的周转时间调整 (必须在合并之后) ----------
+    # ---------- CNC / WEDM 大工时工序拆分 (必须在合并之后) ----------
+    valid_machine_ids = {
+        norm_str(machine_id) for machine_id in base[COL_MACHINE_ID]
+        if norm_str(machine_id)
+    }
+    ops_rows, init_rows = split_large_ops(
+        ops_rows, init_rows, valid_machine_ids, split_report,
+    )
+    # ---------- OS 工序前置的周转时间调整 (必须在合并/拆分之后) ----------
     ops_rows = apply_os_pred_turnover(ops_rows)
+    finalize_split_report(split_report, ops_rows)
     for r in ops_rows:
-        r.pop("_work_num", None)
+        for private_key in ("_work_num", "_part_qty", "_part_qty_issue",
+                            "_split_parent_op_id", "_split_index", "_split_count"):
+            r.pop(private_key, None)
 
     order_info = {}
     for _, row in src_valid.iterrows():
@@ -948,9 +1253,10 @@ def main():
               f"超过 Excel 单元格上限 32767, 该单元格会被截断")
 
     merge_report = []
-    data = build_all(str(src_path), args.base, merge_report)
+    split_report = []
+    data = build_all(str(src_path), args.base, merge_report, split_report)
     write_to_template(args.template, args.output, data)
-    write_merge_report(merge_report, args.report)
+    write_merge_report(merge_report, args.report, split_report)
 
 if __name__ == "__main__":
     main()

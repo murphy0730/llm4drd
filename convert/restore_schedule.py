@@ -4,16 +4,17 @@
   输入:
     - 《方案*_排产.xlsx》  排产结果表 (* 为一~两个汉字, 可有多个方案)
     - 《20260710.xlsx》    原始数据表 (自动选取当前目录下日期最新的 YYYYMMDD.xlsx)
-    - 《merge_report.xlsx》合并信息表 (工序还原依据)
+    - 《merge_report.xlsx》合并/拆分信息表 (工序还原依据)
   输出:
     - 《设备排产表_方案X.xlsx》 每个方案各生成一个
 
 处理:
-  步骤一: 依据 merge_report 将合并工序还原为多道原始工序, 按原工时依次顺排时间
+  步骤一: 依据 merge_report 逆向还原拆分子批和合并工序, 按比例/原工时顺排时间
   步骤二: 依据 任务令+work 从原始数据表补充承诺交期等字段
 """
 
 import argparse
+import math
 import re
 import sys
 from datetime import datetime
@@ -75,6 +76,23 @@ M_WORK_NUM = 'WORK编号'
 M_OLD_TIME = '原processing_time_hrs'
 M_NEW_TURNOVER = '合并后turnover_time_hrs'
 
+# ---- 《merge_report.xlsx》的「拆分清单」sheet 列名 ----
+SP_TYPE = '类型'
+SP_PARENT_OP_ID = '拆分前op_id'
+SP_CHILD_OP_ID = '子op_id'
+SP_WORK_NUM = 'WORK编号'
+SP_INDEX = '拆分序号'
+SP_COUNT = '拆分数量'
+SP_TOTAL_QTY = '原零件数量'
+SP_CHILD_QTY = '子批零件数量'
+SP_CHILD_TIME = '子processing_time_hrs'
+SP_TURNOVER = '最终turnover_time_hrs'
+
+META_WORK_NUM = '__restore_work_num'
+META_SPLIT_QTY = '__restore_split_qty'
+META_TURNOVER = '__restore_turnover'
+META_FIXED_PRED = '__restore_fixed_predecessor'
+
 # ---- 目标表列顺序(未列出的原有列排在最右) ----
 TARGET_COLUMN_ORDER = [
     '计划号', '任务令', 'work', '承诺交期', '工序', '计划工位', '预计齐套时间',
@@ -110,6 +128,71 @@ def round2(v):
         return round(float(v), 2)
     except (TypeError, ValueError):
         return ""
+
+
+def split_op_ids(v):
+    result, seen = [], set()
+    for token in re.split(r'[;；]', norm_str(v)):
+        token = token.strip()
+        if token and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
+
+
+def join_op_ids(values):
+    result, seen = [], set()
+    for value in values:
+        value = norm_str(value)
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return ';'.join(result)
+
+
+def positive_int_or_none(v):
+    if v is None or pd.isna(v):
+        return None
+    try:
+        number = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0 or not number.is_integer():
+        return None
+    return int(number)
+
+
+def finite_float_or_none(v):
+    if v is None or pd.isna(v):
+        return None
+    try:
+        number = float(v)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def allocate_weighted_hours(total_hours, weights):
+    """按权重将总工时分配到0.01小时, 保证合计不变。"""
+    total_units = int(round(float(total_hours) * 100))
+    safe_weights = [
+        max(0, int(round((finite_float_or_none(weight) or 0.0) * 100)))
+        for weight in weights
+    ]
+    total_weight = sum(safe_weights)
+    if total_weight <= 0:
+        safe_weights = [1] * len(weights)
+        total_weight = len(weights)
+    numerators = [total_units * weight for weight in safe_weights]
+    units = [int(value // total_weight) for value in numerators]
+    remainder = total_units - sum(units)
+    order = sorted(
+        range(len(weights)),
+        key=lambda i: (-(numerators[i] % total_weight), i),
+    )
+    for index in order[:remainder]:
+        units[index] += 1
+    return [round(value / 100.0, 2) for value in units]
 
 
 # ============================================================
@@ -159,71 +242,155 @@ def build_merge_map(merge_df):
     return seg_map, tail_map, turnover_map
 
 
-def restore_operations(plan_df, seg_map, tail_map):
-    """将合并工序还原为多道原始工序
+def build_split_map(split_df):
+    """构建 子op_id -> 拆分前工序/子批数量/工时/周转 的查找表。"""
+    child_map = {}
+    if split_df is None or split_df.empty or SP_TYPE not in split_df.columns:
+        return child_map
+    required = {SP_PARENT_OP_ID, SP_CHILD_OP_ID, SP_INDEX, SP_COUNT,
+                SP_TOTAL_QTY, SP_CHILD_QTY, SP_CHILD_TIME, SP_TURNOVER}
+    if not required.issubset(set(split_df.columns)):
+        print(f"[警告] 拆分清单缺少列 {sorted(required - set(split_df.columns))}, 将跳过拆分还原")
+        return child_map
 
-    - 时间: 从合并行的计划开工时间起, 按各原工时依次顺排(段内无间隔)
-    - 工序ID/工序: 取原op_id / 原op_name
-    - 时长/占用时长: 取原工时
-    - 前工序ID: 段首保留原值, 段内后续指向前一道原op_id
-    - 外部指向合并后op_id 的前工序ID -> 重定向到段末原op_id
+    rows = split_df[split_df[SP_TYPE].apply(norm_str) == '已拆分']
+    for _, row in rows.iterrows():
+        child_id = norm_str(row.get(SP_CHILD_OP_ID))
+        parent_id = norm_str(row.get(SP_PARENT_OP_ID))
+        split_index = positive_int_or_none(row.get(SP_INDEX))
+        split_count = positive_int_or_none(row.get(SP_COUNT))
+        child_quantity = positive_int_or_none(row.get(SP_CHILD_QTY))
+        total_quantity = positive_int_or_none(row.get(SP_TOTAL_QTY))
+        if not child_id or not parent_id or split_index is None or split_count is None:
+            continue
+        child_time = finite_float_or_none(row.get(SP_CHILD_TIME))
+        turnover = finite_float_or_none(row.get(SP_TURNOVER))
+        work_num = pd.to_numeric(pd.Series([row.get(SP_WORK_NUM)]), errors='coerce').iloc[0] \
+            if SP_WORK_NUM in split_df.columns else float('nan')
+        child_map[child_id] = {
+            'parent_op_id': parent_id,
+            'split_index': split_index,
+            'split_count': split_count,
+            'total_quantity': total_quantity,
+            'child_quantity': child_quantity,
+            'child_time': child_time,
+            'turnover': TURNOVER_TIME_HRS if turnover is None else turnover,
+            'work_num': None if pd.isna(work_num) else int(work_num),
+        }
+    return child_map
+
+
+def restore_operations(plan_df, seg_map, tail_map=None, split_map=None):
+    """逆向还原“先合并、后拆分”的排产工序。
+
+    拆分子批若来自合并工序, 则按原合并段工时权重展开, 并为每个
+    原 op_id 保留子批后缀。外部多前置在全部行展开后再一次性重定向到
+    各计划工序的还原段末, 段内链条保持不变。
     """
+    del tail_map  # 新逻辑通过排程行的实际展开结果构建段末映射
+    split_map = split_map or {}
     out_rows = []
-    restored_seg_ids = set()   # 属于某个还原段内部的行(其前工序ID不参与重定向)
+    plan_tail_map = {}
     expanded_count = 0
+    restored_split_children = set()
 
     for _, row in plan_df.iterrows():
-        op_id = norm_str(row[P_OP_ID])
-        seg = seg_map.get(op_id)
+        plan_op_id = norm_str(row[P_OP_ID])
+        split_info = split_map.get(plan_op_id)
+        parent_op_id = split_info['parent_op_id'] if split_info else plan_op_id
+        seg = seg_map.get(parent_op_id)
+
         if not seg or len(seg) < 2:
-            out_rows.append(row.to_dict())
+            d = row.to_dict()
+            d[META_WORK_NUM] = split_info.get('work_num') if split_info else None
+            d[META_SPLIT_QTY] = split_info.get('child_quantity') if split_info else None
+            d[META_TURNOVER] = split_info.get('turnover') if split_info else None
+            d[META_FIXED_PRED] = False
+            out_rows.append(d)
+            plan_tail_map[plan_op_id] = plan_op_id
+            if split_info:
+                restored_split_children.add(plan_op_id)
             continue
 
         expanded_count += 1
+        split_suffix = f"__S{split_info['split_index']:02d}" if split_info else ""
+        if split_info:
+            restored_split_children.add(plan_op_id)
+            total_duration = split_info.get('child_time')
+            if total_duration is None:
+                total_duration = finite_float_or_none(row.get(P_DUR))
+            if total_duration is None:
+                total_duration = sum(item['proc_time'] for item in seg)
+            durations = allocate_weighted_hours(
+                float(total_duration), [item['proc_time'] for item in seg],
+            )
+        else:
+            durations = [item['proc_time'] for item in seg]
+
         start_t = pd.to_datetime(row.get(P_START_T), errors='coerce')
         start_h = pd.to_numeric(pd.Series([row.get(P_START_H)]), errors='coerce').iloc[0]
         cursor_t = start_t
         cursor_h = start_h
-        prev_old_id = norm_str(row.get(P_PRED_OP))
+        previous_restored_id = None
 
-        for k, item in enumerate(seg):
+        for index, (item, duration) in enumerate(zip(seg, durations)):
             d = row.to_dict()
-            dur = item['proc_time']
-            d[P_OP_ID] = item['old_op_id']
-            d[P_OP_NAME] = item['old_op_name']
-            d[P_DUR] = round2(dur)
-            d[P_OCCUPY] = round2(dur)
-            # 时间顺排
+            restored_id = f"{item['old_op_id']}{split_suffix}"
+            restored_name = item['old_op_name']
+            if split_info:
+                restored_name = (
+                    f"{restored_name}[拆{split_info['split_index']}/{split_info['split_count']}]"
+                )
+            d[P_OP_ID] = restored_id
+            d[P_OP_NAME] = restored_name
+            d[P_DUR] = round2(duration)
+            d[P_OCCUPY] = round2(duration)
+
             if pd.notna(cursor_t):
-                end_t = cursor_t + pd.Timedelta(hours=dur)
+                end_t = cursor_t + pd.Timedelta(hours=duration)
                 d[P_START_T] = cursor_t
                 d[P_END_T] = end_t
                 cursor_t = end_t
             if pd.notna(cursor_h):
-                end_h = cursor_h + dur
+                end_h = cursor_h + duration
                 d[P_START_H] = round2(cursor_h)
                 d[P_END_H] = round2(end_h)
                 cursor_h = end_h
-            # 段内前工序链
-            d[P_PRED_OP] = prev_old_id
-            prev_old_id = item['old_op_id']
-            if k > 0:
-                restored_seg_ids.add(item['old_op_id'])
+
+            if index == 0:
+                d[P_PRED_OP] = norm_str(row.get(P_PRED_OP))
+                d[META_FIXED_PRED] = False
+            else:
+                d[P_PRED_OP] = previous_restored_id
+                d[META_FIXED_PRED] = True
+            d[META_WORK_NUM] = item['work_num']
+            d[META_SPLIT_QTY] = split_info.get('child_quantity') if split_info else None
+            if index < len(seg) - 1:
+                d[META_TURNOVER] = 0.0
+            else:
+                d[META_TURNOVER] = (
+                    split_info.get('turnover') if split_info else item.get('turnover')
+                )
             out_rows.append(d)
+            previous_restored_id = restored_id
+
+        plan_tail_map[plan_op_id] = previous_restored_id
 
     df = pd.DataFrame(out_rows)
+    if P_PRED_OP not in df.columns:
+        df[P_PRED_OP] = ""
 
-    # 外部前工序ID重定向: 指向合并后op_id 的, 改指段末原op_id
-    if tail_map and P_PRED_OP in df.columns:
-        def _redirect(r):
-            pred = norm_str(r[P_PRED_OP])
-            # 段内后续行的前工序指向段首(=合并后op_id), 属于正常链条, 不重定向
-            if norm_str(r[P_OP_ID]) in restored_seg_ids:
-                return pred
-            return tail_map.get(pred, pred)
-        df[P_PRED_OP] = df.apply(_redirect, axis=1)
+    for index, row in df.iterrows():
+        if bool(row.get(META_FIXED_PRED)):
+            continue
+        redirected = [
+            plan_tail_map.get(predecessor_id, predecessor_id)
+            for predecessor_id in split_op_ids(row.get(P_PRED_OP))
+        ]
+        df.at[index, P_PRED_OP] = join_op_ids(redirected)
 
-    print(f"[还原] 展开合并工序 {expanded_count} 段, 行数 {len(plan_df)} -> {len(df)}")
+    print(f"[还原] 识别拆分子工序 {len(restored_split_children)} 道, "
+          f"展开合并工序 {expanded_count} 段, 行数 {len(plan_df)} -> {len(df)}")
     return df
 
 
@@ -251,8 +418,15 @@ def enrich(df, lookup, turnover_map, src_columns):
             return None
         return r[col]
 
-    # ---- work ----
-    df['work'] = df[P_OP_ID].apply(work_from_op_id)
+    # ---- work: 拆分/合并还原行优先使用清单中的 WORK 编号 ----
+    if META_WORK_NUM in df.columns:
+        df['work'] = [
+            f"WORK{work_num}" if (work_num := positive_int_or_none(meta_work)) is not None
+            else work_from_op_id(op_id)
+            for op_id, meta_work in zip(df[P_OP_ID], df[META_WORK_NUM])
+        ]
+    else:
+        df['work'] = df[P_OP_ID].apply(work_from_op_id)
 
     # ---- 直接映射的字段 ----
     # 注: 计划号 会覆盖排产结果表中原有的值, 统一以原始数据表为准
@@ -265,7 +439,6 @@ def enrich(df, lookup, turnover_map, src_columns):
         ('任务剩余总工时', S_REMAIN),
         ('最晚开工时间', S_EARLIEST_START),
         ('零件号', S_PART_NO),
-        ('零件数量', S_PART_QTY),
         ('接单时间', S_ORDER_TIME),
         ('排产优先级', S_PRIORITY),
     ]
@@ -279,6 +452,17 @@ def enrich(df, lookup, turnover_map, src_columns):
         df[tgt] = [get_src(t, w, src_col) for t, w in zip(df[P_TASK], df['work'])]
     if missing_cols:
         print(f"[警告] 原始数据表缺少列 {missing_cols}, 对应目标字段留空")
+
+    # ---- 零件数量: 拆分行写子批数量, 其余保持原表逻辑 ----
+    if S_PART_QTY not in src_columns:
+        print(f"[警告] 原始数据表缺少 {S_PART_QTY} 列, 非拆分行的零件数量留空")
+    split_quantities = df[META_SPLIT_QTY] if META_SPLIT_QTY in df.columns else [None] * len(df)
+    df['零件数量'] = [
+        parsed_quantity
+        if (parsed_quantity := positive_int_or_none(split_quantity)) is not None
+        else (get_src(task, work, S_PART_QTY) if S_PART_QTY in src_columns else "")
+        for task, work, split_quantity in zip(df[P_TASK], df['work'], split_quantities)
+    ]
 
     # ---- 单件工时 = 源表【工时】 ----
     if S_WORKHOUR in src_columns:
@@ -294,16 +478,26 @@ def enrich(df, lookup, turnover_map, src_columns):
     for op_id, end_t in zip(df[P_OP_ID], pd.to_datetime(df[P_END_T], errors='coerce')):
         end_by_op[norm_str(op_id)] = end_t
 
+    effective_turnover_map = dict(turnover_map)
+    if META_TURNOVER in df.columns:
+        for op_id, value in zip(df[P_OP_ID], df[META_TURNOVER]):
+            parsed = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
+            if pd.notna(parsed):
+                effective_turnover_map[norm_str(op_id)] = float(parsed)
+
     ready_vals = []
     for task, work, pred in zip(df[P_TASK], df['work'], df[P_PRED_OP]):
-        pred_id = norm_str(pred)
-        if pred_id:
-            pred_end = end_by_op.get(pred_id)
-            if pred_end is not None and pd.notna(pred_end):
-                hrs = turnover_map.get(pred_id, TURNOVER_TIME_HRS)
-                ready_vals.append(pred_end + pd.Timedelta(hours=float(hrs)))
-            else:
-                ready_vals.append(pd.NaT)
+        predecessor_ids = split_op_ids(pred)
+        if predecessor_ids:
+            gates = []
+            for predecessor_id in predecessor_ids:
+                pred_end = end_by_op.get(predecessor_id)
+                if pred_end is None or pd.isna(pred_end):
+                    gates = []
+                    break
+                hours = effective_turnover_map.get(predecessor_id, TURNOVER_TIME_HRS)
+                gates.append(pred_end + pd.Timedelta(hours=float(hours)))
+            ready_vals.append(max(gates) if gates else pd.NaT)
         else:
             craft = get_src(task, work, S_CRAFT_TIME)
             craft_t = pd.to_datetime(craft, errors='coerce')
@@ -320,6 +514,9 @@ def enrich(df, lookup, turnover_map, src_columns):
             n_bad = int(df[col].isna().sum())
             if n_bad:
                 print(f"[警告] {col} 有 {n_bad} 个值无法解析为日期时间, 已置空")
+
+    df = df.drop(columns=[META_WORK_NUM, META_SPLIT_QTY, META_TURNOVER, META_FIXED_PRED],
+                 errors='ignore')
 
     return df
 
@@ -359,7 +556,7 @@ def reorder_columns(df):
 # 主流程
 # ============================================================
 
-def process_one(plan_path, src_df, merge_df, out_dir):
+def process_one(plan_path, src_df, merge_df, out_dir, split_df=None):
     print(f"\n===== 处理: {plan_path.name} =====")
     plan_df = pd.read_excel(plan_path)
     plan_df.columns = [norm_str(c) for c in plan_df.columns]
@@ -370,9 +567,11 @@ def process_one(plan_path, src_df, merge_df, out_dir):
             sys.exit(f"[错误] {plan_path.name} 缺少列: {col}\n实际列: {list(plan_df.columns)}")
 
     seg_map, tail_map, turnover_map = build_merge_map(merge_df)
+    split_map = build_split_map(split_df)
     print(f"[合并表] 可还原的合并段 {len(seg_map)} 个")
+    print(f"[拆分表] 可还原的拆分子工序 {len(split_map)} 道")
 
-    df = restore_operations(plan_df, seg_map, tail_map)
+    df = restore_operations(plan_df, seg_map, tail_map, split_map)
     lookup = build_source_lookup(src_df)
     df = enrich(df, lookup, turnover_map, set(src_df.columns))
     df = reorder_columns(df)
@@ -394,7 +593,8 @@ def main():
     ap.add_argument("--dir", default=str(here), help="输入文件所在目录(默认脚本同目录)")
     ap.add_argument("--source", default=None,
                     help="原始数据表路径(默认自动选取 <dir> 下日期最新的 YYYYMMDD.xlsx)")
-    ap.add_argument("--merge", default=None, help="合并信息表路径(默认 <dir>/merge_report.xlsx)")
+    ap.add_argument("--merge", default=None,
+                    help="合并/拆分信息表路径(默认 <dir>/merge_report.xlsx)")
     ap.add_argument("--outdir", default=None, help="输出目录(默认同 dir)")
     args = ap.parse_args()
 
@@ -410,12 +610,22 @@ def main():
     print(f"[读取] 原始数据表 {src_path.name}: {len(src_df)} 行")
 
     if merge_path.exists():
-        merge_df = pd.read_excel(merge_path)
+        report_book = pd.ExcelFile(merge_path)
+        merge_sheet = '合并清单' if '合并清单' in report_book.sheet_names else report_book.sheet_names[0]
+        merge_df = pd.read_excel(merge_path, sheet_name=merge_sheet)
         merge_df.columns = [norm_str(c) for c in merge_df.columns]
-        print(f"[读取] 合并信息表 {merge_path.name}: {len(merge_df)} 行")
+        if '拆分清单' in report_book.sheet_names:
+            split_df = pd.read_excel(merge_path, sheet_name='拆分清单')
+            split_df.columns = [norm_str(c) for c in split_df.columns]
+        else:
+            split_df = None
+        report_book.close()
+        print(f"[读取] 合并/拆分信息表 {merge_path.name}: "
+              f"合并 {len(merge_df)} 行, 拆分 {len(split_df) if split_df is not None else 0} 行")
     else:
         merge_df = None
-        print(f"[警告] 未找到合并信息表 {merge_path}, 将跳过工序还原")
+        split_df = None
+        print(f"[警告] 未找到合并/拆分信息表 {merge_path}, 将跳过工序还原")
 
     plan_files = sorted(p for p in work_dir.iterdir()
                         if p.is_file() and re.match(PLAN_FILE_PATTERN, p.name))
@@ -424,7 +634,7 @@ def main():
     print(f"[发现] 排产结果文件 {len(plan_files)} 个: {[p.name for p in plan_files]}")
 
     for p in plan_files:
-        process_one(p, src_df, merge_df, out_dir)
+        process_one(p, src_df, merge_df, out_dir, split_df)
 
 
 if __name__ == "__main__":
