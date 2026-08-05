@@ -20,8 +20,8 @@ class FakeWhatIfClient:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    def search_resources(self, entity_type, query="", limit=20):
-        self.calls.append(("search_resources", entity_type, query, limit))
+    def search_resources(self, entity_type, query="", limit=20, scenario_id=None):
+        self.calls.append(("search_resources", entity_type, query, limit, scenario_id))
         return {"ok": True, "data": {"entity_type": entity_type, "total": 3, "items": []}}
 
     def search_orders(self, query, limit=20):
@@ -69,13 +69,13 @@ class FakeWhatIfClient:
             "results": [{"rule_name": "ATC", "metrics": {"total_tardiness": 8.1, "makespan": 40.0}}],
         }}
 
-    def get_whatif_run(self, run_id, bottleneck_limit=None):
-        self.calls.append(("get_run", run_id, bottleneck_limit))
+    def get_whatif_run(self, run_id, machine_limit=None):
+        self.calls.append(("get_run", run_id, machine_limit))
         return {"ok": True, "data": {"run_id": run_id, "scenario_name": "x", "rule_names": ["ATC"],
                                      "status": "running", "results": []}}
 
-    def compare_whatif_runs(self, run_ids, metric_keys=None, bottleneck_limit=None):
-        self.calls.append(("compare_runs", run_ids, metric_keys, bottleneck_limit))
+    def compare_whatif_runs(self, run_ids, metric_keys=None, machine_limit=None):
+        self.calls.append(("compare_runs", run_ids, metric_keys, machine_limit))
         return {"ok": True, "data": {
             "baseline": {"run_id": run_ids[0], "scenario_name": "现状", "rule_name": "ATC"},
             "metrics": [], "entries": [{}, {}],
@@ -224,7 +224,7 @@ class ResourceSearchDispatchTests(unittest.TestCase):
     def test_machine_search_allows_empty_query(self):
         result = handle_tool_call("search_planning_entities", {"entity_type": "machine"}, self.client)
         self.assertFalse(result["isError"])
-        self.assertEqual(self.client.calls[0], ("search_resources", "machine", "", 20))
+        self.assertEqual(self.client.calls[0], ("search_resources", "machine", "", 20, None))
 
     def test_resource_types_route_to_resource_endpoint(self):
         for entity_type in ("machine", "machine_type", "tooling", "personnel"):

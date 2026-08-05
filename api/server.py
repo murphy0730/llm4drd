@@ -51,6 +51,14 @@ from .review_read import (
 )
 from .planning_query_service import PlanningQueryError, PlanningQueryService
 from .whatif_service import WhatIfError, WhatIfService
+from .insertion_service import (
+    InsertionError,
+    InsertionRunStore,
+    build_insertion_export,
+    build_insertion_template,
+    evaluate_insertion,
+    parse_insertion_file,
+)
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="LLM4DRD智能调度平台", version="3.0")
@@ -95,6 +103,7 @@ _active_shop_cache: Optional[tuple[int, ShopFloor]] = None
 review_read_cache = ReviewReadCache(max_entries=24)
 # What-if 推演：场景/推演结果只活在这个对象里，不落库、不碰上面的全局 shop 与缓存。
 whatif_service = WhatIfService(inst_store, downtime_store)
+insertion_run_store = InsertionRunStore(max_runs=8)
 
 
 def _sim_runtime_cache_key(current_shop: ShopFloor) -> str:
@@ -417,6 +426,38 @@ class ReviewProgressReq(BaseModel):
     selection: list[str] = Field(default_factory=list)
     detail_id: Optional[str] = None
     ai_recommended_id: Optional[str] = None
+
+
+class InsertionOrderReq(BaseModel):
+    order_id: str = Field(min_length=1, max_length=128)
+    order_name: str = Field(default="", max_length=200)
+    release_time: float | datetime | str = 0.0
+    expected_due_date: float | datetime | str | None = None
+    main_task_id: str = Field(default="", max_length=128)
+
+
+class InsertionOperationReq(BaseModel):
+    order_id: str = Field(min_length=1, max_length=128)
+    op_id: str = Field(min_length=1, max_length=128)
+    task_id: str = Field(min_length=1, max_length=128)
+    op_name: str = Field(default="", max_length=200)
+    process_type: str = Field(default="", max_length=128)
+    processing_time_hrs: float
+    turnover_time_hrs: float = 0.0
+    predecessor_ops: list[str] | str = Field(default_factory=list)
+    predecessor_tasks: list[str] | str = Field(default_factory=list)
+    eligible_machine_ids: list[str] | str = Field(default_factory=list)
+    required_tooling_types: list[str] | str = Field(default_factory=list)
+    required_personnel_skills: list[str] | str = Field(default_factory=list)
+
+
+class InsertionEvaluateReq(BaseModel):
+    base_source: str = "simulation"
+    task_id: Optional[str] = None
+    solution_id: Optional[str] = None
+    policy: str = "frozen"
+    orders: list[InsertionOrderReq]
+    operations: list[InsertionOperationReq]
 
 
 def _plan_start_ref():
@@ -4318,6 +4359,130 @@ def optimize_review_orders(
     )
 
 
+@app.get("/api/insertion/template")
+async def insertion_template():
+    return Response(
+        content=build_insertion_template(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=insertion_order_template.xlsx"},
+    )
+
+
+@app.post("/api/insertion/import")
+async def insertion_import(file: UploadFile = File(...)):
+    try:
+        return parse_insertion_file(await file.read(), file.filename or "")
+    except InsertionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _insertion_base_schedule(req: InsertionEvaluateReq, current_shop: ShopFloor):
+    source = req.base_source.strip().lower()
+    if source == "simulation":
+        simulation = last_sim_payload or (workflow_store.load_all().get("simulation") or {})
+        schedule = list(simulation.get("gantt") or [])
+        label = f"规则仿真 · {simulation.get('rule') or '-'}"
+        expected = (simulation.get("metrics") or {}).get("total_operations")
+        completed = (simulation.get("metrics") or {}).get("completed_operations")
+        if expected is not None and completed is not None and int(completed) < int(expected):
+            raise HTTPException(409, "当前仿真结果不完整，不能作为插单基准")
+        _validate_insertion_base_coverage(current_shop, schedule)
+        return source, label, schedule
+    if source != "solution":
+        raise HTTPException(422, "base_source 仅支持 simulation 或 solution")
+    _, task = _resolve_hybrid_task(req.task_id)
+    if not req.solution_id:
+        raise HTTPException(422, "请选择一个评审方案作为插单基准")
+    solution = _resolve_export_solution(current_shop, task, req.solution_id)
+    if solution.get("schedule_truncated"):
+        raise HTTPException(409, "基准方案排程不完整，无法保证现有订单不受影响")
+    schedule = list(solution.get("schedule") or [])
+    _validate_insertion_base_coverage(current_shop, schedule)
+    return source, str(solution.get("solution_id") or req.solution_id), schedule
+
+
+def _validate_insertion_base_coverage(current_shop: ShopFloor, schedule: list[dict]) -> None:
+    scheduled_ids = {str(entry.get("op_id") or "") for entry in schedule if entry.get("op_id")}
+    required_ids = {
+        operation.id
+        for operation in current_shop.operations.values()
+        if operation.status != OpStatus.COMPLETED
+    }
+    missing = required_ids - scheduled_ids
+    unknown = scheduled_ids - set(current_shop.operations)
+    if missing or unknown:
+        detail = []
+        if missing:
+            detail.append(f"缺少 {len(missing)} 道当前工序")
+        if unknown:
+            detail.append(f"包含 {len(unknown)} 道其它实例工序")
+        raise HTTPException(409, f"所选基准方案与当前实例不一致（{'，'.join(detail)}），请重新仿真或改选方案库中的完整方案")
+
+
+@app.post("/api/insertion/evaluate")
+def insertion_evaluate(req: InsertionEvaluateReq):
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+    policy = req.policy.strip().lower()
+    if policy not in {"frozen", "due_protected"}:
+        raise HTTPException(422, "policy 仅支持 frozen 或 due_protected")
+    source, label, schedule = _insertion_base_schedule(req, current_shop)
+    if not schedule:
+        raise HTTPException(422, "所选基准方案没有排程明细")
+
+    order_rows = []
+    for order in req.orders:
+        row = order.model_dump()
+        row["release_time"] = _coerce_offset(row.get("release_time")) or 0.0
+        due = row.get("expected_due_date")
+        row["expected_due_date"] = None if due in (None, "") else _coerce_offset(due)
+        order_rows.append(row)
+    try:
+        version = get_instance_version(inst_store.db_path) if inst_store.has_data() else 0
+        run = evaluate_insertion(
+            current_shop,
+            schedule,
+            order_rows,
+            [operation.model_dump() for operation in req.operations],
+            policy=policy,
+            instance_version=version,
+        )
+    except InsertionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    run.payload["base_source"] = source
+    run.payload["base_solution"] = label
+    insertion_run_store.put(run)
+    return _json_safe(run.payload)
+
+
+@app.get("/api/insertion/runs/{run_id}/schedule")
+def insertion_run_schedule(run_id: str, order_id: Optional[str] = None):
+    version = get_instance_version(inst_store.db_path) if inst_store.has_data() else 0
+    try:
+        run = insertion_run_store.get(run_id, version)
+    except InsertionError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    entries = run.full_schedule
+    if order_id:
+        entries = [entry for entry in entries if str(entry.get("order_id") or "") == order_id]
+    return _json_safe({"run_id": run_id, "entries": entries, "total": len(entries)})
+
+
+@app.get("/api/insertion/runs/{run_id}/export")
+def insertion_run_export(run_id: str):
+    version = get_instance_version(inst_store.db_path) if inst_store.has_data() else 0
+    try:
+        run = insertion_run_store.get(run_id, version)
+    except InsertionError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(
+        content=build_insertion_export(run),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={run_id}_insertion_evaluation.xlsx"},
+    )
+
+
 @app.get("/api/workflow/progress")
 async def workflow_progress():
     """已完成步骤的结果快照，供前端启动时恢复，而不必重跑整条流程。
@@ -6196,14 +6361,45 @@ def planning_solutions(
     task_id: Optional[str] = None,
     solution_ids: Optional[str] = None,
     metric_keys: Optional[str] = None,
-    bottleneck_limit: Optional[int] = None,
+    machine_limit: Optional[int] = None,
 ):
     try:
         data = _planning_query_service().compare_solutions(
             task_id,
             _planning_csv(solution_ids),
             _planning_csv(metric_keys),
-            bottleneck_limit,
+            machine_limit,
+        )
+    except PlanningQueryError as error:
+        raise _planning_error(error) from error
+    return _planning_response(data, task_defaulted=task_id is None)
+
+
+@app.get("/api/query/planning/bottleneck")
+def planning_bottleneck(
+    solution_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    machine_limit: Optional[int] = None,
+):
+    """按「卡住延误订单的时长」定位瓶颈，区别于 /solutions 的利用率排行榜。"""
+    try:
+        data = _planning_query_service().diagnose_bottleneck(
+            solution_id, task_id, machine_limit
+        )
+    except PlanningQueryError as error:
+        raise _planning_error(error) from error
+    return _planning_response(data, task_defaulted=task_id is None)
+
+
+@app.get("/api/query/planning/order/{order_id}/delay")
+def planning_order_delay(
+    order_id: str,
+    solution_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+):
+    try:
+        data = _planning_query_service().explain_order_delay(
+            order_id, solution_id, task_id
         )
     except PlanningQueryError as error:
         raise _planning_error(error) from error
@@ -6455,23 +6651,23 @@ def whatif_list_runs():
 def whatif_compare_runs(
     run_ids: str = "",
     metric_keys: Optional[str] = None,
-    bottleneck_limit: Optional[int] = None,
+    machine_limit: Optional[int] = None,
 ):
     try:
         return _planning_response(whatif_service.compare_runs(
             _planning_csv(run_ids) or [],
             _planning_csv(metric_keys),
-            bottleneck_limit,
+            machine_limit,
         ))
     except WhatIfError as error:
         raise _whatif_error(error) from error
 
 
 @app.get("/api/whatif/runs/{run_id}")
-def whatif_get_run(run_id: str, bottleneck_limit: Optional[int] = None):
+def whatif_get_run(run_id: str, machine_limit: Optional[int] = None):
     try:
         return _planning_response(
-            whatif_service.get_run(run_id).to_dict(bottleneck_limit=bottleneck_limit)
+            whatif_service.get_run(run_id).to_dict(machine_limit=machine_limit)
         )
     except WhatIfError as error:
         raise _whatif_error(error) from error
@@ -6491,13 +6687,22 @@ def whatif_apply_scenario(scenario_id: str, req: WhatIfApplyReq):
 
 
 @app.get("/api/query/planning/resources/search")
-def planning_resources_search(entity_type: str = "machine", q: str = "", limit: int = 20):
+def planning_resources_search(
+    entity_type: str = "machine",
+    q: str = "",
+    limit: int = 20,
+    scenario_id: Optional[str] = None,
+):
     """资源侧只读检索（机器 / 机器类型 / 工装 / 人员）。
 
     Agent 要写出合法的 what-if patch，必须先拿到现有资源的 id、类型和班次模板——
     订单/工序检索（planning_orders_search 等）覆盖不到这一层。
+
+    给了 scenario_id 就查该场景**改完之后**的实体状态。这是必需的：describe 返回的
+    changes 只是 patch 回放，多条改动叠加时回放不等于最终态，Agent 无从核对自己改对
+    了没有，只能瞎猜。
     """
-    current_shop = _active_shop()
+    current_shop = _scenario_shop(scenario_id) if scenario_id else _active_shop()
     if current_shop is None:
         raise HTTPException(400, detail={
             "ok": False,
@@ -6546,10 +6751,18 @@ def planning_resources_search(entity_type: str = "machine", q: str = "", limit: 
         })
     return _planning_response({
         "entity_type": entity_type,
+        "scenario_id": scenario_id,
         "total": len(items),
         "truncated": len(items) > bounded,
         "items": items[:bounded],
     })
+
+
+def _scenario_shop(scenario_id: str):
+    try:
+        return whatif_service.scenario_shop(whatif_service.require_scenario(scenario_id))
+    except WhatIfError as error:
+        raise _whatif_error(error) from error
 
 
 def _shift_summary(resource) -> dict:

@@ -302,6 +302,32 @@ class ResourceSearchTests(WhatIfApiTests):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["detail"]["error"]["code"], "INVALID_ARGUMENT")
 
+    def test_scenario_search_reads_the_patched_state(self):
+        """Agent 打完 patch 必须能核对改动是否真落到了目标机器上。"""
+        scenario_id = self.client.post(
+            "/api/whatif/scenarios", json={"name": "两台加夜班"}).json()["data"]["scenario_id"]
+        self.client.post(f"/api/whatif/scenarios/{scenario_id}/patches", json={"patches": [
+            {"op": "update", "entity": "machine", "id": "M-C1",
+             "values": {"shifts": "0/8/10;0/20/8"}},
+        ]})
+
+        payload = self.client.get("/api/query/planning/resources/search", params={
+            "entity_type": "machine", "scenario_id": scenario_id,
+        }).json()["data"]
+
+        self.assertEqual(payload["scenario_id"], scenario_id)
+        patched = next(item for item in payload["items"] if item["machine_id"] == "M-C1")
+        self.assertEqual(patched["shifts_per_day"], 2)
+        # 未点名的机器保持原样，证明 where/id 选择器没有误伤。
+        untouched = next(item for item in payload["items"] if item["machine_id"] == "M-C2")
+        self.assertEqual(untouched["shifts_per_day"], 1)
+
+    def test_scenario_search_rejects_an_unknown_scenario(self):
+        response = self.client.get("/api/query/planning/resources/search", params={
+            "entity_type": "machine", "scenario_id": "SC-nope",
+        })
+        self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

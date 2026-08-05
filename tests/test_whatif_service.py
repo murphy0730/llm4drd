@@ -427,9 +427,9 @@ class BottleneckMachineTests(WhatIfServiceTestCase):
     def test_results_rank_machines_by_utilization_with_names(self):
         run = self.run_scenario(self.service.create_scenario("现状"), ["ATC"])
 
-        machines = run.results[0]["bottleneck_machines"]
+        machines = run.results[0]["machine_utilization_ranking"]
         self.assertTrue(machines)
-        utilizations = [item["utilization"] for item in machines]
+        utilizations = [item["full_horizon_utilization"] for item in machines]
         self.assertEqual(utilizations, sorted(utilizations, reverse=True))
         self.assertTrue(all(item["machine_name"] for item in machines))
         cutter = next(item for item in machines if item["machine_id"] == "M-C1")
@@ -447,7 +447,7 @@ class BottleneckMachineTests(WhatIfServiceTestCase):
         run = self.run_scenario(self.service.require_scenario(scenario.scenario_id), ["ATC"])
 
         added = next(
-            item for item in run.results[0]["bottleneck_machines"]
+            item for item in run.results[0]["machine_utilization_ranking"]
             if item["machine_id"] == "M-C3"
         )
         self.assertEqual(added["machine_name"], "Cutter 3")
@@ -456,31 +456,59 @@ class BottleneckMachineTests(WhatIfServiceTestCase):
 
     def test_to_dict_truncates_to_the_requested_limit(self):
         run = self.run_scenario(self.service.create_scenario("截断"), ["ATC"])
-        stored = len(run.results[0]["bottleneck_machines"])
+        stored = len(run.results[0]["machine_utilization_ranking"])
         self.assertGreater(stored, 1)
 
-        payload = run.to_dict(bottleneck_limit=1)
+        payload = run.to_dict(machine_limit=1)
 
-        self.assertEqual(payload["bottleneck_limit"], 1)
-        self.assertEqual(len(payload["results"][0]["bottleneck_machines"]), 1)
+        self.assertEqual(payload["machine_limit"], 1)
+        self.assertEqual(len(payload["results"][0]["machine_utilization_ranking"]), 1)
         # 截断只发生在输出上，原始结果仍是全量，换个 limit 还能再取。
-        self.assertEqual(len(run.results[0]["bottleneck_machines"]), stored)
+        self.assertEqual(len(run.results[0]["machine_utilization_ranking"]), stored)
 
     def test_to_dict_defaults_to_twenty(self):
         run = self.run_scenario(self.service.create_scenario("默认"), ["ATC"])
 
-        self.assertEqual(run.to_dict()["bottleneck_limit"], 20)
+        self.assertEqual(run.to_dict()["machine_limit"], 20)
 
-    def test_compare_runs_carries_bottleneck_machines(self):
+    def test_compare_runs_carries_machine_utilization_ranking(self):
         run = self.run_scenario(self.service.create_scenario("对比"), ["ATC"])
 
-        payload = self.service.compare_runs([run.run_id], ["makespan"], bottleneck_limit=2)
+        payload = self.service.compare_runs([run.run_id], ["makespan"], machine_limit=2)
 
-        self.assertEqual(payload["bottleneck_limit"], 2)
-        self.assertEqual(len(payload["entries"][0]["bottleneck_machines"]), 2)
+        self.assertEqual(payload["machine_limit"], 2)
+        self.assertEqual(len(payload["entries"][0]["machine_utilization_ranking"]), 2)
         # 瓶颈是逐机明细，不能混进标量 KPI 的对比口径。
-        self.assertNotIn("bottleneck_machines", payload["entries"][0]["values"])
-        self.assertNotIn("bottleneck_machines", payload["entries"][0]["deltas"])
+        self.assertNotIn("machine_utilization_ranking", payload["entries"][0]["values"])
+        self.assertNotIn("machine_utilization_ranking", payload["entries"][0]["deltas"])
+
+
+class ScenarioShopTests(WhatIfServiceTestCase):
+    """describe 的 changes 是改动回放，核对最终态得看物化出来的实体本身。"""
+
+    def test_reflects_the_final_state_after_stacked_patches(self):
+        scenario = self.service.create_scenario("先全员白班，再给一台加夜班")
+        self.service.add_patches(scenario, [
+            {"op": "update", "entity": "machine", "where": {"type_id": "cut"},
+             "values": {"shifts": "0/8/10"}},
+            {"op": "update", "entity": "machine", "id": "M-C1",
+             "values": {"shifts": "0/8/10;0/20/8"}},
+        ])
+
+        shop = self.service.scenario_shop(scenario)
+
+        # 后打的 patch 必须覆盖前一条，且只覆盖 M-C1。
+        self.assertEqual(len(shop.machines["M-C1"].shifts), 2)
+        self.assertEqual(len(shop.machines["M-C2"].shifts), 1)
+
+    def test_rejects_a_scenario_built_on_an_older_instance(self):
+        scenario = self.service.create_scenario("过期场景")
+        scenario.base_instance_version -= 1
+
+        with self.assertRaises(WhatIfError) as caught:
+            self.service.scenario_shop(scenario)
+
+        self.assertEqual(caught.exception.code, "WHATIF_SCENARIO_STALE")
 
 
 if __name__ == "__main__":

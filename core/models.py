@@ -71,6 +71,36 @@ class Downtime:
         return max(0.0, self.end_time - self.start_time)
 
 
+def _clip_windows(
+    windows: tuple[tuple[float, float], ...],
+    start_time: float,
+    end_time: float,
+) -> list[tuple[float, float]]:
+    """升序不相交窗口与 [start_time, end_time) 的交集。"""
+    if end_time <= start_time:
+        return []
+    clipped: list[tuple[float, float]] = []
+    for window_start, window_end in windows:
+        if window_end <= start_time:
+            continue
+        if window_start >= end_time:
+            break
+        overlap_start = max(start_time, window_start)
+        overlap_end = min(end_time, window_end)
+        if overlap_end > overlap_start:
+            clipped.append((overlap_start, overlap_end))
+    return clipped
+
+
+def _overlap_total(
+    windows: tuple[tuple[float, float], ...],
+    start_time: float,
+    end_time: float,
+) -> float:
+    """升序不相交窗口与 [start_time, end_time) 的交集总长。"""
+    return sum(end - start for start, end in _clip_windows(windows, start_time, end_time))
+
+
 @lru_cache(maxsize=256)
 def _compile_calendar_windows(
     shifts: tuple[Shift, ...],
@@ -280,19 +310,28 @@ class CalendarResourceMixin:
 
     def available_time_between(self, start_time: float, end_time: float) -> float:
         self._ensure_calendar_cache()
-        if end_time <= start_time:
-            return 0.0
-        total = 0.0
-        for window_start, window_end in self._calendar_available_windows:
-            if window_end <= start_time:
-                continue
-            if window_start >= end_time:
-                break
-            overlap_start = max(start_time, window_start)
-            overlap_end = min(end_time, window_end)
-            if overlap_end > overlap_start:
-                total += overlap_end - overlap_start
-        return total
+        return _overlap_total(self._calendar_available_windows, start_time, end_time)
+
+    def available_windows_between(
+        self, start_time: float, end_time: float
+    ) -> list[tuple[float, float]]:
+        """可用窗口与 [start_time, end_time) 的交集。
+
+        延误归因要把"占机区间"与可用窗口求交（跨班次的工序，墙钟跨度远大于真实占机），
+        光有 available_time_between 的总量做不到，必须拿到窗口本身。
+        """
+        self._ensure_calendar_cache()
+        return _clip_windows(self._calendar_available_windows, start_time, end_time)
+
+    def shift_time_between(self, start_time: float, end_time: float) -> float:
+        """区间内的排班时长——只扣班次外，**不扣停机**。
+
+        与 available_time_between 之差即为停机吃掉的班内工时，延误归因据此把
+        “没排班”和“设备停机”分成两笔账（无班次日历时视为全天排班）。
+        """
+        self._ensure_calendar_cache()
+        windows = self._calendar_shift_windows or ((0.0, float("inf")),)
+        return _overlap_total(windows, start_time, end_time)
 
 
 @dataclass

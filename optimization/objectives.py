@@ -175,20 +175,24 @@ OBJECTIVE_SPECS: dict[str, ObjectiveSpec] = {
 }
 
 
-BOTTLENECK_LIMIT_DEFAULT = 20
-BOTTLENECK_LIMIT_MAX = 50
+MACHINE_RANKING_LIMIT_DEFAULT = 20
+MACHINE_RANKING_LIMIT_MAX = 50
 
 
-def rank_bottleneck_machines(
+def rank_machines_by_utilization(
     machine_utilization: dict[str, float],
     shop: ShopFloor,
     limit: int | None = None,
 ) -> list[dict]:
-    """按利用率降序列出机器，附带名称与是否关键类型。
+    """按全周期利用率降序列出机器，附带名称与是否关键类型。
 
-    Agent 问「哪台机器是瓶颈」时，光给 bottleneck_machine_ids 那串 id 判断不了紧张
-    程度；这里把利用率数值和关键类型一并带出。同利用率时按 id 兜底排序，保证同一份
-    数据每次返回的顺序一致。
+    **这是负荷排行榜，不是瓶颈归因。** 它对全部机器排序（默认取前 20，小车间等于
+    全部上榜），既不看订单有没有延误，也不看机器是否真的卡住了谁——照它回答「哪台
+    机器是瓶颈」必然出错。瓶颈问题走 api/delay_attribution.py。
+
+    利用率口径是**全周期**（busy / 计划总跨度，分母含非工作时间），因此只上白班的
+    机器数值天然偏低，不能与活跃窗口利用率混用。同利用率时按 id 兜底排序，保证同一
+    份数据每次返回的顺序一致。
     """
     ranked = sorted(machine_utilization.items(), key=lambda item: (-float(item[1]), item[0]))
     if limit is not None:
@@ -203,20 +207,21 @@ def rank_bottleneck_machines(
             "type_id": machine.type_id if machine else "",
             "type_name": machine_type.name if machine_type else "",
             "is_critical": bool(machine_type.is_critical) if machine_type else False,
-            "utilization": round(float(utilization), 4),
+            "full_horizon_utilization": round(float(utilization), 4),
+            "utilization_scope": "full_horizon",
         })
     return items
 
 
-def bounded_bottleneck_limit(value: object) -> int:
+def bounded_machine_ranking_limit(value: object) -> int:
     """把调用方给的条数钳到 1..50，缺省或非法值回落到 20。"""
     if value is None:
-        return BOTTLENECK_LIMIT_DEFAULT
+        return MACHINE_RANKING_LIMIT_DEFAULT
     try:
         parsed = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return BOTTLENECK_LIMIT_DEFAULT
-    return max(1, min(parsed, BOTTLENECK_LIMIT_MAX))
+        return MACHINE_RANKING_LIMIT_DEFAULT
+    return max(1, min(parsed, MACHINE_RANKING_LIMIT_MAX))
 
 
 def list_objectives(available_only: bool = True) -> list[ObjectiveSpec]:

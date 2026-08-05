@@ -90,7 +90,75 @@ class PlanningQueryApiTests(unittest.TestCase):
             "/api/query/planning/operation/{operation_id}",
             "/api/query/planning/rules",
             "/api/command/planning/run-rule",
+            "/api/query/planning/bottleneck",
+            "/api/query/planning/order/{order_id}/delay",
         }.issubset(paths))
+
+    def test_bottleneck_requires_a_solution_and_suggests_the_available_ones(self) -> None:
+        """瓶颈随方案而变，不给默认值；但错误里要把可选方案递到手上。"""
+        with self.assertRaises(HTTPException) as caught:
+            server.planning_bottleneck()
+
+        error = caught.exception.detail["error"]
+        self.assertEqual(error["code"], "SOLUTION_REQUIRED")
+        self.assertEqual(
+            [item["solution_id"] for item in error["suggestions"]], ["S-1"]
+        )
+        self.assertTrue(error["suggestions"][0]["solution_name"])
+        self.assertTrue(error["suggestions"][0]["category_label"])
+
+    def test_bottleneck_attributes_waiting_to_causes(self) -> None:
+        payload = server.planning_bottleneck(solution_id="S-1")
+
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertEqual(data["solution_id"], "S-1")
+        self.assertEqual(
+            set(data["wait_breakdown"]),
+            {"capacity_bound", "dispatch_bound", "off_shift", "downtime", "idle"},
+        )
+        # 口径说明必须随 payload 一起走，别让 Agent 又拿利用率榜当瓶颈。
+        self.assertIn("machine_utilization_ranking）不能用来回答瓶颈问题", data["method_note"])
+
+    def test_bottleneck_rejects_unknown_solution(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            server.planning_bottleneck(solution_id="S-NOPE")
+
+        self.assertEqual(caught.exception.detail["error"]["code"], "SOLUTION_NOT_FOUND")
+
+    def test_order_delay_explains_a_single_order(self) -> None:
+        payload = server.planning_order_delay("O-1", solution_id="S-1")
+
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertEqual(data["order_id"], "O-1")
+        self.assertIn("inevitable_tardiness_hours", data)
+        self.assertEqual(
+            set(data["attribution"]),
+            {"capacity_bound", "dispatch_bound", "off_shift", "downtime", "idle"},
+        )
+
+    def test_order_delay_rejects_unknown_order(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            server.planning_order_delay("O-NOPE", solution_id="S-1")
+
+        self.assertEqual(caught.exception.detail["error"]["code"], "ORDER_NOT_FOUND")
+
+    def test_truncated_schedule_is_rejected_not_analysed(self) -> None:
+        """剪过的 payload 上算归因是垃圾——大批工序会被误当成"没排入"。"""
+        for payload in server._hybrid_tasks["task-1"].values():
+            if isinstance(payload, dict) and payload.get("solutions"):
+                payload["solutions"][0]["schedule_truncated"] = True
+
+        for call in (
+            lambda: server.planning_bottleneck(solution_id="S-1"),
+            lambda: server.planning_order_delay("O-1", solution_id="S-1"),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                call()
+            self.assertEqual(
+                caught.exception.detail["error"]["code"], "SCHEDULE_TRUNCATED"
+            )
 
     def test_rules_endpoint_lists_builtin_rules(self) -> None:
         payload = server.planning_rules()

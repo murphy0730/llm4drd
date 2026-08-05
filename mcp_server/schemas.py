@@ -9,15 +9,25 @@ _SOLUTION_IDS = {
     "uniqueItems": True,
     "description": "要比较的方案 ID；省略时按评审页顺序取前 4 个（含基线方案）",
 }
-_BOTTLENECK_LIMIT = {
+_MACHINE_LIMIT = {
     "type": "integer",
     "minimum": 1,
     "maximum": 50,
     "description": (
-        "返回几台瓶颈机器（按利用率降序）；省略时取前 20 台。"
-        "返回的 bottleneck_machines 每项含机器名、所属类型、是否关键类型和利用率。"
+        "负荷排行榜返回几台机器（按全周期利用率降序）；省略时取前 20 台。"
+        "返回的 machine_utilization_ranking 每项含机器名、所属类型、是否关键类型，"
+        "以及 full_horizon_utilization（口径：占用时长 / 计划总跨度，分母含非工作时间）。"
     ),
 }
+
+# 排行榜与瓶颈是两回事，三个工具的描述里反复申明一次，避免 Agent 拿排名当归因。
+_RANKING_CAVEAT = (
+    "machine_utilization_ranking 是**全体机器的负荷排行榜**，不是瓶颈。"
+    "它对所有机器排序（小车间等于全部上榜），既不看订单是否延误，也不看机器是否真的卡住了谁；"
+    "而且用的是全周期口径，只上白班的机器数值天然偏低。"
+    "「哪台机器是瓶颈」「产能够不够」用 diagnose_bottleneck；"
+    "「某个订单为什么晚了」用 explain_order_delay。两者都不要用这张榜。"
+)
 _BUILTIN_RULE_NAMES = [
     "EDD", "SPT", "LPT", "CR", "ATC", "FIFO", "MST", "PRIORITY",
     "KIT_AWARE", "BOTTLENECK", "COMPOSITE",
@@ -60,11 +70,13 @@ TOOL_DEFINITIONS = [
     {
         "name": "get_planning_overview",
         "description": (
-            "查询排产概览与全部可选方案：基线方案、优化求解出的候选方案、以及参考方案"
-            "（精确求解 / 启发式规则），并给出各方案的总延误和完工跨度。"
-            "每个方案的 category 标明它属于哪一类；返回的 solution_name 与方案评审界面一致，"
-            "solution_id 仅作为后续查询标识。"
-            "适用于：现在有哪些方案、有多少候选方案、各方案总延误分别是多少。"
+            "查询排产概览与**全部**可选方案。solutions 数组已经包含了所有方案，"
+            "**solution_count 才是方案总数**；candidate_count / baseline_count / reference_count "
+            "只是按来源拆分的分项计数，任何一项都不等于总数。"
+            "\n每项的 category_label 已给出中文分类（基线方案 / 优化候选方案 / 精确参考方案 / "
+            "启发式参考方案），向用户罗列方案时应逐条列出、不要只报某一类；"
+            "solution_name 与方案评审界面一致，solution_id 仅作为后续查询标识。"
+            "\n适用于：现在总共有哪些方案、各方案总延误与完工跨度分别是多少。"
         ),
         "inputSchema": {
             "type": "object",
@@ -78,8 +90,10 @@ TOOL_DEFINITIONS = [
             "比较一个或多个排产方案的指定指标，最多比较 4 个方案。"
             "省略 solution_ids 时按评审页顺序取前 4 个（基线方案在最前，作为对照）。"
             "面向用户展示时使用返回的 solution_name，不使用内部 solution_id 作为方案名。"
-            "每个方案同时返回 bottleneck_machines（按利用率降序的瓶颈机器），"
-            "回答「哪台机器是瓶颈」用它，不要用 metric_keys。"
+            "\nmetric_values 是**方案级全局 KPI**（metric_scope=solution_global），"
+            "machine_utilization_ranking 里的数值是**单机指标**（ranking_scope=per_machine）——"
+            "两者口径不同，不要把全局 KPI 当成某台机器的数值报给用户。"
+            "\n" + _RANKING_CAVEAT
         ),
         "inputSchema": {
             "type": "object",
@@ -91,7 +105,7 @@ TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "uniqueItems": True,
                 },
-                "bottleneck_limit": _BOTTLENECK_LIMIT,
+                "machine_limit": _MACHINE_LIMIT,
             },
             "additionalProperties": False,
         },
@@ -103,6 +117,10 @@ TOOL_DEFINITIONS = [
             "资源类型会返回 type_id 与现有班次串，是写 what-if 改动前必须先拿到的现状信息——"
             "不要凭空编造机器编号、机器类型或班次格式。"
             "查资源时 query 可留空表示全量列出。"
+            "\n带上 scenario_id 就查该场景**改完之后**的资源状态（仅资源类型有效）。"
+            "打完 patch 后应当用它核对改动是否真的落到了目标机器上——"
+            "describe_whatif_scenario 的 changes 只是改动回放，多条改动叠加时并不等于最终态，"
+            "光看回放无法确认「这台机器现在到底几个班次」。"
         ),
         "inputSchema": {
             "type": "object",
@@ -113,9 +131,78 @@ TOOL_DEFINITIONS = [
                 },
                 "query": {"type": "string"},
                 "order_id": {"type": "string"},
+                "scenario_id": {
+                    "type": "string",
+                    "description": "查该场景改动生效后的资源状态；省略则查正式实例。仅资源类型支持",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
             },
             "required": ["entity_type"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "diagnose_bottleneck",
+        "description": (
+            "定位**真正卡住延误订单**的机器，回答「哪台机器是瓶颈」「产能不够还是工时不够」。"
+            "问的是**某一个订单**为什么晚，用 explain_order_delay。"
+            "\n口径：只看延误订单的工序，逐道算它从可开工到实际开工等了多久，再按成因五分，"
+            "每一档对应一种处置手段——"
+            "capacity_bound（被分配的机器在干别的活，且**同期其他可用机器也都忙**，这才是产能不足，**加机台有用**）、"
+            "dispatch_bound（被分配的机器忙，但同期有其他可用机器空着，是**选机/派工问题，加机台没用**，"
+            "要改派工规则或放宽工序的可用机器范围）、"
+            "off_shift（那段时间没排班，是工时不足，加班次有用）、downtime（设备停机，是检修计划问题）、"
+            "idle（被分配的机器空着却没开工，卡在工装/人员/前置资源）。"
+            "\n先看顶层 wait_breakdown 判断这次延误主要该怪谁，再看 machines 里按 "
+            "capacity_wait_hours 降序的机器。**capacity 高才是扩产能的理由；dispatch 高时加机器是白花钱。**"
+            "\n若返回里 unscheduled_order_count 或 partially_scheduled_order_count 非零，"
+            "先把这些订单报给用户——它们压根没排进去，比已知延误更严重，且不在等待归因里。"
+            "\n**不要**用 compare_planning_solutions 的利用率排行榜回答瓶颈问题——"
+            "那是全体机器的负荷排名，与订单延误无关。"
+            "\n瓶颈随方案而变，solution_id 必须指定；不知道有哪些方案就先调 get_planning_overview，"
+            "或者直接调用本工具，错误返回的 suggestions 里会带上全部可选方案。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "solution_id": {
+                    "type": "string",
+                    "description": "要诊断的方案；不同方案排法不同、瓶颈也不同，必须指定",
+                },
+                "task_id": _TASK_ID,
+                "machine_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "返回几台机器（按 capacity_wait_hours 降序）；省略取前 20 台",
+                },
+            },
+            "required": ["solution_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "explain_order_delay",
+        "description": (
+            "解释**某一个订单**为什么延误，回答「这单为什么晚了」「能不能救」。"
+            "问的是全车间「哪台机器是瓶颈」，用 diagnose_bottleneck。"
+            "\n先看 planned：为 false 说明这单没完整排进该方案，此时 tardiness_hours 是 null，"
+            "**不等于「未延误」**——排不进去比延误更严重，应先报告用户并查原因。"
+            "\n再看 inevitable_tardiness_hours：那是**即使资源无限也躲不掉**的延误"
+            "（工艺链本身就比交期长），这部分加机器加班次都没用，只能改交期或改工艺。"
+            "剩下的才是资源竞争造成的，按 capacity_bound / dispatch_bound / off_shift / downtime / idle "
+            "五分列在 attribution 里（含义与 diagnose_bottleneck 一致）；"
+            "top_waits 逐道列出等得最久的工序及其卡点机器。"
+            "\nsolution_id 必须指定——同一订单在不同方案下的延误成因可能完全不同。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "minLength": 1},
+                "solution_id": {"type": "string", "minLength": 1},
+                "task_id": _TASK_ID,
+            },
+            "required": ["order_id", "solution_id"],
             "additionalProperties": False,
         },
     },
@@ -284,13 +371,14 @@ TOOL_DEFINITIONS = [
         "name": "get_whatif_run",
         "description": (
             "查询一次 what-if 推演的状态与结果，用于 run_whatif_planning 返回 running 时轮询。"
-            "每条结果带 bottleneck_machines（按利用率降序的瓶颈机器，含改动后新增的机器）。"
+            "每条结果带 machine_utilization_ranking（全周期利用率降序的负荷榜，含改动后新增的机器）。"
+            + _RANKING_CAVEAT
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "run_id": {"type": "string", "minLength": 1},
-                "bottleneck_limit": _BOTTLENECK_LIMIT,
+                "machine_limit": _MACHINE_LIMIT,
             },
             "required": ["run_id"],
             "additionalProperties": False,
@@ -302,7 +390,8 @@ TOOL_DEFINITIONS = [
             "对比多次 what-if 推演的 KPI，可跨场景、跨规则。第一个 run 作为基准，"
             "其余给出绝对差、百分比差，以及 better 字段（已按该指标是越小越好还是越大越好判定）。"
             "面向用户叙述时请用 better 而不是自己猜方向。"
-            "每条结果还带 bottleneck_machines，用它看改动后瓶颈转移到了哪台机器。"
+            "每条结果还带 machine_utilization_ranking，用它看改动后各机器负荷怎么变。"
+            + _RANKING_CAVEAT
         ),
         "inputSchema": {
             "type": "object",
@@ -320,7 +409,7 @@ TOOL_DEFINITIONS = [
                     "uniqueItems": True,
                     "description": "要比的指标；省略时用 总延迟 / Makespan / 主订单延误时长",
                 },
-                "bottleneck_limit": _BOTTLENECK_LIMIT,
+                "machine_limit": _MACHINE_LIMIT,
             },
             "required": ["run_ids"],
             "additionalProperties": False,
@@ -350,3 +439,24 @@ TOOL_DEFINITIONS = [
         },
     },
 ]
+
+
+# 副作用此前只写在描述里，靠 Agent 自觉；annotations 让宿主能机器化地拦截。
+# 未列出的工具默认只读。写场景内存的几个不算 destructive——它们碰不到数据库。
+_WRITE_ANNOTATIONS = {
+    "run_rule_planning": {"destructiveHint": True, "idempotentHint": True},
+    "create_whatif_scenario": {"destructiveHint": False, "idempotentHint": False},
+    "apply_whatif_patch": {"destructiveHint": False, "idempotentHint": False},
+    "revert_whatif_patch": {"destructiveHint": False, "idempotentHint": False},
+    "run_whatif_planning": {"destructiveHint": False, "idempotentHint": False},
+    "apply_whatif_to_instance": {"destructiveHint": True, "idempotentHint": False},
+}
+
+for _tool in TOOL_DEFINITIONS:
+    _write = _WRITE_ANNOTATIONS.get(_tool["name"])
+    _tool["annotations"] = {
+        "readOnlyHint": _write is None,
+        "openWorldHint": False,
+        **(_write or {"idempotentHint": True}),
+    }
+del _tool, _write

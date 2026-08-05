@@ -70,6 +70,7 @@ const PRIMARY_KPI_LABELS = {
   personnel_utilization: "人员利用率",
   assembly_sync_penalty: "装配同步惩罚",
   tardy_job_count: "延误任务数",
+  main_order_tardy_count: "主订单延误数",
   main_order_tardy_total_time: "主订单延误总时长",
   main_order_tardy_ratio: "主订单延误比例",
   bottleneck_load_balance: "瓶颈负载均衡",
@@ -111,6 +112,7 @@ const NAV_MAP = {
   "optimize-launch": { page: "optimize", requiresScene: true },
   "solution-review": { page: "review", reviewTab: "library", requiresScene: true },
   "pareto-library": { page: "review", reviewTab: "library", requiresScene: true },
+  "insertion-simulation": { page: "review", reviewTab: "insertion", requiresScene: true },
   "exact-reference": { page: "review", reviewTab: "exact", requiresScene: true },
   "ai-review": { page: "review", reviewTab: "ai", requiresScene: true },
   "llm-config": { page: "llm" },
@@ -147,6 +149,8 @@ const app = {
   graphOrderOptions: [],
   graphView: defaultGraphView(),
   cyGraphInstance: null,
+  // 用户手动拖放过的节点坐标（key = 节点 id），重渲染时覆盖自动布局结果；「重置」按钮清空
+  graphNodePositions: {},
   simResult: null,
   simStatus: null,
   simElapsedTimer: null,
@@ -168,6 +172,23 @@ const app = {
   health: null,
   systemTab: "llm",
   reviewTab: "library",
+  insertion: {
+    baseKey: "",
+    policy: "frozen",
+    busy: false,
+    pasteText: "",
+    result: null,
+    orders: [{
+      order_id: "URGENT-001", order_name: "临时插单", release_time: "",
+      expected_due_date: "", main_task_id: "URG-T-MAIN",
+    }],
+    operations: [{
+      order_id: "URGENT-001", op_id: "URG-OP-01", task_id: "URG-T-MAIN", op_name: "",
+      process_type: "", processing_time_hrs: 1, turnover_time_hrs: 0,
+      predecessor_ops: "", predecessor_tasks: "", eligible_machine_ids: "",
+      required_tooling_types: "", required_personnel_skills: "",
+    }],
+  },
   workflowStep: 1,
   filters: { orders: "", operations: "", resources: "", downtime: "" },
   reviewSelection: [],
@@ -442,6 +463,15 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task_id: taskId, solution_id: solutionId }),
     });
+  },
+  evaluateInsertion(payload) { return this.json("/insertion/evaluate", "POST", payload); },
+  downloadInsertionTemplate() { return this.request("/insertion/template"); },
+  getInsertionSchedule(runId) { return this.json(`/insertion/runs/${encodeURIComponent(runId)}/schedule`); },
+  exportInsertion(runId) { return this.request(`/insertion/runs/${encodeURIComponent(runId)}/export`); },
+  importInsertion(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    return this.request("/insertion/import", { method: "POST", body: formData });
   },
   getExactObjectives() { return this.json("/exact/objectives"); },
   createExactReference(payload) { return this.json("/optimize/exact-reference", "POST", payload); },
@@ -2285,6 +2315,7 @@ function buildGanttData(entries, options = {}) {
       start: Number(item.start ?? item.start_time ?? 0),
       end: Number(item.end ?? item.end_time ?? 0),
       status: normalizeScheduleStatus(item.status),
+      inserted: Boolean(item.is_inserted),
       statusLabel: item.status_label || (normalizeScheduleStatus(item.status) === "completed" ? "已完成" : normalizeScheduleStatus(item.status) === "processing" ? "进行中" : "未来排产"),
     }))
     .filter((item) => !Number.isNaN(item.start) && !Number.isNaN(item.end) && item.end > item.start);
@@ -2408,7 +2439,7 @@ function buildGanttData(entries, options = {}) {
         start: ganttOffsetToISO(item.start, base),
         end: ganttOffsetToISO(item.end, base),
         content: escapeHtml(item.opId),
-        className: `status-${item.status}`,
+        className: `status-${item.status}${item.inserted ? " inserted-order" : ""}`,
         style: `background:${ganttStatusBackground(orderColorFor(item.orderId), item.status)};`,
         title: ganttItemTitle(item),
       });
@@ -2489,7 +2520,7 @@ function buildGanttData(entries, options = {}) {
       start: ganttOffsetToISO(item.start, base),
       end: ganttOffsetToISO(item.end, base),
       content: escapeHtml(item.opId),
-      className: `status-${item.status}`,
+      className: `status-${item.status}${item.inserted ? " inserted-order" : ""}`,
       style: `background:${ganttStatusBackground(orderColorFor(item.orderId), item.status)};`,
       title: ganttItemTitle(item),
     });
@@ -2889,6 +2920,8 @@ function resetGraphView(options = {}) {
     next.edgeGroups = { ...next.edgeGroups, ...(app.graphView.edgeGroups || {}) };
   }
   app.graphView = next;
+  // 视图重置意味着回到自动布局：丢弃手动摆放的坐标
+  app.graphNodePositions = {};
 }
 
 function normalizeGraphNode(node) {
@@ -4137,6 +4170,232 @@ function renderReviewAiTab() {
   `;
 }
 
+const INSERTION_KPI_PERCENT = new Set([
+  "critical_active_window_utilization", "tooling_utilization", "personnel_utilization",
+]);
+
+function insertionBaseOptions() {
+  const options = [];
+  const taskId = app.optimizeResult?.task_id || app.optimizeTaskId;
+  if (taskId) {
+    getReviewCandidates().forEach((candidate) => {
+      options.push({ value: `solution::${candidate.id}`, label: `${candidate.name} · ${candidateSourceTag(candidate).label}` });
+    });
+  }
+  if (asArray(app.simResult?.gantt).length) {
+    options.push({ value: "simulation", label: `当前规则仿真 · ${app.simResult.rule || app.simRule || "-"}` });
+  }
+  if (!options.some((item) => item.value === app.insertion.baseKey)) {
+    app.insertion.baseKey = options[0]?.value || "";
+  }
+  return options;
+}
+
+function collectInsertionForm() {
+  document.querySelectorAll("[data-insertion-order-row]").forEach((row) => {
+    const index = Number(row.dataset.insertionOrderRow);
+    if (!app.insertion.orders[index]) return;
+    row.querySelectorAll("[data-insertion-order-field]").forEach((input) => {
+      app.insertion.orders[index][input.dataset.insertionOrderField] = input.value;
+    });
+  });
+  document.querySelectorAll("[data-insertion-op-row]").forEach((row) => {
+    const index = Number(row.dataset.insertionOpRow);
+    if (!app.insertion.operations[index]) return;
+    row.querySelectorAll("[data-insertion-op-field]").forEach((input) => {
+      app.insertion.operations[index][input.dataset.insertionOpField] = input.value;
+    });
+  });
+  const base = el("insertion-base");
+  const policy = document.querySelector('[name="insertion-policy"]:checked');
+  const paste = el("insertion-paste-text");
+  if (base) app.insertion.baseKey = base.value;
+  if (policy) app.insertion.policy = policy.value;
+  if (paste) app.insertion.pasteText = paste.value;
+}
+
+function renderInsertionOrderTable() {
+  return `
+    <div class="insertion-table-shell">
+      <table class="insertion-editor-table order-table">
+        <thead><tr><th>订单 ID *</th><th>订单名称</th><th>放行时间 *</th><th>期望交期</th><th>主任务令 ID *</th><th></th></tr></thead>
+        <tbody>${app.insertion.orders.map((order, index) => `
+          <tr data-insertion-order-row="${index}">
+            <td><input data-insertion-order-field="order_id" value="${escapeHtml(order.order_id || "")}" placeholder="URGENT-001"></td>
+            <td><input data-insertion-order-field="order_name" value="${escapeHtml(order.order_name || "")}" placeholder="临时插单"></td>
+            <td><input type="datetime-local" data-insertion-order-field="release_time" value="${escapeHtml(order.release_time || "")}"></td>
+            <td><input type="datetime-local" data-insertion-order-field="expected_due_date" value="${escapeHtml(order.expected_due_date || "")}"></td>
+            <td><input data-insertion-order-field="main_task_id" value="${escapeHtml(order.main_task_id || "")}" placeholder="单任务可自动推断"></td>
+            <td><button class="op-btn" type="button" data-action="remove-insertion-order" data-index="${index}" ${app.insertion.orders.length <= 1 ? "disabled" : ""}>删除</button></td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderInsertionOperationTable() {
+  const typeOptions = asArray(app.instanceDetails?.machine_types)
+    .map((item) => `<option value="${escapeHtml(item.id || item.type_id || "")}"></option>`).join("");
+  return `
+    <datalist id="insertion-process-types">${typeOptions}</datalist>
+    <div class="insertion-table-shell">
+      <table class="insertion-editor-table operation-table">
+        <thead><tr>
+          <th>订单 ID *</th><th>工序 ID *</th><th>任务令 ID *</th><th>工序名称</th><th>工艺类型 *</th>
+          <th>加工(h) *</th><th title="本工序完工后，后继工序需等待的自然时间">完工后周转(h)</th>
+          <th>前置工序</th><th>前置任务令</th><th>可作业机器</th><th>工装类型</th><th>人员技能</th><th></th>
+        </tr></thead>
+        <tbody>${app.insertion.operations.map((operation, index) => `
+          <tr data-insertion-op-row="${index}">
+            <td><input data-insertion-op-field="order_id" value="${escapeHtml(operation.order_id || "")}" placeholder="URGENT-001"></td>
+            <td><input data-insertion-op-field="op_id" value="${escapeHtml(operation.op_id || "")}" placeholder="URG-OP-01"></td>
+            <td><input data-insertion-op-field="task_id" value="${escapeHtml(operation.task_id || "")}" placeholder="URG-T-MAIN"></td>
+            <td><input data-insertion-op-field="op_name" value="${escapeHtml(operation.op_name || "")}"></td>
+            <td><input list="insertion-process-types" data-insertion-op-field="process_type" value="${escapeHtml(operation.process_type || "")}"></td>
+            <td><input type="number" min="0.001" step="0.1" data-insertion-op-field="processing_time_hrs" value="${escapeHtml(operation.processing_time_hrs ?? "")}"></td>
+            <td><input type="number" min="0" step="0.1" data-insertion-op-field="turnover_time_hrs" value="${escapeHtml(operation.turnover_time_hrs ?? 0)}"></td>
+            <td><input data-insertion-op-field="predecessor_ops" value="${escapeHtml(operation.predecessor_ops || "")}" placeholder="OP-01;OP-02"></td>
+            <td><input data-insertion-op-field="predecessor_tasks" value="${escapeHtml(operation.predecessor_tasks || "")}" placeholder="TASK-01"></td>
+            <td><input data-insertion-op-field="eligible_machine_ids" value="${escapeHtml(operation.eligible_machine_ids || "")}" placeholder="留空按工艺匹配"></td>
+            <td><input data-insertion-op-field="required_tooling_types" value="${escapeHtml(operation.required_tooling_types || "")}" placeholder="可选；分号分隔"></td>
+            <td><input data-insertion-op-field="required_personnel_skills" value="${escapeHtml(operation.required_personnel_skills || "")}" placeholder="可选；分号分隔"></td>
+            <td><button class="op-btn" type="button" data-action="remove-insertion-operation" data-index="${index}" ${app.insertion.operations.length <= 1 ? "disabled" : ""}>删除</button></td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
+function insertionKpiDisplay(key, value) {
+  if (value === null || value === undefined) return "-";
+  if (INSERTION_KPI_PERCENT.has(key)) return formatPercent(value);
+  return formatNumber(value, 2);
+}
+
+function renderInsertionResult() {
+  const result = app.insertion.result;
+  if (!result) return `<div class="empty-shell insertion-empty" id="insertion-result"><h3>尚未评估</h3><p>选择基准方案并录入订单工序后，运行最佳交期模拟。</p></div>`;
+  const conclusionLabel = { met: "可满足", missed: "不可满足", not_set: "未设置期望交期" };
+  return `
+    <div class="stack insertion-result" id="insertion-result">
+      <section class="insertion-result-band">
+        <div><span>保护校验</span><strong class="${result.existing_orders_protected ? "ok-text" : "danger-text"}">${result.existing_orders_protected ? "全部通过" : "存在违规"}</strong></div>
+        <div><span>插空 / 尾排</span><strong>${formatInt(result.gap_operation_count)} / ${formatInt(result.tail_operation_count)}</strong></div>
+        <div><span>移动原工序</span><strong>${formatInt(result.moved_operations)}</strong></div>
+        <div><span>求解状态</span><strong>${result.search_status === "optimal" ? "已证明最优" : "预算内当前最优"}</strong></div>
+        <p>${escapeHtml(result.search_note || "")} · 用时 ${formatDurationMs(result.elapsed_ms || 0)}</p>
+      </section>
+      <section class="surface-card">
+        <div class="card-head"><div><h3>新订单交期结论</h3><p>多订单按联合排产结果给出可承诺时间，不是互相独立的理论下界。</p></div><button class="btn btn-secondary" type="button" data-action="export-insertion-result">导出评估 Excel</button></div>
+        ${renderSimpleTable(
+          ["订单", "放行时间", "期望交期", "最佳交期", "流程时间", "结论"],
+          asArray(result.order_results).map((item) => [
+            `${escapeHtml(item.order_id)}${item.order_name && item.order_name !== item.order_id ? `<span class="cell-sub">${escapeHtml(item.order_name)}</span>` : ""}`,
+            escapeHtml(formatDateTime(item.release_at)),
+            escapeHtml(item.expected_due_at ? formatDateTime(item.expected_due_at) : "-"),
+            `<strong>${escapeHtml(formatDateTime(item.best_delivery_at))}</strong>`,
+            `${formatNumber(item.lead_time_hours, 1)}h`,
+            `<span class="chip ${item.conclusion === "met" ? "ok" : item.conclusion === "missed" ? "danger" : "neutral"}">${conclusionLabel[item.conclusion] || item.conclusion}</span>`,
+          ]),
+        )}
+      </section>
+      <section class="surface-card">
+        <div class="card-head"><div><h3>新工序插入明细</h3><p>机器、工装、人员均为本次联合可行性搜索的实际分配结果。</p></div></div>
+        ${renderSimpleTable(
+          ["订单 / 工序", "机器", "工装", "人员", "开始", "结束", "方式"],
+          asArray(result.inserted_schedule).map((entry) => [
+            `${escapeHtml(entry.order_id || "-")}<span class="cell-sub">${escapeHtml(entry.op_id || "-")}</span>`,
+            escapeHtml(entry.machine_name || entry.machine_id || "-"),
+            escapeHtml(asArray(entry.tooling_ids).join("；") || "-"),
+            escapeHtml(asArray(entry.personnel_ids).join("；") || "-"),
+            escapeHtml(formatTimelineLabel(entry.start)),
+            escapeHtml(formatTimelineLabel(entry.end)),
+            `<span class="chip ${entry.placement === "gap" ? "ok" : "neutral"}">${entry.placement === "gap" ? "插空" : entry.placement === "tail" ? "尾排" : "保护重排"}</span>`,
+          ]),
+        )}
+      </section>
+      ${renderTimeline(result.merged_schedule, {
+        title: "插单后合并甘特图",
+        canvasId: "gantt-insertion-result",
+        solutionIds: [result.run_id],
+      })}
+      ${result.schedule_truncated ? `<div class="notice warn">合并排程共 ${formatInt(result.schedule_total)} 条，当前甘特先展示前 2,000 条。<button class="link-btn" type="button" data-action="load-insertion-full-schedule">加载全量</button></div>` : ""}
+      <div class="grid-2 insertion-analysis-grid">
+        <section class="surface-card">
+          <div class="card-head"><div><h3>KPI 对比</h3><p>主目标置顶，其他指标沿用方案评审的统一计算口径。</p></div></div>
+          ${renderSimpleTable(
+            ["指标", "插单前", "插单后", "变化"],
+            asArray(result.kpis).map((item) => [
+              escapeHtml(PRIMARY_KPI_LABELS[item.key] || item.key),
+              insertionKpiDisplay(item.key, item.before),
+              insertionKpiDisplay(item.key, item.after),
+              insertionKpiDisplay(item.key, item.delta),
+            ]),
+          )}
+        </section>
+        <section class="surface-card">
+          <div class="card-head"><div><h3>现有订单保护校验</h3><p>原本超期的订单按“不进一步变差”校验。</p></div></div>
+          ${renderSimpleTable(
+            ["订单", "原完工", "新完工", "变化", "结果"],
+            asArray(result.existing_order_impact).slice(0, 40).map((item) => [
+              escapeHtml(item.order_id),
+              escapeHtml(formatTimelineLabel(item.before_completion)),
+              escapeHtml(formatTimelineLabel(item.after_completion)),
+              `${formatNumber(item.delta_hours, 1)}h`,
+              `<span class="chip ${item.protected ? "ok" : "danger"}">${item.protected ? "通过" : "违规"}</span>`,
+            ]),
+            { footer: asArray(result.existing_order_impact).length > 40 ? "仅展示前 40 个订单，完整明细请导出 Excel。" : "" },
+          )}
+        </section>
+      </div>
+    </div>`;
+}
+
+function renderReviewInsertionTab() {
+  const options = insertionBaseOptions();
+  if (!app.insertion.orders[0].release_time) {
+    const planStart = tryParseDate(app.instanceDetails?.plan_start_at);
+    const release = new Date(Math.max(Date.now(), planStart?.getTime?.() || 0));
+    app.insertion.orders[0].release_time = toDateTimeLocalValue(release);
+  }
+  return `
+    <div class="stack insertion-workbench">
+      <section class="surface-card insertion-control-strip">
+        <div class="insertion-control-main">
+          <label><span>基准排产方案</span><select id="insertion-base" ${options.length ? "" : "disabled"}>
+            ${options.length ? options.map((item) => `<option value="${escapeHtml(item.value)}" ${item.value === app.insertion.baseKey ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("") : `<option>暂无完整仿真或评审方案</option>`}
+          </select></label>
+          <fieldset class="insertion-policy"><legend>保护策略</legend>
+            <label class="policy-choice ${app.insertion.policy === "frozen" ? "on" : ""}"><input type="radio" name="insertion-policy" value="frozen" ${app.insertion.policy === "frozen" ? "checked" : ""}><strong>冻结排程插空</strong><small>现有工序完全不动</small></label>
+            <label class="policy-choice ${app.insertion.policy === "due_protected" ? "on" : ""}"><input type="radio" name="insertion-policy" value="due_protected" ${app.insertion.policy === "due_protected" ? "checked" : ""}><strong>交期保护重排</strong><small>允许调整待开工工序</small></label>
+          </fieldset>
+        </div>
+        <p>先最小化主订单延误数，再平衡关键资源活跃窗口利用率与平均流程时间。原本已超期的订单不得进一步变差。</p>
+      </section>
+
+      <section class="surface-card insertion-editor-section">
+        <div class="card-head"><div><h3>新订单</h3><p>支持一次联合评估多个订单；期望交期可不填，多个任务令时必须指定主任务令。</p></div><div class="row-ops"><button class="btn btn-secondary btn-xs" type="button" data-action="fill-insertion-demo">填充测试数据</button><button class="btn btn-ghost btn-xs" type="button" data-action="add-insertion-order">＋ 添加订单</button></div></div>
+        ${renderInsertionOrderTable()}
+      </section>
+
+      <section class="surface-card insertion-editor-section">
+        <div class="card-head"><div><h3>订单工序与资源要求</h3><p>每行一道工序；多个 ID 使用分号分隔。可作业机器留空时按工艺类型匹配。</p></div><button class="btn btn-ghost btn-xs" type="button" data-action="add-insertion-operation">＋ 添加工序</button></div>
+        ${renderInsertionOperationTable()}
+        <div class="insertion-input-actions">
+          <input id="insertion-file" type="file" accept=".xlsx,.xlsm,.csv,.tsv" hidden>
+          <button class="btn btn-secondary" type="button" data-action="trigger-insertion-import">导入 Excel / CSV</button>
+          <button class="btn btn-ghost" type="button" data-action="download-insertion-template">下载双表模板</button>
+          <details class="insertion-paste-panel">
+            <summary>粘贴 CSV / 表格文本</summary>
+            <textarea id="insertion-paste-text" rows="6" placeholder="粘贴带表头的 orders 或 operations 数据；支持制表符或逗号分隔">${escapeHtml(app.insertion.pasteText || "")}</textarea>
+            <div class="form-actions"><button class="btn btn-ghost btn-xs" type="button" data-action="apply-insertion-paste">解析并载入</button></div>
+          </details>
+          <span class="grow"></span>
+          <button class="btn btn-primary" type="button" data-action="run-insertion-evaluation" ${app.insertion.busy || !options.length ? "disabled" : ""}>${app.insertion.busy ? "正在联合求解…" : "运行最佳交期模拟"}</button>
+        </div>
+      </section>
+      ${renderInsertionResult()}
+    </div>`;
+}
+
 function clearReviewTimeline() {
   const entry = app.ganttInstances.find((item) => item.canvasId === "gantt-review-compare");
   if (!entry) return;
@@ -4203,6 +4462,7 @@ function renderReview() {
     <div class="review-tab-row">
       <div class="tabs">
         <button class="tab ${app.reviewTab === "library" ? "active" : ""}" type="button" data-review-tab="library">方案库</button>
+        <button class="tab ${app.reviewTab === "insertion" ? "active" : ""}" type="button" data-review-tab="insertion">插单模拟</button>
         <button class="tab ${app.reviewTab === "exact" ? "active" : ""}" type="button" data-review-tab="exact">精确冠军参考</button>
         <button class="tab ${app.reviewTab === "ai" ? "active" : ""}" type="button" data-review-tab="ai">AI 评审助手</button>
       </div>
@@ -4214,6 +4474,7 @@ function renderReview() {
   `;
   let pane = "";
   if (app.reviewTab === "library") pane = renderReviewLibraryTab();
+  if (app.reviewTab === "insertion") pane = renderReviewInsertionTab();
   if (app.reviewTab === "exact") pane = `<div class="stack">${renderReviewExactTab()}</div>`;
   if (app.reviewTab === "ai") pane = renderReviewAiTab();
   container.innerHTML = `
@@ -4801,8 +5062,6 @@ function renderInteractiveGraph() {
     nodeDegree.set(edge.target, (nodeDegree.get(edge.target) || 0) + 1);
   });
 
-  const selectedNode = graph.selectedNode;
-  const scope = graph.selectionScope || {};
   const orderOption = selectedGraphOrderOption();
   const orderEntityId = orderOption?.entity_id || entityIdFromGraphId(app.selectedGraphOrderId || "");
   const orderColor = orderColorFor(orderEntityId);
@@ -4860,6 +5119,73 @@ function renderInteractiveGraph() {
     </div>
   `;
 
+  return `
+    <div class="surface-card graph-workbench graph-v3">
+      <div class="graph-toolbar">
+        <div class="graph-mode">
+          <button class="${app.graphView.mode === "focus" ? "on" : ""}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
+          <button class="${app.graphView.mode === "all" ? "on" : ""}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
+        </div>
+        <span class="sep"></span>
+        <label class="graph-order-filter">按订单过滤
+          ${renderSingleSelectFilter({
+            id: "graph-order",
+            noun: "订单",
+            options: asArray(app.graphOrderOptions).map(normalizeGraphNode).map((o) => ({
+              id: o.entity_id || o.id,
+              label: (() => {
+                const e = o.entity_id || "";
+                const n = o.label && o.label !== e ? o.label : "";
+                return n ? `${e} · ${n}` : e;
+              })(),
+            })),
+            selectedId: orderEntityId || null,
+            onChange: async (id) => { await loadGraphOrder(id); return renderCurrentPage(); },
+          })}
+        </label>
+        <button class="btn btn-ghost btn-xs graph-rebuild-btn" type="button" data-action="build-graph">重新构建</button>
+      </div>
+      ${breadcrumb}
+      <div class="graph-filters">
+        <span class="ft">节点层级</span>
+        ${Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
+          <button class="fchip ${enabled ? "on" : "off"}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
+            <span class="fdot" style="background:${graphTypeColor(type)}"></span>${escapeHtml(graphTypeLabel(type))}<span class="fc">${formatInt(graph.typeCounts[type] || 0)}</span>
+          </button>
+        `).join("")}
+        <span class="ft" style="margin-left:14px">关系层级</span>
+        ${Object.entries(app.graphView.edgeGroups || {}).map(([group, enabled]) => `
+          <button class="fchip ${enabled ? "on" : "off"}" type="button" data-action="toggle-graph-edge-group" data-key="${escapeHtml(group)}">
+            ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}<span class="fc">${formatInt(graph.edgeGroupCounts[group] || 0)}</span>
+          </button>
+        `).join("")}
+      </div>
+      <div class="graph-main">
+        <div class="graph-canvas-wrap">
+          <div class="graph-cytoscape-canvas" data-graph-canvas></div>
+          <div class="graph-zoom-ctl">
+            <button class="btn btn-ghost btn-xs" type="button" data-action="fit-graph-view">适配</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="reset-graph-view">重置</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="zoom-graph-out">−</button>
+            <span class="zval" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="zoom-graph-in">＋</button>
+            <button class="btn btn-ghost btn-xs" type="button" data-action="toggle-graph-fullscreen">全屏</button>
+          </div>
+        </div>
+        <aside class="graph-detail-v3">
+          <div class="dh">节点详情与关系解释</div>
+          <div class="dbody">${renderGraphDetailBody(graph)}</div>
+        </aside>
+      </div>
+    </div>
+  `;
+}
+
+// 右侧「节点详情与关系解释」面板正文：只依赖选中节点，切换选中时可单独重渲染这一块，
+// 不必重建 cytoscape 实例（见 refreshGraphSelection）。
+function renderGraphDetailBody(graph) {
+  const selectedNode = graph.selectedNode;
+  const scope = graph.selectionScope || {};
   const selectionHighlights = buildGraphSelectionHighlightsV2(graph);
   const selectedSummary = selectedNode ? `
     <div class="graph-selected-summary" data-graph-selected-summary>
@@ -4944,61 +5270,6 @@ function renderInteractiveGraph() {
   ` : "";
 
   return `
-    <div class="surface-card graph-workbench graph-v3">
-      <div class="graph-toolbar">
-        <div class="graph-mode">
-          <button class="${app.graphView.mode === "focus" ? "on" : ""}" type="button" data-action="set-graph-mode" data-mode="focus">焦点邻域</button>
-          <button class="${app.graphView.mode === "all" ? "on" : ""}" type="button" data-action="set-graph-mode" data-mode="all">全关系视图</button>
-        </div>
-        <span class="sep"></span>
-        <label class="graph-order-filter">按订单过滤
-          ${renderSingleSelectFilter({
-            id: "graph-order",
-            noun: "订单",
-            options: asArray(app.graphOrderOptions).map(normalizeGraphNode).map((o) => ({
-              id: o.entity_id || o.id,
-              label: (() => {
-                const e = o.entity_id || "";
-                const n = o.label && o.label !== e ? o.label : "";
-                return n ? `${e} · ${n}` : e;
-              })(),
-            })),
-            selectedId: orderEntityId || null,
-            onChange: async (id) => { await loadGraphOrder(id); return renderCurrentPage(); },
-          })}
-        </label>
-        <button class="btn btn-ghost btn-xs graph-rebuild-btn" type="button" data-action="build-graph">重新构建</button>
-      </div>
-      ${breadcrumb}
-      <div class="graph-filters">
-        <span class="ft">节点层级</span>
-        ${Object.entries(app.graphView.nodeTypes || {}).map(([type, enabled]) => `
-          <button class="fchip ${enabled ? "on" : "off"}" type="button" data-action="toggle-graph-node-type" data-key="${escapeHtml(type)}">
-            <span class="fdot" style="background:${graphTypeColor(type)}"></span>${escapeHtml(graphTypeLabel(type))}<span class="fc">${formatInt(graph.typeCounts[type] || 0)}</span>
-          </button>
-        `).join("")}
-        <span class="ft" style="margin-left:14px">关系层级</span>
-        ${Object.entries(app.graphView.edgeGroups || {}).map(([group, enabled]) => `
-          <button class="fchip ${enabled ? "on" : "off"}" type="button" data-action="toggle-graph-edge-group" data-key="${escapeHtml(group)}">
-            ${escapeHtml(GRAPH_EDGE_GROUP_LABELS[group] || group)}<span class="fc">${formatInt(graph.edgeGroupCounts[group] || 0)}</span>
-          </button>
-        `).join("")}
-      </div>
-      <div class="graph-main">
-        <div class="graph-canvas-wrap">
-          <div class="graph-cytoscape-canvas" data-graph-canvas></div>
-          <div class="graph-zoom-ctl">
-            <button class="btn btn-ghost btn-xs" type="button" data-action="fit-graph-view">适配</button>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="reset-graph-view">重置</button>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="zoom-graph-out">−</button>
-            <span class="zval" data-graph-zoom>${Math.round(app.graphView.zoom * 100)}%</span>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="zoom-graph-in">＋</button>
-            <button class="btn btn-ghost btn-xs" type="button" data-action="toggle-graph-fullscreen">全屏</button>
-          </div>
-        </div>
-        <aside class="graph-detail-v3">
-          <div class="dh">节点详情与关系解释</div>
-          <div class="dbody">
             ${selectedSummary}
             ${selectedNode ? renderKeyValueGrid(graphNodeDetailRows(selectedNode, graph.relatedEdges)) : ""}
             ${updownBlock}
@@ -5030,11 +5301,73 @@ function renderInteractiveGraph() {
               { footer: graph.relatedEdges.length > 16 ? `当前只展示前 16 条关联边，共 ${graph.relatedEdges.length} 条。` : "" },
             ) : ""}
             <p class="subtle">统计基于选中节点的完整相关作用域，而非左侧可见局部图。点击 pill 可将对应节点居中聚焦。</p>
-          </div>
-        </aside>
-      </div>
-    </div>
   `;
+}
+
+// 把 dagre 的层次结果按画布宽高重排：同层节点横向均布（放不下就折行），层间距按剩余高度自适应。
+// 只改坐标、不改层归属与层内左右顺序，因此不会引入新的边交叉。目的是让整图贴合宽屏画布的
+// 宽高比，fit 后缩放接近 100%，而不是被压成上下细长的一条。
+function flattenLayerLayout(cy) {
+  const nodes = cy.nodes();
+  if (nodes.length < 2) return;
+  const PAD = 40;
+  const SUB_ROW_SEP = 34; // 折行后的子行间距
+  const MAX_ROWS = 3; // 单层最多折 3 行，再多就让该层超宽、由用户横向平移
+  const MAX_GAP = 110; // 层内节点少时的间距上限，防止被拉得过散
+  const width = Math.max(320, cy.width() - PAD * 2);
+  const height = Math.max(240, cy.height() - PAD * 2);
+
+  // 1) 按 y 聚成层：dagre 同 rank 的 y 完全相同，1px 容差兜底浮点误差
+  const layers = [];
+  nodes.sort((a, b) => a.position("y") - b.position("y")).forEach((node) => {
+    const y = node.position("y");
+    const last = layers[layers.length - 1];
+    if (last && Math.abs(last.y - y) <= 1) last.nodes.push(node);
+    else layers.push({ y, nodes: [node] });
+  });
+
+  // 2) 逐层横向铺开
+  const plans = layers.map((layer) => {
+    const ordered = layer.nodes.slice().sort((a, b) => a.position("x") - b.position("x"));
+    const maxW = ordered.reduce((acc, node) => Math.max(acc, node.outerWidth()), 24);
+    const maxH = ordered.reduce((acc, node) => Math.max(acc, node.outerHeight()), 24);
+    const minGap = Math.max(maxW + 18, 46);
+    const rows = Math.min(MAX_ROWS, Math.max(1, Math.ceil((ordered.length * minGap) / width)));
+    const perRow = Math.ceil(ordered.length / rows);
+    const spread = perRow > 1 ? width / (perRow - 1) : MAX_GAP;
+    const gap = Math.max(minGap, Math.min(MAX_GAP, spread));
+    return { ordered, rows, perRow, gap, thickness: (rows - 1) * SUB_ROW_SEP + maxH };
+  });
+
+  // 3) 层间距自适应：整图高度尽量吃满画布可用高又不溢出
+  const totalThickness = plans.reduce((acc, plan) => acc + plan.thickness, 0);
+  const rankSep = Math.max(56, Math.min(130, (height - totalThickness) / Math.max(1, plans.length - 1)));
+
+  let cursorY = 0;
+  plans.forEach((plan) => {
+    const centerY = cursorY + plan.thickness / 2;
+    plan.ordered.forEach((node, index) => {
+      const row = Math.floor(index / plan.perRow);
+      const col = index % plan.perRow;
+      const rowCount = Math.min(plan.perRow, plan.ordered.length - row * plan.perRow);
+      node.position({
+        x: (-plan.gap * (rowCount - 1)) / 2 + col * plan.gap,
+        y: centerY + (row - (plan.rows - 1) / 2) * SUB_ROW_SEP,
+      });
+    });
+    cursorY += plan.thickness + rankSep;
+  });
+}
+
+// 用户手动摆放过的节点，重建实例后回到原位；新节点仍走自动布局
+function applyRememberedNodePositions(cy) {
+  const saved = app.graphNodePositions || {};
+  Object.keys(saved).forEach((id) => {
+    const pos = saved[id];
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return;
+    const node = cy.getElementById(id);
+    if (node.length) node.position({ x: pos.x, y: pos.y });
+  });
 }
 
 function mountInteractiveGraph() {
@@ -5111,24 +5444,34 @@ function mountInteractiveGraph() {
       { selector: ".cy-neighbor", style: { "border-width": 3, "border-color": "#0f4c81", "opacity": 1, "z-index": 100 } },
       { selector: ".cy-neighbor-edge", style: { "width": 3, "opacity": 1, "z-index": 100 } },
       { selector: ".cy-dimmed", style: { "opacity": 0.55 } },
+      // 多选态（cytoscape 原生 :selected）与详情面板主选中（.cy-selected）是两套：
+      // 前者标记「参与整组拖动」的节点，只用外发光表示，不动边框/尺寸，避免覆盖主选中的粗边框。
+      { selector: "node:selected", style: { "overlay-color": "#2f6feb", "overlay-opacity": 0.2, "overlay-padding": 6 } },
     ],
     minZoom: 0.05,
     maxZoom: 5,
-    boxSelectionEnabled: false,
+    // 滚轮灵敏度：默认 1 在触控板上一次滚动就跨越大半个缩放区间，压到 0.2 后步进细腻
+    wheelSensitivity: 0.2,
+    // 开启框选：panning 同时开启时 cytoscape 要求按住修饰键（Shift）拖拽才画选框，
+    // 直接拖空白仍是平移，两种手势互不抢占
+    boxSelectionEnabled: true,
+    selectionType: "single",
   });
   app.cyGraphInstance = cy;
 
   const runLayout = () => {
     try {
       // 保持 TB：本图层数少（订单▸任务▸工序▸资源）而末层资源节点多，TB 下末层横向铺开才是宽的方向
-      // （实测改 LR 反而把 29 个资源节点竖着堆起来，更高）。太高的真正来源是 rankSep 过大——
-      // 150 时整图约 1123×972、fit 后只剩 51% 缩放；压到 80 并略放宽 nodeSep 后约 1194×622，
-      // 宽高比 1.16→1.92 贴合画布，且不再被缩小（100%），标签可读。
-      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 80, nodeSep: 32, edgeSep: 10, ranker: "tight-tree", padding: 40, fit: true, animate: false }).run();
+      // （实测改 LR 反而把 29 个资源节点竖着堆起来，更高）。dagre 只负责分层与层内左右顺序，
+      // 具体坐标交给 flattenLayerLayout 按画布宽高重排，所以这里 fit:false。
+      cy.layout({ name: "dagre", rankDir: "TB", rankSep: 80, nodeSep: 32, edgeSep: 10, ranker: "tight-tree", padding: 40, fit: false, animate: false }).run();
     } catch (error) {
       console.warn("Dagre layout unavailable, falling back to breadthfirst", error);
-      cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: true }).run();
+      cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.2, padding: 40, fit: false }).run();
     }
+    flattenLayerLayout(cy);
+    applyRememberedNodePositions(cy);
+    cy.fit(undefined, 40);
   };
   runLayout();
 
@@ -5140,13 +5483,27 @@ function mountInteractiveGraph() {
     selected.removeClass("cy-dimmed").addClass("cy-selected");
     neighborhood.nodes().removeClass("cy-dimmed").addClass("cy-neighbor");
     selected.connectedEdges().removeClass("cy-dimmed").addClass("cy-neighbor-edge");
-    // 不再缩放到选中邻域：保持布局的 fit:true 全览，让全部节点默认呈现
+    // 不再缩放到选中邻域：保持 runLayout 末尾的 fit 全览，让全部节点默认呈现
   }
 
   const zoomPill = root.querySelector("[data-graph-zoom]");
   const syncZoomPill = () => { if (zoomPill) zoomPill.textContent = `${Math.round(cy.zoom() * 100)}%`; };
-  cy.on("zoom", syncZoomPill);
+  // zoom 事件在滚轮/捏合时高频触发，用 rAF 合并成每帧一次 DOM 写入
+  let zoomPillPending = false;
+  cy.on("zoom", () => {
+    if (zoomPillPending) return;
+    zoomPillPending = true;
+    requestAnimationFrame(() => { zoomPillPending = false; syncZoomPill(); });
+  });
   syncZoomPill();
+
+  // 拖动结束后记住位置：整组拖动由 cytoscape 内置支持，这里把被拖节点与所有选中节点一并记下
+  cy.on("dragfree", "node", (event) => {
+    event.target.union(cy.nodes(":selected")).forEach((node) => {
+      const pos = node.position();
+      app.graphNodePositions[node.id()] = { x: pos.x, y: pos.y };
+    });
+  });
 
   if (hoverPreview) {
     cy.on("mouseover", "node", (event) => {
@@ -5164,12 +5521,40 @@ function mountInteractiveGraph() {
     });
   }
 
-  // 点节点 → 复用现有选中逻辑：更新 selectedGraphNodeId 并整页重渲染，
-  // 右侧详情面板与关系解释照常由 renderInteractiveGraph 更新。
+  // Shift+点节点交给 cytoscape 做加/减选，不动主选中、不重渲染；普通点击才切换详情面板。
   cy.on("tap", "node", (event) => {
+    if (event.originalEvent && event.originalEvent.shiftKey) return;
     app.selectedGraphNodeId = event.target.id();
-    renderCurrentPage();
+    refreshGraphSelection();
   });
+}
+
+// 切换主选中：可见节点集合不变时只刷高亮 + 右侧详情面板（零重建、零重新布局），
+// 集合会变时（焦点邻域模式、或超上限后按选中收敛）才回落整页重渲染。
+function refreshGraphSelection() {
+  const cy = app.cyGraphInstance;
+  if (!cy) return renderCurrentPage();
+  const graph = buildGraphViewModel();
+  if (!graph || !graph.visibleNodes.length) return renderCurrentPage();
+  const sameScope = graph.visibleNodes.length === cy.nodes().length
+    && graph.visibleNodes.every((node) => cy.getElementById(node.id).length > 0);
+  if (!sameScope) return renderCurrentPage();
+
+  cy.batch(() => {
+    cy.elements().removeClass("cy-selected cy-neighbor cy-neighbor-edge cy-dimmed");
+    const selected = cy.getElementById(app.selectedGraphNodeId || "");
+    if (selected.length) {
+      cy.elements().addClass("cy-dimmed");
+      selected.removeClass("cy-dimmed").addClass("cy-selected");
+      selected.neighborhood().nodes().removeClass("cy-dimmed").addClass("cy-neighbor");
+      selected.connectedEdges().removeClass("cy-dimmed").addClass("cy-neighbor-edge");
+    }
+  });
+
+  const body = document.querySelector(".page.active .graph-detail-v3 .dbody")
+    || document.querySelector(".graph-detail-v3 .dbody");
+  if (body) body.innerHTML = renderGraphDetailBody(graph);
+  return undefined;
 }
 
 function selectedGraphOrderOption() {
@@ -5528,6 +5913,8 @@ function resetInstanceDerivedState() {
   app.optimizeTaskId = null;
   app.referenceSolutions = [];
   app.exactReference = null;
+  app.insertion.baseKey = "";
+  app.insertion.result = null;
 }
 
 async function handleRunValidation(silent = false) {
@@ -6306,6 +6693,192 @@ async function handleTestLlmConfig() {
   await renderCurrentPage();
 }
 
+function newInsertionOrder(index) {
+  const suffix = String(index + 1).padStart(3, "0");
+  return {
+    order_id: `URGENT-${suffix}`,
+    order_name: `临时插单${index + 1}`,
+    release_time: toDateTimeLocalValue(new Date()),
+    expected_due_date: "",
+    main_task_id: `URG-T-${suffix}-MAIN`,
+  };
+}
+
+function newInsertionOperation(index) {
+  const order = app.insertion.orders[0] || newInsertionOrder(0);
+  const suffix = String(index + 1).padStart(2, "0");
+  return {
+    order_id: order.order_id,
+    op_id: `URG-OP-${suffix}`,
+    task_id: order.main_task_id || "URG-T-MAIN",
+    op_name: "",
+    process_type: "",
+    processing_time_hrs: 1,
+    turnover_time_hrs: 0,
+    predecessor_ops: "",
+    predecessor_tasks: "",
+    eligible_machine_ids: "",
+    required_tooling_types: "",
+    required_personnel_skills: "",
+  };
+}
+
+function buildInsertionDemoData() {
+  const machineTypes = asArray(app.instanceDetails?.machine_types).filter((item) => Number(item.count || 0) > 0);
+  if (!machineTypes.length) throw new Error("当前实例没有可用机器类型");
+  const firstType = machineTypes[0];
+  const secondType = machineTypes[1] || firstType;
+  const machinesFor = (typeId) => asArray(app.instanceDetails?.machines)
+    .filter((machine) => String(machine.type || "") === String(typeId))
+    .slice(0, 2)
+    .map((machine) => machine.id)
+    .join(";");
+  const toolingType = asArray(app.instanceDetails?.tooling_types).find((item) => Number(item.count || 0) > 0)?.id || "";
+  const personnelSkill = asArray(app.instanceDetails?.personnel)
+    .flatMap((person) => asArray(person.skills))
+    .find(Boolean) || "";
+  const planStart = tryParseDate(app.instanceDetails?.plan_start_at);
+  const releaseAt = new Date(Math.max(Date.now(), planStart?.getTime?.() || 0));
+  const releaseLater = new Date(releaseAt.getTime() + 4 * 60 * 60 * 1000);
+  const dueAt = new Date(releaseAt.getTime() + 60 * 24 * 60 * 60 * 1000);
+  const dueLater = new Date(releaseAt.getTime() + 72 * 24 * 60 * 60 * 1000);
+  const sharedResourceFields = {
+    required_tooling_types: toolingType,
+    required_personnel_skills: personnelSkill,
+  };
+  return {
+    resourceLabel: `${firstType.name || firstType.id} / ${secondType.name || secondType.id}${toolingType ? " / 含工装" : ""}${personnelSkill ? " / 含人员" : ""}`,
+    orders: [
+      {
+        order_id: "URG-DEMO-001", order_name: "测试插单·组件加工",
+        release_time: toDateTimeLocalValue(releaseAt), expected_due_date: toDateTimeLocalValue(dueAt),
+        main_task_id: "URG-DEMO-001-MAIN",
+      },
+      {
+        order_id: "URG-DEMO-002", order_name: "测试插单·返修件",
+        release_time: toDateTimeLocalValue(releaseLater), expected_due_date: toDateTimeLocalValue(dueLater),
+        main_task_id: "URG-DEMO-002-MAIN",
+      },
+    ],
+    operations: [
+      {
+        order_id: "URG-DEMO-001", op_id: "URG-D1-OP-01", task_id: "URG-DEMO-001-PART",
+        op_name: `${firstType.name || firstType.id}准备`, process_type: firstType.id,
+        processing_time_hrs: 2, turnover_time_hrs: 0.5, predecessor_ops: "", predecessor_tasks: "",
+        eligible_machine_ids: machinesFor(firstType.id), required_tooling_types: "", required_personnel_skills: "",
+      },
+      {
+        order_id: "URG-DEMO-001", op_id: "URG-D1-OP-02", task_id: "URG-DEMO-001-MAIN",
+        op_name: `${secondType.name || secondType.id}完工`, process_type: secondType.id,
+        processing_time_hrs: 3, turnover_time_hrs: 0, predecessor_ops: "", predecessor_tasks: "URG-DEMO-001-PART",
+        eligible_machine_ids: machinesFor(secondType.id), ...sharedResourceFields,
+      },
+      {
+        order_id: "URG-DEMO-002", op_id: "URG-D2-OP-01", task_id: "URG-DEMO-002-MAIN",
+        op_name: `${firstType.name || firstType.id}返修`, process_type: firstType.id,
+        processing_time_hrs: 1.5, turnover_time_hrs: 0.25, predecessor_ops: "", predecessor_tasks: "",
+        eligible_machine_ids: machinesFor(firstType.id), required_tooling_types: "", required_personnel_skills: "",
+      },
+      {
+        order_id: "URG-DEMO-002", op_id: "URG-D2-OP-02", task_id: "URG-DEMO-002-MAIN",
+        op_name: `${secondType.name || secondType.id}复验`, process_type: secondType.id,
+        processing_time_hrs: 2, turnover_time_hrs: 0, predecessor_ops: "URG-D2-OP-01", predecessor_tasks: "",
+        eligible_machine_ids: machinesFor(secondType.id), ...sharedResourceFields,
+      },
+    ],
+  };
+}
+
+function normalizeImportedInsertionRow(row, fields) {
+  return Object.fromEntries(fields.map((field) => [field, row?.[field] ?? ""]));
+}
+
+async function handleInsertionImport(file) {
+  if (!file) return;
+  collectInsertionForm();
+  try {
+    const payload = await api.importInsertion(file);
+    const orderFields = ["order_id", "order_name", "release_time", "expected_due_date", "main_task_id"];
+    const operationFields = [
+      "order_id", "op_id", "task_id", "op_name", "process_type", "processing_time_hrs",
+      "turnover_time_hrs", "predecessor_ops", "predecessor_tasks", "eligible_machine_ids",
+      "required_tooling_types", "required_personnel_skills",
+    ];
+    if (asArray(payload.orders).length) {
+      app.insertion.orders = payload.orders.map((row) => normalizeImportedInsertionRow(row, orderFields));
+      app.insertion.orders.forEach((order) => {
+        if (order.release_time !== "" && !String(order.release_time).includes("T")) order.release_time = offsetToDateTimeLocal(order.release_time);
+        if (order.expected_due_date !== "" && !String(order.expected_due_date).includes("T")) order.expected_due_date = offsetToDateTimeLocal(order.expected_due_date);
+      });
+    }
+    if (asArray(payload.operations).length) {
+      app.insertion.operations = payload.operations.map((row) => normalizeImportedInsertionRow(row, operationFields));
+    }
+    app.insertion.result = null;
+    toast(`已载入 ${formatInt(payload.orders?.length || 0)} 个订单、${formatInt(payload.operations?.length || 0)} 道工序。`, "success");
+    renderReview();
+  } catch (error) {
+    toast(`插单文件导入失败：${error.message}`, "error");
+  }
+}
+
+function parseInsertionPaste(text) {
+  const lines = String(text || "").trim().split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) throw new Error("请粘贴表头和至少一行数据");
+  const delimiter = lines[0].includes("\t") ? "\t" : ",";
+  const headers = lines[0].split(delimiter).map((item) => item.trim());
+  const rows = lines.slice(1).map((line) => {
+    const values = line.split(delimiter);
+    return Object.fromEntries(headers.map((header, index) => [header, String(values[index] ?? "").trim()]));
+  });
+  if (headers.includes("op_id")) return { kind: "operations", rows };
+  if (headers.includes("order_id")) return { kind: "orders", rows };
+  throw new Error("无法识别表头，请使用插单模板中的字段名");
+}
+
+async function handleRunInsertionEvaluation() {
+  if (app.insertion.busy) return;
+  collectInsertionForm();
+  if (!app.insertion.baseKey) {
+    toast("请先准备并选择一个完整基准方案。", "warning");
+    return;
+  }
+  const baseIsSimulation = app.insertion.baseKey === "simulation";
+  const solutionId = baseIsSimulation ? null : app.insertion.baseKey.replace(/^solution::/, "");
+  const operations = app.insertion.operations.map((operation) => ({
+    ...operation,
+    processing_time_hrs: Number(operation.processing_time_hrs),
+    turnover_time_hrs: Number(operation.turnover_time_hrs || 0),
+  }));
+  if (operations.some((operation) => !Number.isFinite(operation.processing_time_hrs) || operation.processing_time_hrs <= 0)) {
+    toast("每道工序都必须填写大于 0 的加工时间。", "warning");
+    return;
+  }
+  app.insertion.busy = true;
+  app.insertion.result = null;
+  renderReview();
+  try {
+    app.insertion.result = await api.evaluateInsertion({
+      base_source: baseIsSimulation ? "simulation" : "solution",
+      task_id: app.optimizeResult?.task_id || app.optimizeTaskId || null,
+      solution_id: solutionId,
+      policy: app.insertion.policy,
+      orders: app.insertion.orders.map((order) => ({
+        ...order,
+        release_time: order.release_time || 0,
+        expected_due_date: order.expected_due_date || null,
+      })),
+      operations,
+    });
+    toast(`插单评估完成：${formatInt(app.insertion.result.order_results?.length || 0)} 个订单。`, "success");
+  } catch (error) {
+    toast(`插单评估失败：${error.message}`, "error");
+  } finally {
+    app.insertion.busy = false;
+    renderReview();
+  }
+}
+
 async function handleAction(action, target) {
   if (action === "toggle-sidebar") {
     const collapsed = document.querySelector(".app")?.classList.toggle("is-sidebar-collapsed");
@@ -6342,7 +6915,7 @@ async function handleAction(action, target) {
   if (action === "focus-graph-node") {
     if (app.graphSuppressClickUntil && Date.now() < app.graphSuppressClickUntil) return;
     app.selectedGraphNodeId = target.dataset.id;
-    return renderCurrentPage();
+    return refreshGraphSelection();
   }
   if (action === "set-graph-mode") {
     app.graphView.mode = target.dataset.mode || "focus";
@@ -6452,6 +7025,108 @@ async function handleAction(action, target) {
     }
     if (ruleIsCached(rule) || app.referenceSolutionsState.computing.includes(rule)) return; // 已在池中或计算中
     return computeReferenceSolution(rule);
+  }
+  if (action === "add-insertion-order") {
+    collectInsertionForm();
+    app.insertion.orders.push(newInsertionOrder(app.insertion.orders.length));
+    app.insertion.result = null;
+    return renderReview();
+  }
+  if (action === "fill-insertion-demo") {
+    try {
+      const demo = buildInsertionDemoData();
+      const completeSolution = insertionBaseOptions().find((option) => option.value.startsWith("solution::"));
+      if (completeSolution) app.insertion.baseKey = completeSolution.value;
+      app.insertion.orders = demo.orders;
+      app.insertion.operations = demo.operations;
+      app.insertion.result = null;
+      app.insertion.pasteText = "";
+      toast(`已填充 2 个测试订单、4 道工序（${demo.resourceLabel}）${completeSolution ? "，并切换到完整评审方案基准" : ""}。`, "success");
+      return renderReview();
+    } catch (error) {
+      toast(`测试数据生成失败：${error.message}`, "error");
+      return;
+    }
+  }
+  if (action === "remove-insertion-order") {
+    collectInsertionForm();
+    if (app.insertion.orders.length <= 1) return;
+    const index = Number(target.dataset.index);
+    const removedId = app.insertion.orders[index]?.order_id;
+    app.insertion.orders.splice(index, 1);
+    if (removedId) app.insertion.operations = app.insertion.operations.filter((item) => item.order_id !== removedId);
+    if (!app.insertion.operations.length) app.insertion.operations = [newInsertionOperation(0)];
+    app.insertion.result = null;
+    return renderReview();
+  }
+  if (action === "add-insertion-operation") {
+    collectInsertionForm();
+    app.insertion.operations.push(newInsertionOperation(app.insertion.operations.length));
+    app.insertion.result = null;
+    return renderReview();
+  }
+  if (action === "remove-insertion-operation") {
+    collectInsertionForm();
+    if (app.insertion.operations.length <= 1) return;
+    app.insertion.operations.splice(Number(target.dataset.index), 1);
+    app.insertion.result = null;
+    return renderReview();
+  }
+  if (action === "trigger-insertion-import") return el("insertion-file")?.click();
+  if (action === "download-insertion-template") {
+    try {
+      const blob = await api.downloadInsertionTemplate();
+      downloadBlob(blob, "insertion_order_template.xlsx");
+      toast("插单双表模板已下载。", "success");
+    } catch (error) {
+      toast(`模板下载失败：${error.message}`, "error");
+    }
+    return;
+  }
+  if (action === "apply-insertion-paste") {
+    collectInsertionForm();
+    try {
+      const parsed = parseInsertionPaste(app.insertion.pasteText);
+      const orderFields = ["order_id", "order_name", "release_time", "expected_due_date", "main_task_id"];
+      const operationFields = [
+        "order_id", "op_id", "task_id", "op_name", "process_type", "processing_time_hrs",
+        "turnover_time_hrs", "predecessor_ops", "predecessor_tasks", "eligible_machine_ids",
+        "required_tooling_types", "required_personnel_skills",
+      ];
+      if (parsed.kind === "orders") app.insertion.orders = parsed.rows.map((row) => normalizeImportedInsertionRow(row, orderFields));
+      else app.insertion.operations = parsed.rows.map((row) => normalizeImportedInsertionRow(row, operationFields));
+      app.insertion.result = null;
+      toast(`已从粘贴文本载入 ${formatInt(parsed.rows.length)} 行${parsed.kind === "orders" ? "订单" : "工序"}。`, "success");
+      return renderReview();
+    } catch (error) {
+      toast(`粘贴解析失败：${error.message}`, "error");
+      return;
+    }
+  }
+  if (action === "run-insertion-evaluation") return handleRunInsertionEvaluation();
+  if (action === "load-insertion-full-schedule") {
+    if (!app.insertion.result?.run_id) return;
+    try {
+      const payload = await api.getInsertionSchedule(app.insertion.result.run_id);
+      app.insertion.result.merged_schedule = payload.schedule || payload.entries || [];
+      app.insertion.result.schedule_total = payload.total ?? app.insertion.result.merged_schedule.length;
+      app.insertion.result.schedule_truncated = false;
+      renderReview();
+    } catch (error) {
+      toast(`全量排程加载失败：${error.message}`, "error");
+    }
+    return;
+  }
+  if (action === "export-insertion-result") {
+    if (!app.insertion.result?.run_id) return;
+    try {
+      const blob = await api.exportInsertion(app.insertion.result.run_id);
+      downloadBlob(blob, `insertion_evaluation_${app.insertion.result.run_id}.xlsx`);
+      toast("插单评估结果已开始下载。", "success");
+    } catch (error) {
+      toast(`评估结果导出失败：${error.message}`, "error");
+    }
+    return;
   }
   if (action === "toggle-candidate") {
     const id = target.dataset.id;
@@ -6614,6 +7289,16 @@ function bindGlobalEvents() {
       await handleImportFile(target.files?.[0]);
       target.value = "";
       return;
+    }
+    if (target.matches("#insertion-file")) {
+      await handleInsertionImport(target.files?.[0]);
+      target.value = "";
+      return;
+    }
+    if (target.matches("#insertion-base, [name=\"insertion-policy\"]")) {
+      collectInsertionForm();
+      app.insertion.result = null;
+      return renderReview();
     }
     if (target.matches("[data-objective-key]")) {
       const selected = Array.from(document.querySelectorAll("[data-objective-key]"))

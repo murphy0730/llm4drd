@@ -203,6 +203,29 @@ class ReviewFrontendContractTests(unittest.TestCase):
             JS,
         )
         self.assertNotIn("rankSep: 150", JS)
+        # dagre 只负责分层与层内顺序，坐标由 flattenLayerLayout 按画布宽高重排后再 fit
+        self.assertIn("function flattenLayerLayout(cy)", JS)
+        self.assertIn("ranker: \"tight-tree\", padding: 40, fit: false", JS)
+        self.assertIn("flattenLayerLayout(cy);", JS)
+
+    def test_graph_interaction_is_smooth(self):
+        # 滚轮默认灵敏度 1 在触控板上一次滚动跨越大半缩放区间
+        self.assertIn("wheelSensitivity: 0.2", JS)
+        # Shift 框选 + Shift 加选；整组拖动由 cytoscape 内置提供
+        self.assertIn("boxSelectionEnabled: true", JS)
+        self.assertNotIn("boxSelectionEnabled: false", JS)
+        self.assertIn('cy.on("dragfree", "node"', JS)
+        # 手动摆放的坐标在会话内记住，重建实例后回填；resetGraphView 清空
+        self.assertIn("app.graphNodePositions", JS)
+        self.assertIn("function applyRememberedNodePositions(cy)", JS)
+        # 点选节点不再整页重建 cytoscape：节点集合不变时只刷高亮 + 右侧详情面板
+        self.assertIn("function refreshGraphSelection()", JS)
+        self.assertIn("function renderGraphDetailBody(graph)", JS)
+        self.assertIn("if (event.originalEvent && event.originalEvent.shiftKey) return;", JS)
+        tap_handler = JS[JS.index('cy.on("tap", "node"'):]
+        tap_handler = tap_handler[: tap_handler.index("});")]
+        self.assertIn("refreshGraphSelection();", tap_handler)
+        self.assertNotIn("renderCurrentPage();", tap_handler)
 
     def test_optimize_layout_is_single_column(self):
         # 优化求解页：多目标优化配置在上、运行状态与日志在下

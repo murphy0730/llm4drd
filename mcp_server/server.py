@@ -37,7 +37,7 @@ def handle_tool_call(name: str, arguments: dict, client: PlanningAPIClient) -> d
                 arguments.get("task_id"),
                 arguments.get("solution_ids"),
                 arguments.get("metric_keys"),
-                _optional_bottleneck_limit(arguments),
+                _optional_machine_limit(arguments),
             )
         elif name == "search_planning_entities":
             payload = _search_entities(arguments, client)
@@ -45,6 +45,20 @@ def handle_tool_call(name: str, arguments: dict, client: PlanningAPIClient) -> d
             payload = _get_order_planning(arguments, client)
         elif name == "get_operation_planning":
             payload = _get_operation_planning(arguments, client)
+        elif name == "diagnose_bottleneck":
+            # solution_id 故意不在本端做必填校验：漏传时后端会连可选方案一起回给
+            # Agent，比本端干巴巴一句"不能为空"更容易自我修正。
+            payload = client.diagnose_bottleneck(
+                _optional_text(arguments, "solution_id"),
+                arguments.get("task_id"),
+                _optional_machine_limit(arguments),
+            )
+        elif name == "explain_order_delay":
+            payload = client.explain_order_delay(
+                _required_text(arguments, "order_id"),
+                _optional_text(arguments, "solution_id"),
+                arguments.get("task_id"),
+            )
         elif name == "create_whatif_scenario":
             payload = client.create_whatif_scenario(arguments.get("name"))
         elif name == "apply_whatif_patch":
@@ -73,13 +87,13 @@ def handle_tool_call(name: str, arguments: dict, client: PlanningAPIClient) -> d
         elif name == "get_whatif_run":
             payload = client.get_whatif_run(
                 _required_text(arguments, "run_id"),
-                _optional_bottleneck_limit(arguments),
+                _optional_machine_limit(arguments),
             )
         elif name == "compare_whatif_runs":
             payload = client.compare_whatif_runs(
                 _required_id_list(arguments, "run_ids"),
                 arguments.get("metric_keys"),
-                _optional_bottleneck_limit(arguments),
+                _optional_machine_limit(arguments),
             )
         elif name == "apply_whatif_to_instance":
             payload = client.apply_whatif_to_instance(
@@ -104,7 +118,13 @@ def _search_entities(arguments: dict, client: PlanningAPIClient) -> dict:
     # 资源检索允许空 query（列出全部），订单/工序检索仍要求关键字。
     if entity_type in RESOURCE_ENTITY_TYPES:
         query = str(arguments.get("query") or "").strip()
-        return client.search_resources(entity_type, query, limit)
+        scenario_id = str(arguments.get("scenario_id") or "").strip() or None
+        return client.search_resources(entity_type, query, limit, scenario_id)
+    if arguments.get("scenario_id"):
+        return _business_error(
+            "INVALID_ARGUMENT",
+            "scenario_id 只对资源类型（machine / machine_type / tooling / personnel）有效",
+        )
     query = _required_text(arguments, "query")
     if entity_type == "order":
         return client.search_orders(query, limit)
@@ -173,6 +193,11 @@ def _required_text(arguments: dict, key: str) -> str:
     return value.strip()
 
 
+def _optional_text(arguments: dict, key: str) -> str | None:
+    value = arguments.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _bounded_limit(value: object) -> int:
     try:
         result = int(value)
@@ -183,17 +208,17 @@ def _bounded_limit(value: object) -> int:
     return result
 
 
-def _optional_bottleneck_limit(arguments: dict) -> int | None:
+def _optional_machine_limit(arguments: dict) -> int | None:
     """省略时返回 None，让后端用它自己的默认值（20），别在两处各写一份默认。"""
-    value = arguments.get("bottleneck_limit")
+    value = arguments.get("machine_limit")
     if value is None:
         return None
     try:
         result = int(value)
     except (TypeError, ValueError) as error:
-        raise ValueError("bottleneck_limit 必须是整数") from error
+        raise ValueError("machine_limit 必须是整数") from error
     if not 1 <= result <= 50:
-        raise ValueError("bottleneck_limit 必须在 1 到 50 之间")
+        raise ValueError("machine_limit 必须在 1 到 50 之间")
     return result
 
 
@@ -277,21 +302,31 @@ def _summary(payload: dict) -> str:
     if isinstance(data, dict) and "rule_name" in data and "operation_count" in data:
         return f"已使用 {data['rule_name']} 完成排产，共排入 {data['operation_count']} 道工序"
     if isinstance(data, dict) and "candidate_count" in data:
+        # 总数放在最前：分项计数容易被当成总数，Case「只报了候选方案」就是这么来的。
         total = data.get("solution_count", data["candidate_count"])
-        return (
-            f"查询到 {total} 个排产方案（基线 {data.get('baseline_count', 0)} 个、"
-            f"优化候选 {data['candidate_count']} 个、参考 {data.get('reference_count', 0)} 个）"
+        names = "、".join(
+            f"{item.get('solution_name')}（{item.get('category_label')}）"
+            for item in (data.get("solutions") or [])
+            if isinstance(item, dict)
         )
+        head = (
+            f"当前共有 {total} 个排产方案，逐个是：{names}"
+            if names else f"当前共有 {total} 个排产方案"
+        )
+        return (
+            f"{head}。按来源拆分：基线 {data.get('baseline_count', 0)} 个、"
+            f"优化候选 {data['candidate_count']} 个、参考 {data.get('reference_count', 0)} 个"
+        )[:1000]
     if isinstance(data, dict) and "metric_keys" in data and "solutions" in data:
         rows = data.get("solutions") or []
         parts = [f"已对比 {len(rows)} 个方案"]
-        top = _top_bottleneck(rows[0] if rows else None)
+        top = _top_utilization(rows[0] if rows else None)
         if top:
             parts.append(f"首个方案{top}")
-        if data.get("bottleneck_source") == "legacy_top5":
-            parts.append("（该任务是旧数据，瓶颈只有 top5 且无利用率，需重跑优化才完整）")
+        if data.get("ranking_source") == "legacy_top5":
+            parts.append("（该任务是旧数据，负荷榜只有 top5 且无利用率，需重跑优化才完整）")
         return "，".join(parts)[:1000]
-    summary = _whatif_summary(data)
+    summary = _attribution_summary(data) or _whatif_summary(data)
     if summary is not None:
         return summary[:1000]
     if isinstance(data, list):
@@ -299,19 +334,110 @@ def _summary(payload: dict) -> str:
     return "排产查询完成"
 
 
-def _top_bottleneck(entry: object) -> str | None:
-    """把一行结果里利用率最高的机器压成一句话，省得 Agent 展开 structuredContent。"""
+WAIT_CAUSE_LABELS = {
+    "capacity_bound": "产能不足（同类机器同期都占满，加机台有用）",
+    "dispatch_bound": "选机/派工问题（同期有可用机器空着，加机台没用）",
+    "off_shift": "该时段没排班（工时不足）",
+    "downtime": "设备停机",
+    "idle": "机器空着但没排上（工装/人员/前置资源）",
+}
+
+
+def _coverage_warning(data: dict) -> str | None:
+    """未排入的订单必须先说——它比"延误"更严重，却最容易被当成没问题。"""
+    unscheduled = int(data.get("unscheduled_order_count") or 0)
+    partial = int(data.get("partially_scheduled_order_count") or 0)
+    if not unscheduled and not partial:
+        return None
+    parts = []
+    if unscheduled:
+        parts.append(f"{unscheduled} 个订单完全未排入该方案")
+    if partial:
+        parts.append(f"{partial} 个订单只排了一部分")
+    return (
+        "⚠ " + "、".join(parts)
+        + "，它们的延误未知且不在下面的归因里，比已知延误更需要先处理"
+    )
+
+
+def _attribution_summary(data: object) -> str | None:
+    """延误归因的一句话结论——直接点名主因，别让 Agent 自己从五个数里挑。"""
+    if not isinstance(data, dict):
+        return None
+    if "inevitable_tardiness_hours" in data:
+        return _order_delay_summary(data)
+    if "wait_breakdown" not in data:
+        return None
+    breakdown = data.get("wait_breakdown") or {}
+    total = sum(value for value in breakdown.values() if isinstance(value, (int, float)))
+    parts = [item for item in (_coverage_warning(data),) if item]
+    if total <= 0:
+        parts.append(
+            f"方案「{data.get('solution_name')}」下没有可归因的等待"
+            f"（延误订单 {data.get('tardy_order_count', 0)} 个）"
+        )
+        return "；".join(parts)
+    cause, hours = max(breakdown.items(), key=lambda item: item[1])
+    parts += [
+        f"方案「{data.get('solution_name')}」有 {data.get('tardy_order_count')} 个订单延误，"
+        f"合计 {data.get('total_order_tardiness_hours')} 小时",
+        f"等待主因是{WAIT_CAUSE_LABELS.get(cause, cause)}（{hours}h / 共 {round(total, 1)}h）",
+    ]
+    machines = data.get("machines") or []
+    if machines and isinstance(machines[0], dict):
+        top = machines[0]
+        name = top.get("machine_name") or top.get("machine_id")
+        capacity = top.get("capacity_wait_hours") or 0.0
+        parts.append(
+            f"产能上卡得最狠的是 {name}（致等 {capacity}h，饱和度 {top.get('saturation')}）"
+            if capacity > 0
+            else "没有机器因产能不足卡住延误订单——加机台解决不了这次延误"
+        )
+    return "；".join(parts)
+
+
+def _order_delay_summary(data: dict) -> str:
+    name = data.get("order_name")
+    if not data.get("planned", True):
+        scheduled = data.get("scheduled_operation_count", 0)
+        total = data.get("total_operation_count", 0)
+        return (
+            f"⚠ 订单「{name}」未完整排入该方案（{scheduled}/{total} 道工序），"
+            "延误无法计算——这比已知延误更严重，应先查为什么排不进去"
+        )
+    inevitable = data.get("inevitable_tardiness_hours") or 0.0
+    tardiness = data.get("tardiness_hours") or 0.0
+    if tardiness <= 0:
+        return f"订单「{name}」未延误（完工 {data.get('completion_at')}）"
+    parts = [f"订单「{name}」延误 {tardiness} 小时"]
+    if inevitable > 0:
+        parts.append(
+            f"其中 {inevitable}h 是工艺链本身就来不及（即使资源无限也躲不掉），"
+            "加机器加班次无效，只能改交期或改工艺"
+        )
+    attribution = data.get("attribution") or {}
+    if any(attribution.values()):
+        cause, hours = max(attribution.items(), key=lambda item: item[1])
+        parts.append(f"资源侧等待主因是{WAIT_CAUSE_LABELS.get(cause, cause)}（{hours}h）")
+    return "；".join(parts)
+
+
+def _top_utilization(entry: object) -> str | None:
+    """把一行结果里负荷最高的机器压成一句话，省得 Agent 展开 structuredContent。
+
+    刻意说"负荷最高"而不是"瓶颈"：这只是全周期利用率排名，瓶颈判定见 diagnose_bottleneck。
+    """
     if not isinstance(entry, dict):
         return None
-    machines = entry.get("bottleneck_machines") or []
+    machines = entry.get("machine_utilization_ranking") or []
     if not machines or not isinstance(machines[0], dict):
         return None
     top = machines[0]
     name = top.get("machine_name") or top.get("machine_id") or "未知机器"
-    utilization = top.get("utilization")
+    utilization = top.get("full_horizon_utilization")
     if isinstance(utilization, (int, float)):
-        return f"利用率最高的是 {name}（{utilization * 100:.0f}%）"
-    return f"利用率最高的是 {name}"
+        return f"全周期负荷最高的是 {name}（{utilization * 100:.0f}%，非瓶颈判定）"
+    return f"全周期负荷最高的是 {name}（非瓶颈判定）"
 
 
 def _whatif_summary(data: object) -> str | None:
@@ -330,7 +456,7 @@ def _whatif_summary(data: object) -> str | None:
             best = results[0]
             metrics = best.get("metrics") or {}
             note = "（已含现状对照）" if data.get("include_baseline") else ""
-            top = _top_bottleneck(best)
+            top = _top_utilization(best)
             return (
                 f"场景「{data.get('scenario_name')}」跑出 {len(results)} 组结果{note}，"
                 f"最优：{best.get('label') or data.get('scenario_name')} + {best.get('rule_name')}"
@@ -343,7 +469,7 @@ def _whatif_summary(data: object) -> str | None:
     if "entries" in data and "baseline" in data:
         baseline = data.get("baseline") or {}
         entries = data.get("entries") or []
-        top = _top_bottleneck(entries[0] if entries else None)
+        top = _top_utilization(entries[0] if entries else None)
         return (
             f"已对比 {len(entries)} 组结果，"
             f"基准为「{baseline.get('scenario_name')}」+ {baseline.get('rule_name')}"

@@ -39,7 +39,7 @@ class PlanningAPIClient:
         task_id: str | None = None,
         solution_ids: list[str] | None = None,
         metric_keys: list[str] | None = None,
-        bottleneck_limit: int | None = None,
+        machine_limit: int | None = None,
     ) -> dict:
         return self._get(
             "/api/query/planning/solutions",
@@ -47,7 +47,7 @@ class PlanningAPIClient:
                 task_id=task_id,
                 solution_ids=self._csv(solution_ids),
                 metric_keys=self._csv(metric_keys),
-                bottleneck_limit=bottleneck_limit,
+                machine_limit=machine_limit,
             ),
         )
 
@@ -90,10 +90,42 @@ class PlanningAPIClient:
             self._optional(task_id=task_id, solution_ids=self._csv(solution_ids)),
         )
 
-    def search_resources(self, entity_type: str, query: str = "", limit: int = 20) -> dict:
+    def search_resources(
+        self,
+        entity_type: str,
+        query: str = "",
+        limit: int = 20,
+        scenario_id: str | None = None,
+    ) -> dict:
         return self._get(
             "/api/query/planning/resources/search",
-            {"entity_type": entity_type, "q": query, "limit": limit},
+            self._optional(
+                entity_type=entity_type, q=query, limit=limit, scenario_id=scenario_id
+            ),
+        )
+
+    def diagnose_bottleneck(
+        self,
+        solution_id: str | None,
+        task_id: str | None = None,
+        machine_limit: int | None = None,
+    ) -> dict:
+        return self._get(
+            "/api/query/planning/bottleneck",
+            self._optional(
+                solution_id=solution_id, task_id=task_id, machine_limit=machine_limit
+            ),
+        )
+
+    def explain_order_delay(
+        self,
+        order_id: str,
+        solution_id: str | None,
+        task_id: str | None = None,
+    ) -> dict:
+        return self._get(
+            f"/api/query/planning/order/{self._path_segment(order_id)}/delay",
+            self._optional(solution_id=solution_id, task_id=task_id),
         )
 
     # --- What-if 场景推演 ---
@@ -142,24 +174,24 @@ class PlanningAPIClient:
             "wait_seconds": max(0.0, round(budget, 1)),
         })
 
-    def get_whatif_run(self, run_id: str, bottleneck_limit: int | None = None) -> dict:
+    def get_whatif_run(self, run_id: str, machine_limit: int | None = None) -> dict:
         return self._get(
             f"/api/whatif/runs/{self._path_segment(run_id)}",
-            self._optional(bottleneck_limit=bottleneck_limit),
+            self._optional(machine_limit=machine_limit),
         )
 
     def compare_whatif_runs(
         self,
         run_ids: list[str],
         metric_keys: list[str] | None = None,
-        bottleneck_limit: int | None = None,
+        machine_limit: int | None = None,
     ) -> dict:
         return self._get(
             "/api/whatif/runs/compare",
             self._optional(
                 run_ids=self._csv(run_ids),
                 metric_keys=self._csv(metric_keys),
-                bottleneck_limit=bottleneck_limit,
+                machine_limit=machine_limit,
             ),
         )
 

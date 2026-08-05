@@ -3110,6 +3110,52 @@ td.is-best { background: rgba(18, 161, 80, 0.07); }
 .export-card .btn { margin-left: auto; flex-shrink: 0; }
 .export-card.highlight { border-color: rgba(47, 111, 235, 0.35); box-shadow: 0 0 0 3px rgba(47, 111, 235, 0.07); }
 
+/* ---------- 插单最佳交期模拟 ---------- */
+.insertion-workbench { gap: 14px; }
+.insertion-control-strip { border-left: 3px solid var(--accent); }
+.insertion-control-main { display: grid; grid-template-columns: minmax(260px, 0.8fr) minmax(420px, 1.2fr); gap: 22px; align-items: end; }
+.insertion-control-main > label > span,
+.insertion-policy legend { display: block; margin-bottom: 7px; color: var(--text-soft); font-size: 11px; font-weight: 600; }
+.insertion-control-strip > p { margin: 10px 0 0; color: var(--text-faint); font-size: 11.5px; }
+.insertion-policy { display: flex; gap: 8px; margin: 0; padding: 0; border: 0; }
+.policy-choice { flex: 1; display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: center; min-height: 56px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; background: var(--surface); }
+.policy-choice.on { border-color: rgba(47, 111, 235, 0.55); background: var(--primary-soft); box-shadow: inset 3px 0 var(--primary); }
+.policy-choice input { grid-row: 1 / span 2; width: 14px; min-height: 14px; }
+.policy-choice strong { font-size: 12px; }
+.policy-choice small { color: var(--text-faint); font-size: 10.5px; }
+.insertion-editor-section { padding-bottom: 0; overflow: hidden; }
+.insertion-table-shell { margin: 12px -20px 0; overflow-x: auto; border-top: 1px solid var(--line); }
+.insertion-editor-table { width: max-content; min-width: 100%; }
+.insertion-editor-table th { white-space: nowrap; background: var(--surface-strong); }
+.insertion-editor-table td { padding: 7px 6px; }
+.insertion-editor-table input { min-width: 132px; min-height: 33px; padding: 6px 8px; font-size: 11.5px; }
+.insertion-editor-table.order-table input[type="datetime-local"] { min-width: 190px; }
+.insertion-editor-table.operation-table input[data-insertion-op-field="op_name"] { min-width: 150px; }
+.insertion-editor-table.operation-table input[data-insertion-op-field="predecessor_ops"],
+.insertion-editor-table.operation-table input[data-insertion-op-field="eligible_machine_ids"] { min-width: 180px; }
+.insertion-input-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 -20px; padding: 13px 20px; border-top: 1px solid var(--line); background: var(--surface-strong); }
+.insertion-paste-panel { position: relative; }
+.insertion-paste-panel > summary { padding: 8px 11px; color: var(--text-soft); font-size: 12px; cursor: pointer; }
+.insertion-paste-panel[open] { flex-basis: 100%; order: 5; }
+.insertion-paste-panel textarea { width: 100%; margin-top: 8px; resize: vertical; font-family: var(--font-mono); font-size: 11px; }
+.insertion-result-band { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--line); }
+.insertion-result-band > div { padding: 13px 15px; background: var(--surface); }
+.insertion-result-band span { display: block; margin-bottom: 3px; color: var(--text-faint); font-size: 10.5px; }
+.insertion-result-band strong { font-family: var(--font-mono); font-size: 15px; }
+.insertion-result-band > p { grid-column: 1 / -1; margin: 0; padding: 9px 15px; color: var(--text-soft); background: var(--surface-strong); font-size: 11px; }
+.insertion-empty { min-height: 150px; }
+.insertion-analysis-grid { align-items: start; }
+.ok-text { color: var(--success); }
+.danger-text { color: var(--danger); }
+.chip.danger { color: var(--danger); background: var(--danger-soft); }
+.gantt-canvas .vis-item.inserted-order { background: linear-gradient(135deg, #f59e0b, #e7681a) !important; border-color: #b84b12 !important; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45) inset; }
+
+@media (max-width: 900px) {
+  .insertion-control-main { grid-template-columns: 1fr; }
+  .insertion-policy { flex-direction: column; }
+  .insertion-result-band { grid-template-columns: 1fr 1fr; }
+}
+
 @media (max-width: 1200px) {
   .rule-grid { grid-template-columns: repeat(3, 1fr); }
   /* 优化页已是单列，窄屏只需把配置卡内部的 4 列栅格收回 2 列 */
