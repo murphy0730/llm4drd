@@ -56,9 +56,61 @@ class ReviewFrontendContractTests(unittest.TestCase):
     def test_review_selection_drops_stale_pending_canvas_without_full_render(self):
         self.assertIn('app.pendingGantts.delete("gantt-review-compare")', JS)
         start = JS.index('if (action === "toggle-candidate")')
-        end = JS.index('if (action === "generate-exact-single")', start)
+        end = JS.index('if (action === "start-exact-window")', start)
         self.assertNotIn("renderCurrentPage()", JS[start:end])
         self.assertIn("ensureReviewData(getSelectedReviewCandidates())", JS[start:end])
+
+    def test_exact_tab_uses_independent_window_solver_workflow(self):
+        for token in (
+            'startExactWindow(payload) { return this.json("/exact/window/solve", "POST", payload); }',
+            'getExactWindowStatus(taskId)',
+            'function renderPlanSetSelectors(',
+            'prefix: "exact"',
+            'id="exact-window-days" type="number" min="1" max="10"',
+            # 目标改为「下拉选目标 + 权重 + 移除」逐行配置，右侧「＋」追加目标
+            'data-exact-objective-select=',
+            'data-exact-weight-key=',
+            'data-action="add-exact-objective"',
+            'data-action="remove-exact-objective"',
+            'id="exact-weight-summary"',
+            'data-action="start-exact-window"',
+            'function pollExactWindowStatus()',
+            'function exactWindowIsRunning()',
+        ):
+            self.assertIn(token, JS)
+        # 旧的全量目标勾选列表与页面顶部标题区已移除
+        self.assertNotIn("data-exact-objective-toggle=", JS)
+        self.assertNotIn("exact-workspace-head", JS)
+        self.assertNotIn('data-action="generate-exact-single"', JS)
+        self.assertNotIn('data-action="generate-exact-weighted"', JS)
+        self.assertNotIn("自动纳入方案库、AI 评审和导出流程", JS)
+
+        candidate_start = JS.index("function getReviewCandidates()")
+        candidate_end = JS.index("\nfunction ensureReviewSelection", candidate_start)
+        self.assertNotIn("exactWindowResult", JS[candidate_start:candidate_end])
+
+        for token in (
+            ".exact-workspace {",
+            ".exact-step {",
+            ".exact-weight-summary",
+            ".exact-run-state",
+            ".exact-result {",
+        ):
+            self.assertIn(token, CSS)
+
+    def test_exact_tab_lists_the_full_exact_objective_catalog(self):
+        start = JS.index("function exactObjectiveRows()")
+        end = JS.index("\nfunction distributeExactWeights", start)
+        source = JS[start:end]
+        self.assertIn("asArray(app.exactObjectiveCatalog).map", source)
+        self.assertNotIn("activePrimaryObjectiveKeys()", source)
+
+        defaults_start = JS.index("function ensureExactFormDefaults()")
+        defaults_end = JS.index("\nfunction exactWeightState", defaults_start)
+        defaults_source = JS[defaults_start:defaults_end]
+        self.assertIn("activePrimaryObjectiveKeys().filter", defaults_source)
+        self.assertIn('supportedKeys.has("makespan")', defaults_source)
+        self.assertIn("下拉列出 OR-Tools 支持的全量目标", JS)
 
     def test_order_selectors_use_accessible_fuzzy_combobox(self):
         for token in (
@@ -249,8 +301,12 @@ class ReviewFrontendContractTests(unittest.TestCase):
         self.assertIn('getDispatchStrategySets() { return this.json("/dispatch-strategy-sets")', JS)
         self.assertIn('saveDispatchStrategySet(payload)', JS)
         self.assertIn('data-action="save-dispatch-strategy-set"', JS)
-        self.assertIn('savedDispatchStrategies().map((strategy)', JS)
-        self.assertIn('id="opt-warm-start-set"', JS)
+        self.assertIn('function savedDispatchStrategies()', JS)
+        # 方案集/预排方案共享下拉组：优化求解与规则仿真复用同一渲染与 change 处理
+        self.assertIn('function renderPlanSetSelectors(', JS)
+        self.assertIn('function handlePlanSetChange(', JS)
+        self.assertIn('prefix: "opt"', JS)
+        self.assertIn('prefix: "sim"', JS)
         self.assertIn('baseline_strategy_id:', JS)
         self.assertIn('warm_start_set_id:', JS)
         self.assertIn(".cold-start-control", CSS)

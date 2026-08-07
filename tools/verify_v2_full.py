@@ -393,16 +393,16 @@ def verify(base_url: str, channel: str, headless: bool) -> FullVerificationResul
         )
 
         goto_nav(page, "exact-reference")
-        if count_visible(page, '[data-action="generate-exact-single"]'):
-            page.locator('[data-action="generate-exact-single"]').click()
+        if count_visible(page, '[data-action="start-exact-window"]'):
+            page.locator('[data-action="start-exact-window"]').click()
             page.wait_for_timeout(8000)
         exact_text = visible_text(page)
-        exact_api_ok = any("/api/optimize/exact-reference" in url and status == 200 for url, status in response_log)
+        exact_api_ok = any("/api/exact/window/solve" in url and status == 200 for url, status in response_log)
         checks.append(
             CheckResult(
-                name="exact_reference_single",
-                ok=exact_api_ok or ("最新精确冠军参考" in exact_text) or ("EXACT:SINGLE:" in exact_text) or ("精确冠军参考甘特图" in exact_text),
-                detail="已生成单目标精确冠军参考方案",
+                name="exact_reference_window",
+                ok=exact_api_ok and any(text in exact_text for text in ("OR-Tools 正在运行", "局部窗口结果", "窗口精确排程甘特图")),
+                detail="已启动窗口加权精确冠军参考求解",
                 extra={"api_ok": exact_api_ok},
             )
         )

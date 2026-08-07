@@ -34,16 +34,21 @@ class InsertionFrontendContractTests(unittest.TestCase):
         self.assertIn("app.instanceDetails?.machine_types", JS)
         self.assertIn("app.instanceDetails?.tooling_types", JS)
         self.assertIn("app.instanceDetails?.personnel", JS)
-        self.assertIn('option.value.startsWith("solution::")', JS)
+        self.assertIn("app.insertion.basePlan = `saved:${firstSet.strategies[0].id}`", JS)
         self.assertIn("URG-DEMO-001-PART", JS)
         self.assertIn('predecessor_ops: "URG-D2-OP-01"', JS)
         self.assertIn('predecessor_tasks: "URG-DEMO-001-PART"', JS)
 
-    def test_complete_review_solution_is_the_default_base(self):
-        function_start = JS.index("function insertionBaseOptions()")
-        function_end = JS.index("function collectInsertionForm()", function_start)
+    def test_published_strategy_is_the_only_base(self):
+        function_start = JS.index("function ensureInsertionBaseSelection()")
+        function_end = JS.index("function insertionHasBase()", function_start)
         body = JS[function_start:function_end]
-        self.assertLess(body.index('value: `solution::${candidate.id}`'), body.index('value: "simulation"'))
+        # 基准只能是已发布方案（方案集 + 预排方案）：basePlan 失效时回退到第一个可用方案
+        self.assertIn("saved:${firstSet.strategies[0].id}", body)
+        # 「使用当前规则仿真结果作为基准」勾选项已移除，其残留会让方案集下拉被禁用
+        self.assertNotIn("useSimulationBase", JS)
+        self.assertNotIn("insertion-use-sim", JS)
+        self.assertIn('base_source: "strategy"', JS)
 
     def test_result_contains_all_required_views(self):
         for label in (

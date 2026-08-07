@@ -48,6 +48,24 @@ class InsertionApiTests(unittest.TestCase):
                 [{"op_id": "OP-11"}, {"op_id": "OTHER-INSTANCE-OP"}],
             )
 
+    def test_strategy_base_validation(self):
+        shop = make_graph_context_shop()
+        with self.assertRaisesRegex(HTTPException, "请选择一个已发布方案"):
+            server._insertion_base_schedule(
+                server.InsertionEvaluateReq(base_source="strategy", orders=[], operations=[]),
+                shop,
+            )
+        with self.assertRaisesRegex(HTTPException, "不存在或已下线"):
+            server._insertion_base_schedule(
+                server.InsertionEvaluateReq(base_source="strategy", strategy_id="DSP-NOPE", orders=[], operations=[]),
+                shop,
+            )
+        with self.assertRaisesRegex(HTTPException, "base_source 仅支持"):
+            server._insertion_base_schedule(
+                server.InsertionEvaluateReq(base_source="bogus", orders=[], operations=[]),
+                shop,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

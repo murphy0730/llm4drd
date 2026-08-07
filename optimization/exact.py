@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import time
+from bisect import bisect_left
 from dataclasses import dataclass, field
+from itertools import product
 
 from ..core.models import OpStatus
 from ..core.simulator import SimResult
@@ -112,8 +114,6 @@ class ExactSolver:
         }
 
     def solve(self, warm_start_schedule=None, progress_callback=None) -> ExactResult:
-        del warm_start_schedule
-
         def emit_progress(
             phase: str,
             real_progress: float,
@@ -148,6 +148,11 @@ class ExactSolver:
             return ExactResult(status="ERROR", bounds={"error": "ortools not installed"})
 
         request = self._resolve_request()
+        warm_start_by_op = {
+            entry.get("op_id"): entry
+            for entry in (warm_start_schedule or [])
+            if isinstance(entry, dict) and entry.get("op_id")
+        }
         started_at = time.time()
         model = cp_model.CpModel()
         scale = 60
@@ -202,6 +207,17 @@ class ExactSolver:
             default=0.0,
         )
         total_decision_work = sum(op.work_remaining for op in decision_ops)
+        decision_op_ids = {op.id for op in decision_ops}
+        max_seed_end = max(
+            (
+                float(entry.get("end"))
+                for op_id, entry in warm_start_by_op.items()
+                if op_id in decision_op_ids
+                and isinstance(entry.get("end"), (int, float))
+                and math.isfinite(float(entry.get("end")))
+            ),
+            default=0.0,
+        )
         max_fixed_end = max(
             (self._fixed_end_hours(op, clamp_nonnegative=True) for op in [*completed_ops, *fixed_processing_ops]),
             default=0.0,
@@ -212,7 +228,12 @@ class ExactSolver:
             if math.isfinite(op.turnover_time) and op.turnover_time > 0
         )
         horizon_hours = (
-            max(latest_due, total_decision_work * 1.5, max_fixed_end + total_decision_work * 1.5)
+            max(
+                latest_due,
+                total_decision_work * 1.5,
+                max_fixed_end + total_decision_work * 1.5,
+                max_seed_end,
+            )
             + total_turnover + 24.0
         )
         horizon = max(1, int(round(horizon_hours * scale)))
@@ -238,8 +259,15 @@ class ExactSolver:
             duration = max(1, int(round(op.work_remaining * scale)))
             start = model.NewIntVar(0, horizon, f"s_{op.id}")
             end = model.NewIntVar(0, horizon, f"e_{op.id}")
-            interval = model.NewIntervalVar(start, duration, end, f"i_{op.id}")
-            op_vars[op.id] = {"start": start, "end": end, "interval": interval, "duration": duration}
+            interval_size = model.NewIntVar(duration, horizon, f"elapsed_{op.id}")
+            interval = model.NewIntervalVar(start, interval_size, end, f"i_{op.id}")
+            op_vars[op.id] = {
+                "start": start,
+                "end": end,
+                "interval": interval,
+                "interval_size": interval_size,
+                "duration": duration,
+            }
             op_end_exprs[op.id] = end
             model.Add(start >= max(0, int(round(self.shop.get_operation_release_time(op) * scale))))
             model_step(f"正在创建工序变量 {model_completed + 1} / {model_total}")
@@ -286,7 +314,7 @@ class ExactSolver:
                     selector = model.NewBoolVar(f"sel_machine_{op.id}_{machine.id}")
                     interval = model.NewOptionalIntervalVar(
                         op_vars[op.id]["start"],
-                        op_vars[op.id]["duration"],
+                        op_vars[op.id]["interval_size"],
                         op_vars[op.id]["end"],
                         selector,
                         f"oi_machine_{op.id}_{machine.id}",
@@ -309,7 +337,7 @@ class ExactSolver:
                         selector = model.NewBoolVar(f"sel_tool_{op.id}_{requirement_index}_{tooling.id}")
                         interval = model.NewOptionalIntervalVar(
                             op_vars[op.id]["start"],
-                            op_vars[op.id]["duration"],
+                            op_vars[op.id]["interval_size"],
                             op_vars[op.id]["end"],
                             selector,
                             f"oi_tool_{op.id}_{requirement_index}_{tooling.id}",
@@ -332,7 +360,7 @@ class ExactSolver:
                         selector = model.NewBoolVar(f"sel_person_{op.id}_{requirement_index}_{person.id}")
                         interval = model.NewOptionalIntervalVar(
                             op_vars[op.id]["start"],
-                            op_vars[op.id]["duration"],
+                            op_vars[op.id]["interval_size"],
                             op_vars[op.id]["end"],
                             selector,
                             f"oi_person_{op.id}_{requirement_index}_{person.id}",
@@ -343,21 +371,134 @@ class ExactSolver:
                     personnel_choices[(op.id, requirement_index)] = {"selected": None, "bools": bools}
             model_step(f"正在创建资源约束 {model_completed + 1} / {model_total}")
 
+        # 仿真器允许工序在班次结束后暂停、下一班继续。把每个候选资源的日历按
+        # “可用日历画像”分组，再枚举画像组合，可同时保持机器/工装/人员的自由选择，
+        # 并把 productive duration 精确换算成 wall-clock interval。资源仍是 Hint，
+        # 不会因日历建模而被锁定到起始方案。
+        calendar_profile_count = 0
+        for op in decision_ops:
+            choice_groups = [
+                self._choice_calendar_profiles(
+                    machine_choices[op.id],
+                    self.shop.machines,
+                    horizon_hours,
+                    scale,
+                )
+            ]
+            choice_groups.extend(
+                self._choice_calendar_profiles(
+                    tooling_choices[(op.id, requirement_index)],
+                    self.shop.toolings,
+                    horizon_hours,
+                    scale,
+                )
+                for requirement_index, _ in enumerate(op.required_tooling_types)
+            )
+            choice_groups.extend(
+                self._choice_calendar_profiles(
+                    personnel_choices[(op.id, requirement_index)],
+                    self.shop.personnel,
+                    horizon_hours,
+                    scale,
+                )
+                for requirement_index, _ in enumerate(op.required_personnel_skills)
+            )
+            if any(not profiles for profiles in choice_groups):
+                return ExactResult(
+                    status="INFEASIBLE",
+                    bounds={"error": f"Missing resource calendar for {op.id}"},
+                    request=request,
+                )
+
+            calendar_branches = []
+            for combination_index, profile_combination in enumerate(product(*choice_groups)):
+                joint_windows = self._intersect_calendar_windows(
+                    [profile[0] for profile in profile_combination]
+                )
+                if not joint_windows:
+                    continue
+                profile_constraints = [
+                    profile[1] for profile in profile_combination if profile[1]
+                ]
+                calendar_branches.extend(
+                    self._calendar_duration_branches(
+                        model,
+                        op_vars[op.id]["start"],
+                        op_vars[op.id]["interval_size"],
+                        op_vars[op.id]["duration"],
+                        joint_windows,
+                        op.id,
+                        combination_index,
+                        profile_constraints,
+                    )
+                )
+                calendar_profile_count += 1
+
+            if not calendar_branches:
+                return ExactResult(
+                    status="INFEASIBLE",
+                    bounds={"error": f"Insufficient joint calendar capacity for {op.id}"},
+                    request=request,
+                )
+            model.AddExactlyOne(calendar_branches)
+
+        request["calendar_mode"] = "resource_calendar_preemptive"
+        request["calendar_profile_count"] = calendar_profile_count
+
+        hinted_operations: set[str] = set()
+        for op in decision_ops:
+            seed = warm_start_by_op.get(op.id)
+            if not seed:
+                continue
+            start_value = seed.get("start")
+            try:
+                start_hours = float(start_value)
+            except (TypeError, ValueError):
+                start_hours = float("nan")
+            if math.isfinite(start_hours):
+                latest_start = max(0, horizon - int(op_vars[op.id]["duration"]))
+                hinted_start = min(latest_start, max(0, int(round(start_hours * scale))))
+                model.AddHint(op_vars[op.id]["start"], hinted_start)
+                hinted_operations.add(op.id)
+
+            selected_machine = seed.get("machine_id")
+            machine_bools = machine_choices[op.id]["bools"]
+            if selected_machine in machine_bools:
+                for resource_id, selector in machine_bools.items():
+                    model.AddHint(selector, 1 if resource_id == selected_machine else 0)
+                hinted_operations.add(op.id)
+
+            selected_toolings = list(seed.get("tooling_ids") or [])
+            for requirement_index, _ in enumerate(op.required_tooling_types):
+                selected_tooling = selected_toolings[requirement_index] if requirement_index < len(selected_toolings) else None
+                tooling_bools = tooling_choices[(op.id, requirement_index)]["bools"]
+                if selected_tooling in tooling_bools:
+                    for resource_id, selector in tooling_bools.items():
+                        model.AddHint(selector, 1 if resource_id == selected_tooling else 0)
+                    hinted_operations.add(op.id)
+
+            selected_personnel = list(seed.get("personnel_ids") or [])
+            for requirement_index, _ in enumerate(op.required_personnel_skills):
+                selected_person = selected_personnel[requirement_index] if requirement_index < len(selected_personnel) else None
+                personnel_bools = personnel_choices[(op.id, requirement_index)]["bools"]
+                if selected_person in personnel_bools:
+                    for resource_id, selector in personnel_bools.items():
+                        model.AddHint(selector, 1 if resource_id == selected_person else 0)
+                    hinted_operations.add(op.id)
+        request["hinted_operation_count"] = len(hinted_operations)
+
         for resource_id, resource in self.shop.machines.items():
             intervals = machine_intervals.setdefault(resource_id, [])
-            intervals.extend(self._fixed_unavailability_intervals(model, resource.unavailable_windows(horizon_hours), scale, resource_id))
             if intervals:
                 model.AddNoOverlap(intervals)
             model_step(f"正在创建机器约束 {model_completed + 1} / {model_total}")
         for resource_id, resource in self.shop.toolings.items():
             intervals = tooling_intervals.setdefault(resource_id, [])
-            intervals.extend(self._fixed_unavailability_intervals(model, resource.unavailable_windows(horizon_hours), scale, resource_id))
             if intervals:
                 model.AddNoOverlap(intervals)
             model_step(f"正在创建工装约束 {model_completed + 1} / {model_total}")
         for resource_id, resource in self.shop.personnel.items():
             intervals = personnel_intervals.setdefault(resource_id, [])
-            intervals.extend(self._fixed_unavailability_intervals(model, resource.unavailable_windows(horizon_hours), scale, resource_id))
             if intervals:
                 model.AddNoOverlap(intervals)
             model_step(f"正在创建人员约束 {model_completed + 1} / {model_total}")
@@ -486,7 +627,7 @@ class ExactSolver:
             for objective_key, weight in request["objective_weights"].items():
                 spec = EXACT_OBJECTIVES[objective_key]
                 expr = objective_terms[spec.solver_key]
-                coefficient = max(1, int(round(weight * 100000 / objective_scales[spec.solver_key])))
+                coefficient = weight / objective_scales[spec.solver_key]
                 weighted_terms.append(expr * coefficient)
             model.Minimize(sum(weighted_terms) if weighted_terms else makespan_var)
         else:
@@ -626,6 +767,151 @@ class ExactSolver:
     def solve_pareto_front(self, num_points: int = 10) -> list:
         del num_points
         return [self.solve()]
+
+    def _resource_calendar_signature(
+        self,
+        resource,
+        horizon_hours: float,
+        scale: int,
+    ) -> tuple[tuple[int, int], ...]:
+        horizon = int(round(horizon_hours * scale))
+        windows = []
+        for start, end in resource.available_windows_between(0.0, horizon_hours):
+            start_value = max(0, int(round(start * scale)))
+            end_value = min(horizon, int(round(end * scale)))
+            if end_value > start_value:
+                windows.append((start_value, end_value))
+        return tuple(windows)
+
+    def _choice_calendar_profiles(
+        self,
+        choice_info,
+        resource_map,
+        horizon_hours: float,
+        scale: int,
+    ):
+        """Group one resource-choice set by effective calendar signature."""
+        selected_id = choice_info["selected"]
+        if selected_id is not None:
+            resource = resource_map.get(selected_id)
+            if resource is None:
+                return []
+            signature = self._resource_calendar_signature(
+                resource,
+                horizon_hours,
+                scale,
+            )
+            return [(signature, ())] if signature else []
+
+        grouped = {}
+        for resource_id, selector in choice_info["bools"].items():
+            resource = resource_map.get(resource_id)
+            if resource is None:
+                continue
+            signature = self._resource_calendar_signature(
+                resource,
+                horizon_hours,
+                scale,
+            )
+            if signature:
+                grouped.setdefault(signature, []).append(selector)
+
+        # When every candidate shares one profile, AddExactlyOne(resource selectors)
+        # already guarantees it and no branch-specific linking constraint is needed.
+        one_profile = len(grouped) == 1
+        return [
+            (signature, () if one_profile else tuple(selectors))
+            for signature, selectors in grouped.items()
+        ]
+
+    def _intersect_calendar_windows(self, signatures):
+        if not signatures:
+            return ()
+        result = list(signatures[0])
+        for signature in signatures[1:]:
+            intersection = []
+            left_index = 0
+            right_index = 0
+            right = list(signature)
+            while left_index < len(result) and right_index < len(right):
+                left_start, left_end = result[left_index]
+                right_start, right_end = right[right_index]
+                start = max(left_start, right_start)
+                end = min(left_end, right_end)
+                if end > start:
+                    intersection.append((start, end))
+                if left_end <= right_end:
+                    left_index += 1
+                else:
+                    right_index += 1
+            result = intersection
+            if not result:
+                break
+        return tuple(result)
+
+    def _calendar_duration_branches(
+        self,
+        model,
+        start_var,
+        interval_size_var,
+        productive_duration: int,
+        windows,
+        op_id: str,
+        combination_index: int,
+        profile_constraints,
+    ):
+        """Create time branches for one joint resource-calendar profile."""
+        compiled = []
+        work_cursor = 0
+        for wall_start, wall_end in windows:
+            available = wall_end - wall_start
+            compiled.append((wall_start, wall_end, work_cursor, work_cursor + available))
+            work_cursor += available
+
+        work_ends = [item[3] for item in compiled]
+        branches = []
+        for start_index, (wall_start, _wall_end, work_start, work_end) in enumerate(compiled):
+            if work_end <= work_start:
+                continue
+            start_work_min = work_start
+            start_work_max = work_end - 1
+            finish_work_min = start_work_min + productive_duration
+            finish_work_max = start_work_max + productive_duration
+            end_index = max(start_index, bisect_left(work_ends, finish_work_min))
+
+            while end_index < len(compiled):
+                end_wall_start, _end_wall_end, end_work_start, end_work_end = compiled[end_index]
+                if end_work_start >= finish_work_max:
+                    break
+                lower_work = max(
+                    start_work_min,
+                    end_work_start - productive_duration + 1,
+                )
+                upper_work = min(
+                    start_work_max,
+                    end_work_end - productive_duration,
+                )
+                if lower_work <= upper_work:
+                    selector = model.NewBoolVar(
+                        f"calendar_{op_id}_{combination_index}_{start_index}_{end_index}"
+                    )
+                    start_lower = wall_start + (lower_work - work_start)
+                    start_upper = wall_start + (upper_work - work_start)
+                    elapsed = (
+                        end_wall_start
+                        - end_work_start
+                        + productive_duration
+                        - wall_start
+                        + work_start
+                    )
+                    model.Add(start_var >= start_lower).OnlyEnforceIf(selector)
+                    model.Add(start_var <= start_upper).OnlyEnforceIf(selector)
+                    model.Add(interval_size_var == elapsed).OnlyEnforceIf(selector)
+                    for resource_selectors in profile_constraints:
+                        model.Add(sum(resource_selectors) == 1).OnlyEnforceIf(selector)
+                    branches.append(selector)
+                end_index += 1
+        return branches
 
     def _fixed_unavailability_intervals(self, model, windows, scale: int, resource_id: str):
         fixed_intervals = []

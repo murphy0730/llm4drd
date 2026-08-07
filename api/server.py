@@ -1,5 +1,5 @@
 """FastAPI 服务 v3 — 完整后端"""
-import os, csv, hashlib, io, json, inspect, logging, math, time, uuid, threading, traceback
+import os, copy, csv, hashlib, io, json, inspect, logging, math, time, uuid, threading, traceback
 from datetime import datetime
 from typing import Optional, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Body
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 import openpyxl
 
 from ..config import get_config, reload_config
-from ..core.models import OpStatus, Operation, ShopFloor
+from ..core.models import Machine, OpStatus, Operation, Personnel, ShopFloor, Tooling
 from ..data.generator import InstanceGenerator
 from ..core.rules import BUILTIN_RULES, get_all_rule_names
 from ..core.sim_runtime import SimulationRuntime
@@ -243,9 +243,17 @@ async def shutdown():
 
 @app.get("/")
 async def index():
-    # Keep one supported HTML/JavaScript contract for the application shell.
+    # v3 重构界面为默认入口；旧版保留在 /v2 便于回退比对。
+    f3 = os.path.join(FRONT, "index_v3.html")
+    if os.path.exists(f3):
+        return FileResponse(f3)
     f = os.path.join(FRONT, "index_v2.html")
     return FileResponse(f) if os.path.exists(f) else {"msg": "API running"}
+
+@app.get("/v3")
+async def index_v3():
+    f = os.path.join(FRONT, "index_v3.html")
+    return FileResponse(f) if os.path.exists(f) else {"msg": "V3 frontend not found"}
 
 @app.get("/v2")
 async def index_v2():
@@ -405,6 +413,15 @@ class ExactReferenceReq(BaseModel):
     time_limit_s: int = 60
 
 
+class ExactWindowSolveReq(BaseModel):
+    warm_start_set_id: Optional[str] = None
+    baseline_rule_name: str = "ATC"
+    baseline_strategy_id: Optional[str] = None
+    window_days: int = Field(default=1, ge=1, le=10)
+    objective_weights: dict[str, float] = Field(default_factory=dict)
+    time_limit_s: int = Field(default=45, ge=5)
+
+
 class ExportSolutionReq(BaseModel):
     task_id: Optional[str] = None
     solution_id: str
@@ -455,6 +472,7 @@ class InsertionEvaluateReq(BaseModel):
     base_source: str = "simulation"
     task_id: Optional[str] = None
     solution_id: Optional[str] = None
+    strategy_id: Optional[str] = None
     policy: str = "frozen"
     orders: list[InsertionOrderReq]
     operations: list[InsertionOperationReq]
@@ -3480,6 +3498,384 @@ async def delete_dispatch_strategy_set(set_id: str):
 
 
 # === Exact Reference ===
+def _validate_exact_window_weights(raw_weights: dict[str, float]) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for key, raw_value in (raw_weights or {}).items():
+        if key not in EXACT_OBJECTIVES:
+            raise HTTPException(422, f"OR-Tools 不支持目标：{key}")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, f"目标 {key} 的权重不是有效数字") from exc
+        if not math.isfinite(value) or value < 0:
+            raise HTTPException(422, f"目标 {key} 的权重必须是非负有限数")
+        if value > 1e-9:
+            weights[key] = value
+    total = sum(weights.values())
+    if total <= 1e-9:
+        raise HTTPException(422, "至少需要一个权重大于 0 的精确目标")
+    if total > 1.0 + 1e-9:
+        raise HTTPException(422, f"目标权重合计不能大于 1（当前 {total:.4f}）")
+    return weights
+
+
+def _exact_window_seed_plan(current_shop: ShopFloor, req: ExactWindowSolveReq) -> tuple[SimResult, dict]:
+    if req.baseline_strategy_id:
+        if not req.warm_start_set_id:
+            raise HTTPException(422, "选择已发布方案时必须同时提供所属方案集")
+        strategy_set = dispatch_strategy_store.get_set(req.warm_start_set_id)
+        if strategy_set is None or strategy_set.get("status") != "published":
+            raise HTTPException(404, "选择的热启动方案集不存在或未发布")
+        strategy = next(
+            (
+                item for item in strategy_set.get("strategies") or []
+                if item.get("id") == req.baseline_strategy_id and item.get("status") == "active"
+            ),
+            None,
+        )
+        if strategy is None:
+            raise HTTPException(422, "选择的方案不属于当前热启动方案集或已失效")
+        candidate = _candidate_from_dispatch_strategy(strategy)
+        graph_context_mode = resolve_graph_context_mode()
+        graph_context = None
+        if graph_context_mode != GraphContextMode.LEGACY:
+            graph_context, _ = graph_context_service.get_or_build(current_shop)
+        optimizer = HybridNSGA3ALNSOptimizer(
+            current_shop,
+            HybridConfig(
+                objective_keys=["total_tardiness"],
+                time_limit_s=1,
+                generations=1,
+                population_size=4,
+                parallel_workers=0,
+                baseline_seeds_enabled=False,
+            ),
+            graph_context,
+            graph_context_mode,
+        )
+        dispatch_rule = optimizer._dispatch_rule(candidate)
+        plan = {
+            "type": "dispatch_strategy",
+            "set_id": strategy_set["id"],
+            "set_name": strategy_set["name"],
+            "strategy_id": strategy["id"],
+            "label": strategy["name"],
+        }
+    else:
+        rule_name = str(req.baseline_rule_name or "ATC").strip().upper()
+        dispatch_rule = BUILTIN_RULES.get(rule_name)
+        if dispatch_rule is None:
+            raise HTTPException(422, f"未知派工规则：{rule_name}")
+        plan = {
+            "type": "builtin_rule",
+            "set_id": req.warm_start_set_id,
+            "rule_name": rule_name,
+            "label": rule_name,
+        }
+
+    seed_result = Simulator(current_shop, dispatch_rule).run()
+    analytics = build_schedule_analytics(current_shop, seed_result)
+    if not analytics.feasible or analytics.completed_operations != len(current_shop.operations):
+        raise HTTPException(
+            422,
+            f"选中方案未生成完整可行排程（{analytics.completed_operations} / {len(current_shop.operations)} 道工序），无法作为精确求解热启动",
+        )
+    return seed_result, plan
+
+
+def _exact_window_order_ids(current_shop: ShopFloor, seed_schedule: list[dict], window_days: int) -> tuple[list[str], dict[str, float]]:
+    starts_by_task: dict[str, float] = {}
+    for entry in seed_schedule:
+        task_id = entry.get("task_id")
+        start = entry.get("start")
+        if not task_id or start is None:
+            continue
+        try:
+            start_value = float(start)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start_value):
+            continue
+        starts_by_task[task_id] = min(start_value, starts_by_task.get(task_id, start_value))
+
+    window_end = float(window_days * 24)
+    selected: list[str] = []
+    main_starts: dict[str, float] = {}
+    for order_id, order in sorted(current_shop.orders.items()):
+        main_task_ids = []
+        if order.main_task_id and order.main_task_id in current_shop.tasks:
+            main_task_ids.append(order.main_task_id)
+        if not main_task_ids:
+            main_task_ids.extend(
+                task_id for task_id in order.task_ids
+                if task_id in current_shop.tasks and current_shop.tasks[task_id].is_main
+            )
+        starts = [starts_by_task[task_id] for task_id in main_task_ids if task_id in starts_by_task]
+        if not starts:
+            continue
+        main_start = min(starts)
+        if 0.0 <= main_start < window_end:
+            selected.append(order_id)
+            main_starts[order_id] = main_start
+    return selected, main_starts
+
+
+def _exact_window_task_flow_floor(current_shop: ShopFloor, seed_by_op: dict[str, dict], task_id: str) -> float | None:
+    task = current_shop.tasks.get(task_id)
+    if task is None:
+        return None
+    values = []
+    for op in task.operations:
+        entry = seed_by_op.get(op.id)
+        if entry is None or entry.get("end") is None:
+            continue
+        try:
+            end = float(entry["end"])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(end):
+            values.append(end + max(0.0, float(op.turnover_time or 0.0)))
+    return max(values) if values else None
+
+
+def _build_exact_window_shop(
+    current_shop: ShopFloor,
+    order_ids: list[str],
+    seed_schedule: list[dict],
+) -> tuple[ShopFloor, list[dict], int]:
+    selected_order_ids = set(order_ids)
+    selected_task_ids = {
+        task_id for task_id, task in current_shop.tasks.items()
+        if task.order_id in selected_order_ids
+    }
+    selected_op_ids = {
+        op_id for op_id, op in current_shop.operations.items()
+        if op.task_id in selected_task_ids
+    }
+    seed_by_op = {
+        entry.get("op_id"): entry for entry in seed_schedule
+        if entry.get("op_id")
+    }
+
+    orders = {}
+    for order_id in sorted(selected_order_ids):
+        source = current_shop.orders.get(order_id)
+        if source is None:
+            continue
+        cloned = copy.deepcopy(source)
+        cloned.task_ids = [task_id for task_id in source.task_ids if task_id in selected_task_ids]
+        if cloned.main_task_id not in selected_task_ids:
+            cloned.main_task_id = next(
+                (task_id for task_id in cloned.task_ids if current_shop.tasks[task_id].is_main),
+                None,
+            )
+        orders[order_id] = cloned
+
+    tasks = {}
+    operations = {}
+    boundary_constraint_count = 0
+    for task_id in sorted(selected_task_ids):
+        source_task = current_shop.tasks[task_id]
+        cloned_task = copy.deepcopy(source_task)
+        external_task_floors = []
+        for predecessor_task_id in source_task.predecessor_task_ids:
+            if predecessor_task_id not in selected_task_ids:
+                floor = _exact_window_task_flow_floor(current_shop, seed_by_op, predecessor_task_id)
+                if floor is not None:
+                    external_task_floors.append(floor)
+                    boundary_constraint_count += 1
+        cloned_task.predecessor_task_ids = [
+            predecessor_task_id for predecessor_task_id in source_task.predecessor_task_ids
+            if predecessor_task_id in selected_task_ids
+        ]
+        cloned_task.operations = []
+        tasks[task_id] = cloned_task
+
+        for source_op in source_task.operations:
+            if source_op.id not in selected_op_ids:
+                continue
+            cloned_op = copy.deepcopy(source_op)
+            boundary_floors = list(external_task_floors)
+            kept_predecessor_ops = []
+            for predecessor_op_id in source_op.predecessor_ops:
+                if predecessor_op_id in selected_op_ids:
+                    kept_predecessor_ops.append(predecessor_op_id)
+                    continue
+                predecessor = current_shop.operations.get(predecessor_op_id)
+                entry = seed_by_op.get(predecessor_op_id)
+                if predecessor is None or entry is None or entry.get("end") is None:
+                    continue
+                try:
+                    end = float(entry["end"])
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(end):
+                    boundary_floors.append(end + max(0.0, float(predecessor.turnover_time or 0.0)))
+                    boundary_constraint_count += 1
+            cloned_op.predecessor_ops = kept_predecessor_ops
+
+            kept_predecessor_tasks = []
+            for predecessor_task_id in source_op.predecessor_tasks:
+                if predecessor_task_id in selected_task_ids:
+                    kept_predecessor_tasks.append(predecessor_task_id)
+                    continue
+                floor = _exact_window_task_flow_floor(current_shop, seed_by_op, predecessor_task_id)
+                if floor is not None:
+                    boundary_floors.append(floor)
+                    boundary_constraint_count += 1
+            cloned_op.predecessor_tasks = kept_predecessor_tasks
+            if boundary_floors:
+                cloned_op.flow_release_floor = max(cloned_op.flow_release_floor, *boundary_floors)
+            operations[cloned_op.id] = cloned_op
+            cloned_task.operations.append(cloned_op)
+
+    required_machine_ids: set[str] = set()
+    required_tooling_types: set[str] = set()
+    required_tooling_ids: set[str] = set()
+    required_personnel_skills: set[str] = set()
+    required_personnel_ids: set[str] = set()
+    for op in operations.values():
+        if op.eligible_machine_ids:
+            required_machine_ids.update(op.eligible_machine_ids)
+        else:
+            required_machine_ids.update(
+                machine_id for machine_id, machine in current_shop.machines.items()
+                if machine.type_id == op.process_type
+            )
+        if op.assigned_machine_id:
+            required_machine_ids.add(op.assigned_machine_id)
+        required_tooling_types.update(op.required_tooling_types)
+        required_tooling_ids.update(op.assigned_tooling_ids)
+        required_personnel_skills.update(op.required_personnel_skills)
+        required_personnel_ids.update(op.assigned_personnel_ids)
+
+    machines = {
+        machine_id: Machine(
+            id=machine.id,
+            name=machine.name,
+            type_id=machine.type_id,
+            shifts=list(machine.shifts),
+            downtimes=copy.deepcopy(machine.downtimes),
+        )
+        for machine_id, machine in current_shop.machines.items()
+        if machine_id in required_machine_ids
+    }
+    toolings = {
+        tooling_id: Tooling(
+            id=tooling.id,
+            name=tooling.name,
+            type_id=tooling.type_id,
+            shifts=list(tooling.shifts),
+            downtimes=copy.deepcopy(tooling.downtimes),
+        )
+        for tooling_id, tooling in current_shop.toolings.items()
+        if tooling.type_id in required_tooling_types or tooling_id in required_tooling_ids
+    }
+    personnel = {
+        personnel_id: Personnel(
+            id=person.id,
+            name=person.name,
+            skills=list(person.skills),
+            shifts=list(person.shifts),
+            downtimes=copy.deepcopy(person.downtimes),
+        )
+        for personnel_id, person in current_shop.personnel.items()
+        if required_personnel_skills.intersection(person.skills) or personnel_id in required_personnel_ids
+    }
+    machine_type_ids = {machine.type_id for machine in machines.values()}
+    tooling_type_ids = {tooling.type_id for tooling in toolings.values()}
+    scope_shop = ShopFloor(
+        machine_types={
+            type_id: copy.deepcopy(machine_type)
+            for type_id, machine_type in current_shop.machine_types.items()
+            if type_id in machine_type_ids
+        },
+        tooling_types={
+            type_id: copy.deepcopy(tooling_type)
+            for type_id, tooling_type in current_shop.tooling_types.items()
+            if type_id in tooling_type_ids
+        },
+        machines=machines,
+        toolings=toolings,
+        personnel=personnel,
+        orders=orders,
+        tasks=tasks,
+        operations=operations,
+        plan_start_at=current_shop.plan_start_at,
+    )
+    scope_shop.build_indexes()
+    scope_seed = [copy.deepcopy(seed_by_op[op_id]) for op_id in sorted(selected_op_ids) if op_id in seed_by_op]
+    return scope_shop, scope_seed, boundary_constraint_count
+
+
+def _exact_window_solution_payload(
+    scope_shop: ShopFloor,
+    result,
+    task_id: str,
+    submitted_weights: dict[str, float],
+    scope: dict,
+) -> dict:
+    analytics = build_schedule_analytics(scope_shop, SimResult(schedule=result.schedule))
+    objectives = {
+        key: round(float(analytics.objective_values.get(key, result.objectives.get(key, 0.0))), 4)
+        for key in submitted_weights
+    }
+    if "weighted_score" in result.objectives:
+        objectives["weighted_score"] = round(float(result.objectives["weighted_score"]), 6)
+    schedule = []
+    for entry in result.schedule:
+        task = scope_shop.tasks.get(entry.get("task_id"))
+        order = scope_shop.orders.get(task.order_id) if task else None
+        schedule.append(
+            _serialize_schedule_entry(
+                scope_shop,
+                {
+                    **entry,
+                    "order_id": order.id if order else "",
+                    "order_name": order.name if order else "",
+                    "priority": order.priority if order else 1,
+                    "due_date": round(order.due_date, 3) if order else 0,
+                    "due_at": scope_shop.time_label(order.due_date) if order else None,
+                    "is_tardy": bool(order and entry.get("end", 0) > order.due_date),
+                    "is_main": bool(task and task.is_main),
+                },
+            )
+        )
+    return {
+        "solution_id": f"EXACT:WINDOW:{task_id}",
+        "source": "exact_window_reference",
+        "feasible": bool(analytics.feasible),
+        "evaluation_mode": "exact_solver",
+        "objectives": objectives,
+        "metrics": {
+            **{key: round(float(value), 4) for key, value in analytics.objective_values.items()},
+            "solve_time_s": round(result.solve_time_s, 3),
+            "status": result.status,
+            "evaluation_mode": "exact_solver",
+        },
+        "summary": {
+            "completed_operations": analytics.completed_operations,
+            "total_operations": len(scope_shop.operations),
+            "tardy_order_ids": analytics.tardy_order_ids,
+            "tardy_task_ids": analytics.tardy_task_ids,
+            "bottleneck_machine_ids": analytics.bottleneck_machine_ids,
+        },
+        "scope": scope,
+        "exact_info": {
+            "mode": "weighted",
+            "submitted_weights": submitted_weights,
+            "objective_weights": (result.request or {}).get("objective_weights", {}),
+            "support": (result.request or {}).get("support", {}),
+            "hinted_operation_count": (result.request or {}).get("hinted_operation_count", 0),
+            "solve_time_s": round(result.solve_time_s, 3),
+            "status": result.status,
+        },
+        "schedule": schedule,
+        "schedule_total": len(schedule),
+        "schedule_truncated": False,
+    }
+
+
 @app.get("/api/exact/objectives")
 async def exact_objectives():
     return {"objectives": exact_objective_catalog_payload()}
@@ -3488,6 +3884,161 @@ async def exact_objectives():
 # 大实例保护：CP-SAT 建模随 工序数×候选机台 超线性增长，建模阶段不受 time_limit_s 约束
 # （exact.py:497-503），超过阈值直接拒绝，避免同步端点卡死整个事件循环。
 EXACT_REFERENCE_MAX_OPERATIONS = 2000
+
+
+@app.post("/api/exact/window/solve")
+async def exact_window_solve(req: ExactWindowSolveReq, bg: BackgroundTasks):
+    current_shop = _active_shop()
+    if current_shop is None:
+        raise HTTPException(400, "当前没有可用实例")
+    weights = _validate_exact_window_weights(req.objective_weights)
+    task_id = str(uuid.uuid4())[:8]
+    created_at = time.time()
+    task = {
+        "kind": "exact_window",
+        "status": "running",
+        "phase": "seed_schedule",
+        "message": "正在生成选中方案的完整排程",
+        "real_progress": 0.02,
+        "phase_progress": 0.0,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "last_real_progress_at": created_at,
+        "elapsed_s": 0.0,
+        "config": {**req.model_dump(), "objective_weights": weights},
+        "scope": None,
+        "result": None,
+        "error": None,
+    }
+    _exact_tasks[task_id] = task
+
+    def update_task(**changes):
+        now = time.time()
+        if "real_progress" in changes and float(changes["real_progress"]) > float(task.get("real_progress", 0.0)):
+            task["last_real_progress_at"] = now
+        task.update(changes)
+        task["updated_at"] = now
+        task["elapsed_s"] = round(now - created_at, 2)
+
+    def run_window_exact():
+        try:
+            seed_result, plan = _exact_window_seed_plan(current_shop, req)
+            update_task(
+                phase="scope_build",
+                message="正在按主任务计划开工时间构建窗口集合",
+                real_progress=0.12,
+                phase_progress=0.0,
+                selected_plan=plan,
+            )
+            order_ids, main_starts = _exact_window_order_ids(current_shop, seed_result.schedule, req.window_days)
+            if not order_ids:
+                raise HTTPException(422, f"选中方案在前 {req.window_days} 天内没有计划开工的主订单")
+            scope_shop, scope_seed, boundary_count = _build_exact_window_shop(
+                current_shop,
+                order_ids,
+                seed_result.schedule,
+            )
+            if len(scope_shop.operations) > EXACT_REFERENCE_MAX_OPERATIONS:
+                raise HTTPException(
+                    413,
+                    f"窗口集合包含 {len(scope_shop.operations)} 道工序，超过精确求解上限 {EXACT_REFERENCE_MAX_OPERATIONS}",
+                )
+            scope = {
+                "kind": "window",
+                "window_days": req.window_days,
+                "window_start": 0.0,
+                "window_end": float(req.window_days * 24),
+                "window_start_at": current_shop.time_label(0.0),
+                "window_end_at": current_shop.time_label(float(req.window_days * 24)),
+                "selected_plan": plan,
+                "selected_order_ids": order_ids,
+                "main_order_starts": {
+                    order_id: round(start, 3) for order_id, start in main_starts.items()
+                },
+                "main_order_count": len(order_ids),
+                "order_count": len(scope_shop.orders),
+                "task_count": len(scope_shop.tasks),
+                "operation_count": len(scope_shop.operations),
+                "boundary_constraint_count": boundary_count,
+            }
+            update_task(
+                phase="model_build",
+                message="窗口集合已就绪，正在构建 CP-SAT 模型",
+                real_progress=0.2,
+                phase_progress=0.0,
+                scope=scope,
+            )
+
+            def progress(snapshot: dict):
+                solver_progress = float(snapshot.get("real_progress", 0.0))
+                update_task(
+                    phase=snapshot.get("phase", task.get("phase")),
+                    message=snapshot.get("activity", "OR-Tools 正在求解"),
+                    real_progress=max(float(task.get("real_progress", 0.0)), 0.2 + 0.79 * solver_progress),
+                    phase_progress=snapshot.get("phase_progress", 0.0),
+                    phase_completed=snapshot.get("phase_completed", 0),
+                    phase_total=snapshot.get("phase_total", 0),
+                    **{
+                        key: snapshot[key]
+                        for key in ("incumbent_count", "objective_value", "best_objective_bound")
+                        if key in snapshot
+                    },
+                )
+
+            result = ExactSolver(
+                scope_shop,
+                objectives=list(weights),
+                objective_weights=weights,
+                time_limit_s=req.time_limit_s,
+            ).solve(warm_start_schedule=scope_seed, progress_callback=progress)
+            if result.status not in {"OPTIMAL", "FEASIBLE"}:
+                error = (result.bounds or {}).get("error") or result.status
+                raise RuntimeError(f"OR-Tools 未得到可行解：{error}")
+            solution = _exact_window_solution_payload(
+                scope_shop,
+                result,
+                task_id,
+                weights,
+                scope,
+            )
+            update_task(
+                status="done",
+                phase="done",
+                message="窗口精确求解完成",
+                real_progress=1.0,
+                phase_progress=1.0,
+                result=solution,
+            )
+        except HTTPException as exc:
+            update_task(
+                status="error",
+                phase="error",
+                message="窗口精确求解未完成",
+                error=str(exc.detail),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("窗口精确求解失败")
+            update_task(
+                status="error",
+                phase="error",
+                message="窗口精确求解失败",
+                error=str(exc),
+            )
+
+    bg.add_task(run_window_exact)
+    return {
+        "task_id": task_id,
+        "status": "running",
+        "config": task["config"],
+    }
+
+
+@app.get("/api/exact/window/status/{task_id}")
+async def exact_window_status(task_id: str):
+    task = _exact_tasks.get(task_id)
+    if task is None or task.get("kind") != "exact_window":
+        raise HTTPException(404, "窗口精确求解任务不存在")
+    return _json_safe({**task, **_optimization_activity_payload(task)})
 
 
 @app.post("/api/optimize/exact-reference")
@@ -4388,8 +4939,27 @@ def _insertion_base_schedule(req: InsertionEvaluateReq, current_shop: ShopFloor)
             raise HTTPException(409, "当前仿真结果不完整，不能作为插单基准")
         _validate_insertion_base_coverage(current_shop, schedule)
         return source, label, schedule
+    if source == "strategy":
+        if not req.strategy_id:
+            raise HTTPException(422, "请选择一个已发布方案作为插单基准")
+        strategy = dispatch_strategy_store.get_strategy(req.strategy_id)
+        if not strategy:
+            raise HTTPException(404, "所选预排方案不存在或已下线")
+        strategy_set = dispatch_strategy_store.get_set(strategy.get("set_id")) or {}
+        task_id = strategy_set.get("source_task_id")
+        solution_id = strategy.get("source_solution_id")
+        if not task_id or not solution_id:
+            raise HTTPException(422, "所选预排方案缺少来源方案信息，无法作为插单基准")
+        _, task = _resolve_hybrid_task(task_id)
+        solution = _resolve_export_solution(current_shop, task, solution_id)
+        if solution.get("schedule_truncated"):
+            raise HTTPException(409, "基准方案排程不完整，无法保证现有订单不受影响")
+        schedule = list(solution.get("schedule") or [])
+        _validate_insertion_base_coverage(current_shop, schedule)
+        label = f"{strategy_set.get('name') or '方案集'} · {strategy.get('name') or solution_id}"
+        return source, label, schedule
     if source != "solution":
-        raise HTTPException(422, "base_source 仅支持 simulation 或 solution")
+        raise HTTPException(422, "base_source 仅支持 simulation、solution 或 strategy")
     _, task = _resolve_hybrid_task(req.task_id)
     if not req.solution_id:
         raise HTTPException(422, "请选择一个评审方案作为插单基准")

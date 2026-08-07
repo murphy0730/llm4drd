@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM4DRD Design System v2 · 重设计预览</title>
+<link rel="stylesheet" href="design-system.v2.css">
+<style>
+  /* ===== 预览页脚手架（非组件库内容） ===== */
+  html { scroll-behavior: smooth; }
+  .pg { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100vh; }
+  .pg-nav { position: sticky; top: 0; height: 100vh; overflow-y: auto; padding: 20px 12px; border-right: 1px solid var(--ln); background: var(--sf); }
+  .pg-nav .brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 14px; }
+  .pg-nav .brand .mk { width: 28px; height: 28px; border-radius: 8px; background: var(--grad-brand); display: grid; place-items: center; color: #fff; font-size: 12px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,.2), var(--sh1); }
+  .pg-nav .brand b { font-size: 13px; }
+  .pg-nav .brand small { display: block; font-size: 9px; color: var(--tx3); letter-spacing: .08em; }
+  .pg-nav a { display: block; padding: 5px 10px; border-radius: 6px; color: var(--tx2); font-size: 12px; text-decoration: none; }
+  .pg-nav a:hover { background: var(--sf2); color: var(--tx); }
+  .pg-main { padding: 30px 40px 90px; max-width: 1120px; }
+  .pg-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 12px; }
+  .pg-head h1 { margin: 0; font-family: var(--fd); font-size: 24px; font-weight: 680; letter-spacing: -0.02em; }
+  .pg-head p { margin: 7px 0 0; color: var(--tx2); font-size: 12.5px; max-width: 72ch; line-height: 1.7; }
+  .sec { margin: 44px 0 0; scroll-margin-top: 16px; }
+  .sec > h2 { margin: 0 0 4px; font-family: var(--fd); font-size: 17px; font-weight: 660; letter-spacing: -0.01em; }
+  .sec > .sd { margin: 0 0 18px; font-size: 12px; color: var(--tx2); max-width: 78ch; line-height: 1.6; }
+  .grp { margin-bottom: 22px; }
+  .grp-t { font-size: 10px; font-weight: 660; letter-spacing: .09em; text-transform: uppercase; color: var(--tx3); margin-bottom: 9px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .frm { border: 1px dashed var(--ln2); border-radius: var(--r3); padding: 14px; background: var(--cv); position: relative; }
+  .note-sm { font-size: 10.5px; color: var(--tx3); margin-top: 8px; line-height: 1.55; }
+  .g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  .g2 > * { min-width: 0; }
+  .sw-g { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 9px; }
+  .sw2 { border: 1px solid var(--ln); border-radius: 8px; overflow: hidden; background: var(--sf); }
+  .sw2 i { display: block; height: 40px; }
+  .sw2 b { display: block; padding: 6px 9px 0; font-family: var(--fm); font-size: 10px; font-weight: 600; }
+  .sw2 span { display: block; padding: 0 9px 7px; font-size: 9.5px; color: var(--tx3); }
+  .ty-r { display: grid; grid-template-columns: 140px 1fr; align-items: baseline; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--ln); }
+  .ty-r:last-child { border-bottom: 0; }
+  .ty-r small { font-family: var(--fm); font-size: 9.5px; color: var(--tx3); }
+  .rb { width: 84px; height: 54px; border: 1.5px solid var(--pri); background: var(--pri-soft); display: grid; place-items: end center; padding-bottom: 5px; font-family: var(--fm); font-size: 9px; color: var(--pri); }
+  .shb { width: 120px; height: 58px; background: var(--sf); border-radius: 8px; display: grid; place-items: center; font-family: var(--fm); font-size: 9.5px; color: var(--tx2); }
+  .fixed-demo { position: relative; border-radius: var(--r3); overflow: hidden; }
+  .side-mock { width: 208px; border: 1px solid var(--ln); border-radius: var(--r3); background: var(--sf); padding: 10px 8px; }
+  .canvas-mock { position: relative; height: 130px; background: radial-gradient(circle, color-mix(in srgb, var(--tx) 8%, transparent) 1px, transparent 1px); background-size: 20px 20px; }
+  @media (max-width: 960px) { .g2 { grid-template-columns: 1fr; } .pg { grid-template-columns: 1fr; } .pg-nav { display: none; } }
+</style>
+</head>
+<body>
+<div class="pg">
+
+  <nav class="pg-nav">
+    <div class="brand"><span class="mk">D2</span><div><b>Design System</b><small>V2 · 重设计</small></div></div>
+    <div class="side-g">基础</div>
+    <a href="#diff">新旧差异</a>
+    <a href="#tokens">设计 Tokens</a>
+    <div class="side-g">基础组件</div>
+    <a href="#btns">按钮</a>
+    <a href="#navs">导航与步骤条</a>
+    <a href="#tags">标签</a>
+    <a href="#kpis">指标</a>
+    <a href="#tbls">表格</a>
+    <a href="#cards">卡片与空态</a>
+    <a href="#forms">表单</a>
+    <a href="#progs">进度与运行态</a>
+    <a href="#fbk">反馈</a>
+    <div class="side-g">业务模块</div>
+    <a href="#mod-work">工作台 Hero</a>
+    <a href="#mod-bench">方案工作台</a>
+    <a href="#mod-misc">上传 / 导出 / 对话</a>
+  </nav>
+
+  <main class="pg-main">
+
+    <div class="pg-head">
+      <div>
+        <h1>Design System v2</h1>
+        <p>对按钮、卡片、表格、导航与业务模块的完整重设计。气质：美观 · 简洁 · 紧凑。本页仅加载 <code class="mono" style="font-size:11px">design-system.v2.css</code>（候选组件库），与旧样式完全隔离。</p>
+      </div>
+      <button class="btn btn-sec btn-sm" id="theme-btn">◐ 切换暗色</button>
+    </div>
+
+    <!-- ======== 新旧差异 ======== -->
+    <section class="sec" id="diff" style="margin-top:26px">
+      <div class="card tint"><div class="card-b" style="padding:14px 18px">
+        <div class="row" style="gap:22px;align-items:flex-start">
+          <div style="flex:1;min-width:260px">
+            <strong style="font-size:12.5px">本版与旧版的关键差异</strong>
+            <div class="note-sm" style="margin-top:6px">
+              ① 配色改为 slate 中性 + 靛蓝主色，语义色全部重调并配发光状态点；② 按钮新增渐变主按钮 + 彩色投影 hover、图标按钮、加载态；③ 新增「工作流步骤条」组件承载主线导航（替代纯侧栏 lamp）；④ 表格行内操作默认淡化、hover 显现，最优行用渐变识别；⑤ KPI 卡带左侧色条与涨跌 pill；⑥ 新增右侧抽屉（AI 面板）与双栏工作台模块；⑦ 全量暗色模式（右上角切换体验）。
+            </div>
+          </div>
+          <div style="flex:1;min-width:260px">
+            <strong style="font-size:12.5px">密度口径</strong>
+            <div class="note-sm" style="margin-top:6px">正文 12.5px · 按钮高 32/26px · 输入高 34px · 卡片 padding 13-16px · 顶栏 52px · 侧栏 216px。比旧版整体收高约 8%，但通过留白节奏与字重对比保持呼吸感。</div>
+          </div>
+        </div>
+      </div></div>
+    </section>
+
+    <!-- ======== TOKENS ======== -->
+    <section class="sec" id="tokens">
+      <h2>1 · 设计 Tokens</h2>
+      <p class="sd">单一变量层。组件只引用变量；暗色模式仅切换 token，组件零特例。</p>
+      <div class="grp">
+        <div class="grp-t">主色与语义色（实色 + 浅底）</div>
+        <div class="sw-g">
+          <div class="sw2"><i style="background:var(--pri)"></i><b>--pri #4f46e5</b><span>主色 · 靛蓝</span></div>
+          <div class="sw2"><i style="background:var(--grad-brand)"></i><b>--grad-brand</b><span>品牌渐变（限 3 处）</span></div>
+          <div class="sw2"><i style="background:var(--ok)"></i><b>--ok #059669</b><span>成功 / 有效</span></div>
+          <div class="sw2"><i style="background:var(--wn)"></i><b>--wn #d97706</b><span>警告 / 过期</span></div>
+          <div class="sw2"><i style="background:var(--er)"></i><b>--er #e11d48</b><span>失败 / 阻断</span></div>
+          <div class="sw2"><i style="background:var(--in)"></i><b>--in #0284c7</b><span>信息 / AI</span></div>
+          <div class="sw2"><i style="background:var(--ac)"></i><b>--ac #c2620a</b><span>情景域标识</span></div>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">中性色与文字</div>
+        <div class="sw-g">
+          <div class="sw2"><i style="background:var(--cv);border-bottom:1px solid var(--ln)"></i><b>--cv</b><span>页面底 #f5f6f9</span></div>
+          <div class="sw2"><i style="background:var(--sf);border-bottom:1px solid var(--ln)"></i><b>--sf</b><span>前景面 #fff</span></div>
+          <div class="sw2"><i style="background:var(--sf2)"></i><b>--sf2</b><span>表头 / hover</span></div>
+          <div class="sw2"><i style="background:var(--sf3)"></i><b>--sf3</b><span>轨道 / 代码底</span></div>
+          <div class="sw2"><i style="background:var(--tx)"></i><b>--tx</b><span>正文 #131a2c</span></div>
+          <div class="sw2"><i style="background:var(--tx2)"></i><b>--tx2</b><span>次要 #4e586e</span></div>
+          <div class="sw2"><i style="background:var(--tx3)"></i><b>--tx3</b><span>辅助 #8b93a7</span></div>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">订单标识色板（8 色循环 · 甘特/图谱/方案共用）</div>
+        <div class="row">
+          <span class="odot" style="background:var(--oc1);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc2);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc3);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc4);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc5);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc6);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc7);width:20px;height:20px;border-radius:6px"></span>
+          <span class="odot" style="background:var(--oc8);width:20px;height:20px;border-radius:6px"></span>
+        </div>
+      </div>
+      <div class="grp g2">
+        <div>
+          <div class="grp-t">字号阶梯</div>
+          <div class="card"><div class="card-b" style="padding:8px 16px">
+            <div class="ty-r"><small>T1 · 19px/640</small><span style="font-family:var(--fd);font-size:19px;font-weight:640;letter-spacing:-.01em">页面级标题</span></div>
+            <div class="ty-r"><small>T2 · 13.5px/620</small><span style="font-family:var(--fd);font-size:13.5px;font-weight:620">卡片标题</span></div>
+            <div class="ty-r"><small>T3 · 12.5px/580</small><span style="font-size:12.5px;font-weight:580">强调正文 / 列表主行</span></div>
+            <div class="ty-r"><small>T4 · 12.5px/400-550</small><span style="font-size:12.5px;color:var(--tx2)">正文、按钮、表格统一口径</span></div>
+            <div class="ty-r"><small>T5 · 11.5px</small><span style="font-size:11.5px;color:var(--tx2)">辅助说明、表单标签</span></div>
+            <div class="ty-r"><small>T6 · 10px 大写</small><span style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);font-weight:640">表头 · 分组标签</span></div>
+            <div class="ty-r"><small>KPI · 21px mono</small><span class="num" style="font-size:21px;font-weight:620;letter-spacing:-.02em">12,480.6</span></div>
+          </div></div>
+        </div>
+        <div>
+          <div class="grp-t">圆角 / 阴影</div>
+          <div class="row" style="margin-bottom:14px">
+            <div class="rb" style="border-radius:6px">r1 · 6</div>
+            <div class="rb" style="border-radius:8px">r2 · 8</div>
+            <div class="rb" style="border-radius:10px">r3 · 10</div>
+            <div class="rb" style="border-radius:14px">r4 · 14</div>
+            <div class="rb" style="border-radius:999px">full</div>
+          </div>
+          <div class="row">
+            <div class="shb" style="box-shadow:var(--sh1)">sh1 静态卡</div>
+            <div class="shb" style="box-shadow:var(--sh2)">sh2 浮层/hover</div>
+            <div class="shb" style="box-shadow:var(--sh3)">sh3 弹窗</div>
+            <div class="shb" style="box-shadow:var(--sh-pri)">sh-pri 主按钮</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== BUTTONS ======== -->
+    <section class="sec" id="btns">
+      <h2>2 · 按钮</h2>
+      <p class="sd">重设计点：主按钮微渐变 + 顶部高光 + hover 彩色投影上浮；新增图标按钮与加载态；每区块仍只许一个主按钮。</p>
+      <div class="grp">
+        <div class="grp-t">变体</div>
+        <div class="row">
+          <button class="btn btn-pri">主按钮</button>
+          <button class="btn btn-sec">次按钮</button>
+          <button class="btn btn-ghost">幽灵按钮</button>
+          <button class="btn btn-line">描边主色</button>
+          <button class="btn btn-danger">危险操作</button>
+          <button class="btn btn-pri" disabled>禁用</button>
+          <button class="btn btn-pri"><span class="spin"></span>运行中…</button>
+          <button class="lnk">文字链接 →</button>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">尺寸与图标按钮</div>
+        <div class="row">
+          <button class="btn btn-pri btn-lg">启动优化</button>
+          <button class="btn btn-sec">默认 32px</button>
+          <button class="btn btn-sec btn-sm">小按钮 26px</button>
+          <button class="btn btn-pri btn-sm">＋ 添加订单</button>
+          <button class="btn-icon" title="适配">⤢</button>
+          <button class="btn-icon" title="缩小">−</button>
+          <button class="btn-icon" title="放大">＋</button>
+          <button class="btn-icon" title="全屏">⛶</button>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">表格行内操作（默认淡化 · 行 hover 显现）</div>
+        <div class="frm"><div class="row">
+          <div class="ops" style="opacity:1">
+            <button class="op on">◎ 主方案</button>
+            <button class="op">✦ AI 评审</button>
+            <button class="op">⬇ 导出</button>
+          </div>
+          <span class="note-sm" style="margin:0">← 实际表格中未 hover 时 opacity 0.45，降低视觉噪声</span>
+        </div></div>
+      </div>
+    </section>
+
+    <!-- ======== NAV ======== -->
+    <section class="sec" id="navs">
+      <h2>3 · 导航与步骤条</h2>
+      <p class="sd">重设计点：新增「工作流步骤条」承载主线（替代纯 lamp 侧栏）；侧栏项带左指示条；Tab 分两种形态各司其职。</p>
+      <div class="grp">
+        <div class="grp-t">工作流步骤条 .steps（新组件 · 主线导航）</div>
+        <div class="steps">
+          <button class="step done"><span class="no">✓</span><span><strong>数据导入</strong><small>60 订单 · 已校验</small></span></button>
+          <button class="step done"><span class="no">✓</span><span><strong>仿真预排</strong><small>ATC · 可行</small></span></button>
+          <button class="step run"><span class="no">3</span><span><strong>优化求解</strong><small>运行中 66%</small></span></button>
+          <button class="step"><span class="no">4</span><span><strong>方案评审</strong><small>等待优化完成</small></span></button>
+          <button class="step block"><span class="no">5</span><span><strong>交付</strong><small>需先选定主方案</small></span></button>
+        </div>
+        <p class="note-sm">五态：done（✓ 绿）/ run（脉冲蓝）/ 未开始 / block（琥珀，含阻塞原因）/ 历史。副标题直接说状态，点击即跳转——把"下一步去哪"变成导航本身。</p>
+      </div>
+      <div class="grp g2">
+        <div>
+          <div class="grp-t">侧栏项 .side-i（激活 = 左指示条 + 浅底）</div>
+          <div class="side-mock">
+            <div class="side-g">工作区</div>
+            <button class="side-i"><span class="sic">▦</span>工作台</button>
+            <button class="side-i on"><span class="sic">⬆</span>数据准备<span class="dot ok"></span></button>
+            <button class="side-i"><span class="sic">◈</span>求解中心<span class="dot run"></span></button>
+            <button class="side-i"><span class="sic">◐</span>决策中心<span class="cnt">3/4</span></button>
+            <button class="side-i"><span class="sic">↳</span>情景评估</button>
+            <div class="side-g">系统</div>
+            <button class="side-i off"><span class="sic">⚙</span>系统工具（无实例）</button>
+          </div>
+        </div>
+        <div>
+          <div class="grp-t">分段 Tab .seg（视图切换）</div>
+          <div class="seg" data-seg><button class="on">方案库</button><button>插单模拟</button><button>精确参考</button></div>
+          <div class="grp-t" style="margin-top:18px">下划线 Tab .utabs（页内二级）</div>
+          <div class="card"><div class="card-b flush">
+            <div class="utabs" data-seg><button class="on">指标</button><button>利用率</button><button>甘特图</button></div>
+            <div style="padding:14px 16px;font-size:12px;color:var(--tx3)">Tab 内容区 —— 主方案「Pareto-03」的详细指标矩阵</div>
+          </div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== TAGS ======== -->
+    <section class="sec" id="tags">
+      <h2>4 · 标签</h2>
+      <p class="sd">状态 tag 带发光小点；筛选 chip 与实体 pill 分工明确；方案来源固定四类配色。</p>
+      <div class="grp">
+        <div class="grp-t">状态 tag</div>
+        <div class="row">
+          <span class="tag ok"><i></i>有效</span>
+          <span class="tag wn"><i></i>已过期</span>
+          <span class="tag er"><i></i>失败</span>
+          <span class="tag in"><i></i>AI 生成</span>
+          <span class="tag pri"><i></i>运行中</span>
+          <span class="tag"><i></i>历史记录</span>
+          <span class="tag line">描边中性</span>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">方案来源（固定四类 · 全应用一致）</div>
+        <div class="row">
+          <span class="tag">基准</span>
+          <span class="tag in">参照</span>
+          <span class="tag pri">Pareto</span>
+          <span class="tag ac">精确</span>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">筛选 chip .flt（点击切换）· 实体 pill · 标识点</div>
+        <div class="row">
+          <button class="flt on"><i style="background:var(--oc1)"></i>订单<b>60</b></button>
+          <button class="flt on"><i style="background:var(--oc3)"></i>工序<b>2,000</b></button>
+          <button class="flt"><i style="background:var(--oc4)"></i>机器<b>100</b></button>
+          <button class="flt"><i style="background:var(--oc7)"></i>工装<b>36</b></button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="epill"><i style="background:var(--oc6)"></i>TASK-0042</button>
+          <button class="epill"><i style="background:var(--oc3)"></i>OP-10387</button>
+          <button class="epill"><i style="background:var(--oc4)"></i>CNC-012</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== KPI ======== -->
+    <section class="sec" id="kpis">
+      <h2>5 · 指标</h2>
+      <p class="sd">重设计点：KPI 卡带左侧语义色条 + 涨跌 pill；大数字等宽字体。</p>
+      <div class="grp">
+        <div class="kpis">
+          <div class="kpi" style="--kc:var(--pri)"><span class="l">主订单延误率</span><span class="v">8.3<small>%</small></span><span class="f"><span class="dlt up">↓ 2.1pt</span>较基线</span></div>
+          <div class="kpi" style="--kc:var(--ok)"><span class="l">关键资源利用率</span><span class="v">76.2<small>%</small></span><span class="f"><span class="dlt up">↑ 1.8pt</span>活跃窗口口径</span></div>
+          <div class="kpi" style="--kc:var(--wn)"><span class="l">平均流程时间</span><span class="v">142.5<small>h</small></span><span class="f"><span class="dlt dn">↑ 3.2h</span>需关注</span></div>
+          <div class="kpi" style="--kc:var(--in)"><span class="l">完成工序</span><span class="v">1,847<small> / 2,000</small></span><span class="f"><span class="dlt fl">92.4%</span>剩余 153 道</span></div>
+        </div>
+      </div>
+      <div class="grp g2">
+        <div>
+          <div class="grp-t">KV 属性网格</div>
+          <div class="kvs">
+            <div><span>任务数</span><strong>214</strong></div>
+            <div><span>停机记录</span><strong>12</strong></div>
+            <div><span>在制工序</span><strong>38</strong></div>
+            <div><span>数据版本</span><strong>v0806</strong></div>
+            <div><span>计划起点</span><strong>08-06 08:00</strong></div>
+            <div><span>来源文件</span><strong>planning.xlsx</strong></div>
+          </div>
+        </div>
+        <div>
+          <div class="grp-t">统计带 .band（任务结果关键事实）</div>
+          <div class="band">
+            <div><span>保护校验</span><strong style="color:var(--ok)">通过</strong></div>
+            <div><span>插空 / 尾排</span><strong>4 / 2</strong></div>
+            <div><span>移动原工序</span><strong>0</strong></div>
+            <div><span>求解状态</span><strong>FEASIBLE</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== TABLES ======== -->
+    <section class="sec" id="tbls">
+      <h2>6 · 表格</h2>
+      <p class="sd">重设计点：选中行左指示条 + 浅底；最优行绿色渐变；行内操作 hover 显现；吸附表头。</p>
+      <div class="tbl">
+        <table>
+          <thead><tr><th style="width:32px"></th><th>方案</th><th>来源</th><th>总延误 (h)</th><th>总周期 (h)</th><th>利用率</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr class="best">
+              <td><span class="ck" style="display:inline-grid;width:15px;height:15px;border-radius:4px;border:1.5px solid var(--pri);background:var(--pri);color:#fff;place-items:center;font-size:9px">✓</span></td>
+              <td><span class="nm"><span class="odot" style="background:var(--oc1)"></span>Pareto-03 <span class="best-mark">BEST</span></span></td>
+              <td><span class="tag pri">Pareto</span></td>
+              <td><span class="cell-d"><span class="num">126.5</span><span class="d g">↓ -42.3 vs 基线</span></span></td>
+              <td><span class="cell-d"><span class="num">512.0</span><span class="d g">↓ -18.0</span></span></td>
+              <td><span class="cell-d"><span class="num">78.4%</span><span class="d f">+0.0pt</span></span></td>
+              <td><div class="ops"><button class="op on">◎ 主方案</button><button class="op">✦ AI</button><button class="op">⬇</button></div></td>
+            </tr>
+            <tr class="sel">
+              <td><span class="ck" style="display:inline-grid;width:15px;height:15px;border-radius:4px;border:1.5px solid var(--pri);background:var(--pri);color:#fff;place-items:center;font-size:9px">✓</span></td>
+              <td><span class="nm"><span class="odot" style="background:var(--oc2)"></span>Pareto-07</span></td>
+              <td><span class="tag pri">Pareto</span></td>
+              <td><span class="cell-d"><span class="num">158.2</span><span class="d g">↓ -10.6</span></span></td>
+              <td><span class="cell-d"><span class="num">498.5</span><span class="d g">↓ -31.5</span></span></td>
+              <td><span class="cell-d"><span class="num">80.1%</span><span class="d g">↑ +1.7pt</span></span></td>
+              <td><div class="ops"><button class="op">◎ 设为主方案</button><button class="op">✦ AI</button><button class="op">⬇</button></div></td>
+            </tr>
+            <tr>
+              <td><span class="ck" style="display:inline-grid;width:15px;height:15px;border-radius:4px;border:1.5px solid var(--ln2);place-items:center;font-size:9px;color:transparent">✓</span></td>
+              <td><span class="nm"><span class="odot" style="background:var(--oc8)"></span>基线 · ATC <span class="sub">rule</span></span></td>
+              <td><span class="tag">基准</span></td>
+              <td><span class="cell-d"><span class="num">168.8</span><span class="d f">— 基线</span></span></td>
+              <td><span class="cell-d"><span class="num">530.0</span><span class="d f">— 基线</span></span></td>
+              <td><span class="cell-d"><span class="num">74.9%</span><span class="d f">— 基线</span></span></td>
+              <td><div class="ops"><button class="op">◎ 设为主方案</button><button class="op">✦ AI</button><button class="op">⬇</button></div></td>
+            </tr>
+            <tr>
+              <td><span class="ck" style="display:inline-grid;width:15px;height:15px;border-radius:4px;border:1.5px solid var(--ln2);place-items:center;font-size:9px;color:transparent">✓</span></td>
+              <td><span class="nm"><span class="odot" style="background:var(--oc7)"></span>参照 · EDD</span></td>
+              <td><span class="tag in">参照</span></td>
+              <td><span class="cell-d"><span class="num">145.0</span><span class="d g">↓ -23.8</span></span></td>
+              <td><span class="cell-d"><span class="num">541.2</span><span class="d b">↑ +11.2</span></span></td>
+              <td><span class="cell-d"><span class="num">72.3%</span><span class="d b">↓ -2.6pt</span></span></td>
+              <td><div class="ops"><button class="op">◎ 设为主方案</button><button class="op">✦ AI</button><button class="op">⬇</button></div></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="pager"><span>已选 2/4 · 共 17 个方案</span><button class="btn btn-sec btn-sm">上一页</button><button class="btn btn-sec btn-sm">下一页</button></div>
+      </div>
+    </section>
+
+    <!-- ======== CARDS ======== -->
+    <section class="sec" id="cards">
+      <h2>7 · 卡片与空态</h2>
+      <p class="sd">静态卡仅 hairline + 极浅影；可点击卡才有 hover 上浮。空态统一图标 + 引导 + 动作。</p>
+      <div class="g2">
+        <div class="card">
+          <div class="card-h"><div><h3>标准卡片</h3><p>标题 13.5px / 说明 11.5px / 右侧动作区</p></div><div class="acts"><button class="btn btn-ghost btn-sm">更多</button><button class="btn btn-pri btn-sm">主操作</button></div></div>
+          <div class="card-b" style="font-size:12.5px;color:var(--tx2)">内容区 padding 16px。卡片间距 14-16px，纵向堆叠成 .stack。</div>
+        </div>
+        <div class="card clickable">
+          <div class="card-h"><div><h3>可点击卡片 ↗</h3><p>hover：边框加深 + 分层阴影 + 上浮 1px</p></div></div>
+          <div class="card-b" style="font-size:12.5px;color:var(--tx2)">用于结果列表、交付物入口等整体可点场景。</div>
+        </div>
+        <div class="card accent">
+          <div class="card-h"><div><h3>情景域卡片</h3><p>左侧 3px 强调色条（插单等专项）</p></div></div>
+          <div class="card-b" style="font-size:12.5px;color:var(--tx2)">与全局主色区分，提示用户当前处于独立情景。</div>
+        </div>
+        <div class="card">
+          <div class="empty"><div class="e-ic">▨</div><h4>尚未运行仿真</h4><p>选择预排规则后点击「运行仿真」，这里将展示结果甘特图</p><div class="acts"><button class="btn btn-pri btn-sm">运行仿真</button><button class="btn btn-ghost btn-sm">了解规则</button></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== FORMS ======== -->
+    <section class="sec" id="forms">
+      <h2>8 · 表单</h2>
+      <p class="sd">重设计点：输入框 34px / 6px 圆角 / 双层 hover；select 自绘箭头；开关、单选卡、目标勾选全新形态。</p>
+      <div class="grp g2">
+        <div class="card"><div class="card-h"><div><h3>基础输入</h3><p>focus：主色边框 + 3px 光晕</p></div></div><div class="card-b">
+          <div class="fgrid">
+            <label class="fld"><span>目标方案数</span><input class="inp" type="number" value="10"></label>
+            <label class="fld"><span>总预算（秒）<span class="hint">建议 240</span></span><input class="inp" type="number" value="300"></label>
+            <label class="fld"><span>起始规则</span><select class="sel"><option>ATC（推荐）</option><option>EDD</option><option>SPT</option></select></label>
+            <label class="fld"><span>禁用态</span><input class="inp" value="运行中不可改" disabled></label>
+            <label class="fld span2"><span>备注</span><textarea class="txa" placeholder="可选说明…"></textarea></label>
+          </div>
+        </div></div>
+        <div style="display:grid;gap:14px">
+          <div class="card"><div class="card-h"><div><h3>开关与单选卡</h3><p>二元设置 / 策略二选一</p></div></div><div class="card-b" style="display:grid;gap:14px">
+            <label class="sw"><input type="checkbox" checked><span class="trk"><i></i></span><span class="swc"><strong>冷启动</strong><small>忽略夜间持久化参数</small></span></label>
+            <div class="rpick">
+              <label class="on"><input type="radio" name="pol" checked><strong>冻结排程插空</strong><small>不移动任何已有工序</small></label>
+              <label><input type="radio" name="pol"><strong>交期保护重排</strong><small>允许移动但不破坏交期</small></label>
+            </div>
+          </div></div>
+          <div class="card"><div class="card-h"><div><h3>目标勾选 .pick</h3><p>上限 5 个 · 带 min/max 方向</p></div></div><div class="card-b"><div class="row" style="gap:8px">
+            <button class="pick on"><span class="box">✓</span>总延误时间<small>min</small></button>
+            <button class="pick on"><span class="box">✓</span>最大延误<small>min</small></button>
+            <button class="pick"><span class="box">✓</span>总流程时间<small>min</small></button>
+            <button class="pick"><span class="box">✓</span>净可用利用率<small>max</small></button>
+            <button class="pick"><span class="box">✓</span>换模次数<small>min</small></button>
+          </div></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== PROGRESS ======== -->
+    <section class="sec" id="progs">
+      <h2>9 · 进度与运行态</h2>
+      <p class="sd">重设计点：进度条渐变 + 微光；任务状态卡浅渐变底；阶段指示三态。</p>
+      <div class="grp g2">
+        <div class="task">
+          <div class="th"><h4>混合优化运行中</h4><span class="tag pri"><i></i>66%</span></div>
+          <div style="display:flex;gap:18px;align-items:center;margin-top:14px">
+            <div class="ringw">
+              <svg width="92" height="92" viewBox="0 0 92 92">
+                <circle cx="46" cy="46" r="39" fill="none" stroke="var(--sf3)" stroke-width="8"></circle>
+                <circle cx="46" cy="46" r="39" fill="none" stroke="url(#gring)" stroke-width="8" stroke-linecap="round" stroke-dasharray="245" stroke-dashoffset="83"></circle>
+                <defs><linearGradient id="gring" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4f46e5"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs>
+              </svg>
+              <span class="pc">66<small>%</small></span>
+            </div>
+            <div style="flex:1;min-width:0;display:grid;gap:10px">
+              <div class="phases"><span class="phs done">✓ 近似广搜</span><span class="phs on">精确精修</span><span class="phs">Pareto 重算</span></div>
+              <div class="bar"><i style="width:66%"></i></div>
+              <div style="font-size:11.5px;color:var(--tx2)">正在精修候选方案 18/24 · 真实进度静止 0s</div>
+            </div>
+          </div>
+          <div class="meta"><span>任务 hybrid-0806-01</span><span>已运行 2m 41s</span><span>预算 300s</span><span>近似评估 1,240</span></div>
+        </div>
+        <div style="display:grid;gap:14px">
+          <div class="task er">
+            <div class="th"><h4>精确求解失败</h4><span class="tag er"><i></i>失败</span></div>
+            <p style="margin:10px 0 0;font-size:12px;color:var(--tx2)">CP-SAT 在预算内未找到可行解。建议扩大窗口或放宽保护约束。</p>
+            <div class="meta"><span>已运行 120s</span><span>错误码 INFEASIBLE</span></div>
+            <div style="margin-top:12px;display:flex;gap:8px"><button class="btn btn-sec btn-sm">查看详情</button><button class="btn btn-pri btn-sm">重新求解</button></div>
+          </div>
+          <div class="card"><div class="card-h" style="padding:10px 14px"><div><h3>求解器日志</h3></div></div><div class="card-b" style="padding:12px 14px">
+            <div class="log">[14:02:11] 种群初始化完成，规模 60
+[14:02:18] 第 12 代：非支配解 10 个
+[14:02:37] 进入精确精修阶段，候选 24</div>
+          </div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== FEEDBACK ======== -->
+    <section class="sec" id="fbk">
+      <h2>10 · 反馈</h2>
+      <p class="sd">重设计点：横幅带圆形语义图标；Toast 毛玻璃 + 状态点；弹窗大圆角分层影；新增右侧抽屉。</p>
+      <div class="grp" style="display:grid;gap:9px">
+        <div class="note in"><span class="nic">i</span>优化任务运行中，可同时进行其他工作。<span class="grow"></span><button class="lnk">查看进度 →</button></div>
+        <div class="note ok"><span class="nic">✓</span>数据校验通过：1,924 项通过，17 项警告。<span class="grow"></span><button class="lnk">查看警告</button></div>
+        <div class="note wn"><span class="nic">!</span>仿真结果基于旧数据版本，已标记为「已过期」。<span class="grow"></span><button class="lnk">重新仿真 →</button></div>
+        <div class="note er"><span class="nic">×</span>校验失败：3 个错误阻断仿真与优化。<span class="grow"></span><button class="lnk">查看校验问题 →</button></div>
+      </div>
+      <div class="grp g2">
+        <div>
+          <div class="grp-t">Toast（内嵌演示 · 实际右上角堆叠）</div>
+          <div class="frm" style="display:grid;gap:9px;justify-items:start">
+            <div class="tst in"><i></i>数据校验已开始</div>
+            <div class="tst ok"><i></i>方案集「夜班策略」已发布</div>
+            <div class="tst wn"><i></i>仿真结果已过期，建议重跑</div>
+            <div class="tst er"><i></i>优化任务失败：预算内无可行解</div>
+          </div>
+        </div>
+        <div>
+          <div class="grp-t">弹窗（内嵌演示）</div>
+          <div class="frm fixed-demo" style="height:230px;padding:0">
+            <div class="msk">
+              <div class="mdl">
+                <h3>删除方案集「白班策略」？</h3>
+                <p>该方案集包含 6 个方案，删除后不可恢复；正在使用它的热启动配置将回退为默认规则。</p>
+                <div class="fts"><button class="btn btn-ghost">取消</button><button class="btn btn-danger">确认删除</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== MODULE: WORKBENCH HERO ======== -->
+    <section class="sec" id="mod-work">
+      <h2>11 · 工作台 Hero 模块</h2>
+      <p class="sd">深靛渐变 + 径向光晕 + 玻璃统计格。回答"当前在哪一步、下一步做什么"。</p>
+      <div class="hero2">
+        <div>
+          <span class="eb">下一步 · 方案评审</span>
+          <h3>10 个候选方案已就绪，待比较与定稿</h3>
+          <p>混合优化已完成（耗时 4m 12s）。已默认将前 3 个候选加入比较集合，确认主方案后即可导出交付。</p>
+          <button class="btn btn-w">进入方案评审 →</button>
+        </div>
+        <div class="cells2">
+          <div><span>当前主目标</span><strong>总延误</strong></div>
+          <div><span>候选方案</span><strong>10</strong></div>
+          <div><span>最优延误</span><strong>126.5h</strong></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== MODULE: BENCH ======== -->
+    <section class="sec" id="mod-bench">
+      <h2>12 · 方案工作台模块（决策中心目标形态）</h2>
+      <p class="sd">左列表 + 右详情：选中即详情，勾选即比较集合——替代旧的"纵向三层长滚动 + 隐式联动"。右侧含 AI 抽屉。</p>
+      <div class="wb">
+        <div class="wl">
+          <div class="wl-h"><strong style="font-size:12.5px">候选方案 <span class="num" style="color:var(--tx3);font-size:11px">17</span></strong><button class="btn btn-ghost btn-sm">＋ 添加参照</button></div>
+          <div class="lst">
+            <button class="li on ckd"><span class="ck">✓</span><span class="odot" style="background:var(--oc1)"></span><span class="lt"><strong>Pareto-03 <span class="tag pri" style="height:16px;font-size:9px">Pareto</span></strong><small>延误 126.5h · 周期 512h</small></span><span class="best-mark">BEST</span></button>
+            <button class="li ckd"><span class="ck">✓</span><span class="odot" style="background:var(--oc2)"></span><span class="lt"><strong>Pareto-07</strong><small>延误 158.2h · 周期 498h</small></span></button>
+            <button class="li"><span class="ck">✓</span><span class="odot" style="background:var(--oc8)"></span><span class="lt"><strong>基线 · ATC</strong><small>延误 168.8h · 周期 530h</small></span></button>
+            <button class="li"><span class="ck">✓</span><span class="odot" style="background:var(--oc7)"></span><span class="lt"><strong>参照 · EDD</strong><small>延误 145.0h · 周期 541h</small></span></button>
+          </div>
+        </div>
+        <div class="wr">
+          <div class="tbar">
+            <strong style="font-size:12.5px">Pareto-03</strong>
+            <span class="tag pri"><i></i>主方案</span>
+            <span class="sep"></span>
+            <div class="utabs" data-seg style="border-bottom:0"><button class="on" style="height:28px">指标</button><button style="height:28px">利用率</button><button style="height:28px">甘特图</button></div>
+            <span class="grow"></span>
+            <button class="btn btn-sec btn-sm">⬇ 导出</button>
+            <button class="btn btn-pri btn-sm">✦ AI 评审</button>
+          </div>
+          <div style="padding:14px 16px">
+            <div class="kpis" style="grid-template-columns:repeat(4,1fr)">
+              <div class="kpi" style="--kc:var(--pri)"><span class="l">总延误</span><span class="v">126.5<small>h</small></span><span class="f"><span class="dlt up">↓ 42.3</span>vs 基线</span></div>
+              <div class="kpi" style="--kc:var(--ok)"><span class="l">总周期</span><span class="v">512<small>h</small></span><span class="f"><span class="dlt up">↓ 18.0</span>vs 基线</span></div>
+              <div class="kpi" style="--kc:var(--in)"><span class="l">利用率</span><span class="v">78.4<small>%</small></span><span class="f"><span class="dlt fl">持平</span></span></div>
+              <div class="kpi" style="--kc:var(--wn)"><span class="l">最大延误</span><span class="v">22.1<small>h</small></span><span class="f"><span class="dlt dn">↑ 1.2</span>vs Pareto-07</span></div>
+            </div>
+            <div class="canvas-mock" style="margin-top:14px;border:1px solid var(--ln);border-radius:var(--r2)"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp" style="margin-top:22px">
+        <div class="grp-t">AI 抽屉 .dwr（右滑出 · 内嵌演示）</div>
+        <div class="frm fixed-demo" style="height:330px;padding:0;overflow:hidden">
+          <div class="dwr">
+            <div class="dh"><h4>✦ AI 评审 · Pareto-03</h4><button class="btn-icon" title="关闭">×</button></div>
+            <div class="db"><div class="cht">
+              <div class="bbl ai"><b>AI · 启发式回退</b>Pareto-03 总延误最优，但 CNC 利用率 91% 存在瓶颈风险；若重视稳健性，Pareto-07 更均衡。</div>
+              <div class="bbl me"><b>我</b>优先保 ORD-0117 交期呢？</div>
+              <div class="bbl ai"><b>AI</b>建议 Pareto-07：该订单提前 6.5h 完成，且避开 CNC 高峰窗口。</div>
+            </div></div>
+            <div class="df">
+              <div class="row" style="gap:6px;margin-bottom:8px"><button class="tag pri" style="height:22px;cursor:pointer;border:none">比较已勾选</button><button class="tag pri" style="height:22px;cursor:pointer;border:none">按诉求推荐</button></div>
+              <div style="display:flex;gap:8px"><input class="inp" placeholder="继续追问…" style="height:32px"><button class="btn btn-pri" style="height:32px">发送</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== MODULE: MISC ======== -->
+    <section class="sec" id="mod-misc">
+      <h2>13 · 上传 / 导出 / 工具条 / 对话</h2>
+      <div class="grp g2">
+        <div class="upld">
+          <div class="uic">⬆</div>
+          <h4>拖入 Excel，或点击选择文件</h4>
+          <p>支持 .xlsx / .xls / .xlsm · 至少包含 planning_context 与 orders</p>
+          <button class="btn btn-pri">选择 Excel</button>
+          <button class="btn btn-ghost" style="margin-left:8px">下载模板</button>
+        </div>
+        <div style="display:grid;gap:10px">
+          <div class="xit hot"><div class="xic g">★</div><div><h4>导出「Pareto-03」方案 Excel</h4><p>主方案 · 总延误 126.5h · 版本 v0806</p></div><button class="btn btn-pri btn-sm">导出方案</button></div>
+          <div class="xit"><div class="xic">⬇</div><div><h4>导出当前实例 CSV</h4><p>全部 9 个 Sheet 的压缩包</p></div><button class="btn btn-sec btn-sm">导出 CSV</button></div>
+          <div class="xit"><div class="xic a">✓</div><div><h4>导出校验结果 Excel</h4><p>1,924 通过 · 17 警告 · 0 错误</p></div><button class="btn btn-sec btn-sm">导出校验</button></div>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">画布工具条 .tbar（甘特 / 图谱通用）</div>
+        <div class="card"><div class="card-b flush">
+          <div class="tbar">
+            <div class="seg" data-seg><button class="on">焦点邻域</button><button>全关系</button></div>
+            <span class="sep"></span>
+            <span class="fl">订单</span><select class="sel" style="width:170px"><option>ORD-2026-0117</option></select>
+            <span class="fl">状态</span><select class="sel" style="width:110px"><option>全部</option><option>进行中</option></select>
+            <span class="grow"></span>
+            <span class="fl num">命中 1,824 条</span>
+            <button class="btn-icon" title="刷新">⟳</button>
+          </div>
+          <div class="canvas-mock"></div>
+          <div class="pager"><span>第 1 / 3 页 · 40 行/页</span><button class="btn btn-sec btn-sm">上一页</button><button class="btn btn-sec btn-sm">下一页</button></div>
+        </div></div>
+      </div>
+      <div class="grp">
+        <div class="grp-t">对话气泡（独立卡片场景）</div>
+        <div class="card" style="max-width:620px"><div class="card-b">
+          <div class="cht">
+            <div class="bbl ai"><b>AI 评审 · 大模型</b>三个候选中 Pareto-03 总延误最优（126.5h，↓25%），但 CNC 类机器利用率 91% 存在瓶颈风险。</div>
+            <div class="bbl me"><b>我</b>和 Pareto-07 比呢？</div>
+            <div class="bbl ai"><b>AI 评审</b>Pareto-07 均衡性更好：最大延误低 1.2h，利用率高 1.7pt，且换模次数少 3 次。</div>
+          </div>
+        </div></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+// 主题切换（暗色仅切 token）
+document.getElementById('theme-btn').addEventListener('click', function () {
+  var r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === 'dark' ? '' : 'dark';
+});
+// 分段/下划线 Tab 切换演示
+document.querySelectorAll('[data-seg]').forEach(function (seg) {
+  seg.querySelectorAll('button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      seg.querySelectorAll('button').forEach(function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
+    });
+  });
+});
+// 筛选 chip / 目标勾选 / 列表选中 演示
+document.querySelectorAll('.flt').forEach(function (c) { c.addEventListener('click', function () { c.classList.toggle('on'); }); });
+document.querySelectorAll('.pick').forEach(function (c) { c.addEventListener('click', function () { c.classList.toggle('on'); }); });
+document.querySelectorAll('.lst .li').forEach(function (li) {
+  li.addEventListener('click', function () {
+    li.parentElement.querySelectorAll('.li').forEach(function (x) { x.classList.remove('on'); });
+    li.classList.add('on');
+  });
+});
+document.querySelectorAll('.rpick label').forEach(function (l) {
+  l.addEventListener('click', function () {
+    l.parentElement.querySelectorAll('label').forEach(function (x) { x.classList.remove('on'); });
+    l.classList.add('on');
+  });
+});
+</script>
+</body>
+</html>
