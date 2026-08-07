@@ -12,3 +12,4 @@ server.log
 .workbuddy/
 .worktrees/
 .superpowers/
+.playwright-cli/
